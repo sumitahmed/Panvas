@@ -336,6 +336,7 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
     try {
       await v2SyncRunner.whenIdle();
       assertCurrent();
+      googleDriveProvider.clearCaches();
       const connection = await googleDriveProvider.connect();
       const localIds = await localWorkspaceIds();
       assertCurrent();
@@ -347,6 +348,8 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
           lastSyncedByProvider: { ...state.lastSyncedByProvider, googledrive: lastSuccess(connection) },
           statusByProvider: { ...state.statusByProvider, googledrive: 'connected' },
           workspaceStatusById: { ...state.workspaceStatusById, ...Object.fromEntries(localIds.map(id => [id, 'connected'])) },
+          lastError: null,
+          lastDiagnostic: null,
         }));
         void get().triggerSync();
         return true;
@@ -371,6 +374,7 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
           ...Object.fromEntries(migrationWorkspaceIds.map(id => [id, 'account-migration-required'])),
         },
         lastError: migrationWorkspaceIds.length > 0 ? publicCloudMessage('account-migration-required') : null,
+        lastDiagnostic: null,
       }));
       void get().triggerSync();
       return true;

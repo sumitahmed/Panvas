@@ -269,7 +269,7 @@ function Hero({ onOpenWorkspace }: { onOpenWorkspace: () => void }) {
             <a className="pl-button pl-button-primary" href={PANVAS_RELEASE.windows.downloadUrl}><Download aria-hidden="true" /> Windows</a>
             <button type="button" className="pl-button pl-button-secondary" onClick={onOpenWorkspace}>Explore Panvas <ArrowRight aria-hidden="true" /></button>
           </div>
-          <span className="pl-hero-availability">Panvas v0.1.1 · Windows 64-bit &amp; Browser Build</span>
+          <span className="pl-hero-availability">Panvas v0.1.2 · Windows 64-bit &amp; Browser Build</span>
         </div>
         <div className="pl-hero-art">
           <SketchNote className="pl-hero-note">a place for the way you think <span aria-hidden="true">✧</span></SketchNote>
@@ -522,7 +522,7 @@ function Distribution({ onOpenWorkspace }: { onOpenWorkspace: () => void }) {
             <a className="pl-button pl-button-primary" href={PANVAS_RELEASE.windows.downloadUrl} target="_blank" rel="noreferrer" onClick={() => captureEvent('cta_click', { placement: 'download_windows' })}>
               View release candidates <Download aria-hidden="true" />
             </a>
-            <dl><div><dt>Architecture</dt><dd>x64</dd></div><div><dt>System</dt><dd>Windows 10 / 11</dd></div><div><dt>Status</dt><dd>v0.1.1 Release</dd></div></dl>
+            <dl><div><dt>Architecture</dt><dd>x64</dd></div><div><dt>System</dt><dd>Windows 10 / 11</dd></div><div><dt>Status</dt><dd>v0.1.2 Release</dd></div></dl>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'flex-start' }}>
               <a className="pl-button pl-button-primary" href={PANVAS_RELEASE.windows.downloadUrl} target="_blank" rel="noreferrer" onClick={() => captureEvent('cta_click', { placement: 'download_windows' })}>
                 Download Installer (.exe) <Download aria-hidden="true" />

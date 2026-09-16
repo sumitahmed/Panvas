@@ -4,7 +4,7 @@ export type CloudErrorCode = 'configuration' | 'connection' | 'offline' | 'auth-
 
 const PUBLIC_MESSAGES: Record<CloudErrorCode, string> = {
   configuration: 'Google Drive needs to be reconnected.',
-  connection: 'Google Drive needs to be reconnected.',
+  connection: "Couldn't connect to Google Drive. Please try again.",
   offline: "You're offline. Changes will sync when you're back online.",
   'auth-expired': 'Google Drive needs to be reconnected.',
   'rate-limited': "Google Drive is busy. We'll retry when you ask us to sync again.",

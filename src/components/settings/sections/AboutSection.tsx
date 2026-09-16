@@ -9,7 +9,7 @@ import { PANVAS_LOGO_SRC } from '@/lib/brand';
 
 export function AboutSection() {
   const { user } = useAuthStore();
-  const version = '0.1.1';
+  const version = '0.1.2';
   const build = '12345'; // Ideally injected via env
   const mode = user ? 'Cloud Mode' : 'Local Mode';
 

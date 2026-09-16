@@ -45,6 +45,7 @@ export interface GoogleAuthServiceOptions {
   fetchFn?: typeof fetch;
   clientId?: string;
   clientSecret?: string;
+  openExternal?: (url: string) => Promise<void>;
 }
 
 export class GoogleAuthDiagnosticError extends Error {
@@ -98,10 +99,12 @@ export class GoogleAuthService {
   private revokeEndpoint: string;
   private userinfoEndpoint: string;
   private fetchFn: typeof fetch;
+  private openExternal?: (url: string) => Promise<void>;
   private defaultClientId?: string;
   private defaultClientSecret?: string;
   private tokenOperation: Promise<void> = Promise.resolve();
   private tokenGeneration = 0;
+  private activeAuthServer: { close: () => void; port?: number } | null = null;
 
   constructor(options: GoogleAuthServiceOptions = {}) {
     this.tokenFilePath = options.tokenFilePath || '';
@@ -110,6 +113,7 @@ export class GoogleAuthService {
     this.revokeEndpoint = options.revokeEndpoint || GOOGLE_REVOKE_ENDPOINT;
     this.userinfoEndpoint = options.userinfoEndpoint || GOOGLE_USERINFO_ENDPOINT;
     this.fetchFn = options.fetchFn || globalThis.fetch.bind(globalThis);
+    this.openExternal = options.openExternal;
     this.defaultClientId = options.clientId;
     this.defaultClientSecret = options.clientSecret;
   }
@@ -147,6 +151,20 @@ export class GoogleAuthService {
    * Starts the Google OAuth 2.0 PKCE flow on the system browser via loopback server.
    */
   async startAuthFlow(customClientId?: string, customClientSecret?: string): Promise<ProviderConnectionInfo> {
+    // If a previous auth loopback server is still active, close it cleanly
+    if (this.activeAuthServer) {
+      try {
+        this.activeAuthServer.close();
+      } catch {
+        // Ignore close error on superseded server
+      }
+      this.activeAuthServer = null;
+    }
+
+    // Invalidate any earlier in-flight auth callbacks
+    this.tokenGeneration += 1;
+    const authGeneration = this.tokenGeneration;
+
     const clientId = this.resolveClientId(customClientId);
     const clientSecret = this.resolveClientSecret(customClientSecret);
 
@@ -158,7 +176,6 @@ export class GoogleAuthService {
     const codeChallenge = generateCodeChallenge(codeVerifier);
     const state = generateRandomString(24);
 
-    const authGeneration = this.tokenGeneration;
     return new Promise((resolve, reject) => {
       let resolved = false;
 
@@ -221,14 +238,19 @@ export class GoogleAuthService {
           // Fetch user info for UI presentation
           const userInfo = await this.fetchUserInfo(tokens.access_token);
 
+          // Check if an existing connection exists for this account so we can preserve refresh_token if Google omitted it
+          const existing = await this.readStoredTokens();
+          const isSameAccount = Boolean(existing && existing.accountIdentifier === userInfo.id);
+          const refreshToken = tokens.refresh_token || (isSameAccount && existing ? existing.refreshToken : '');
+
           const storedData: StoredTokens = {
             accessToken: tokens.access_token,
-            refreshToken: tokens.refresh_token || '',
+            refreshToken,
             expiresAt: Date.now() + tokens.expires_in * 1000,
             accountIdentifier: userInfo.id,
-            displayName: userInfo.name,
-            email: userInfo.email,
-            connectedAt: Date.now(),
+            displayName: userInfo.name || existing?.displayName,
+            email: userInfo.email || existing?.email,
+            connectedAt: isSameAccount && existing ? existing.connectedAt : Date.now(),
           };
 
           await this.withTokenOperation(async () => {
@@ -276,23 +298,16 @@ export class GoogleAuthService {
 
         port = address.port;
         const redirectUri = `http://127.0.0.1:${port}/oauth2callback`;
+        const authUrl = this.buildAuthUrl({ clientId, redirectUri, state, codeChallenge });
+        activeServerHandle.port = port;
 
-        const authParams = new URLSearchParams({
-          client_id: clientId,
-          redirect_uri: redirectUri,
-          response_type: 'code',
-          scope: SCOPES,
-          code_challenge: codeChallenge,
-          code_challenge_method: 'S256',
-          state,
-          access_type: 'offline',
-          prompt: 'consent',
-        });
-
-        const authUrl = `${this.authEndpoint}?${authParams.toString()}`;
-        const electron = await getElectronModule();
-        if (electron?.shell?.openExternal) {
-          void electron.shell.openExternal(authUrl);
+        if (this.openExternal) {
+          void this.openExternal(authUrl);
+        } else {
+          const electron = await getElectronModule();
+          if (electron?.shell?.openExternal) {
+            void electron.shell.openExternal(authUrl);
+          }
         }
       });
 
@@ -306,13 +321,38 @@ export class GoogleAuthService {
 
       const cleanup = () => {
         clearTimeout(timeout);
+        if (this.activeAuthServer === activeServerHandle) {
+          this.activeAuthServer = null;
+        }
         try {
           server.close();
         } catch {
           // ignore close errors
         }
+        if (!resolved) {
+          resolved = true;
+          reject(new GoogleAuthDiagnosticError({ stage: 'authorization', reason: 'cancelled' }));
+        }
       };
+
+      const activeServerHandle: { close: () => void; port?: number } = { close: cleanup };
+      this.activeAuthServer = activeServerHandle;
     });
+  }
+
+  buildAuthUrl(input: { clientId: string; redirectUri: string; state: string; codeChallenge: string }): string {
+    const authParams = new URLSearchParams({
+      client_id: input.clientId,
+      redirect_uri: input.redirectUri,
+      response_type: 'code',
+      scope: SCOPES,
+      code_challenge: input.codeChallenge,
+      code_challenge_method: 'S256',
+      state: input.state,
+      access_type: 'offline',
+      prompt: 'consent select_account',
+    });
+    return `${this.authEndpoint}?${authParams.toString()}`;
   }
 
   /**

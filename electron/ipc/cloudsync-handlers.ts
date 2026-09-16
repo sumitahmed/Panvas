@@ -64,6 +64,7 @@ export function registerCloudSyncHandlers(registrar: IpcHandleRegistrar) {
         resetDriveProvider();
         return { success: true, connection };
       } catch (error) {
+        resetDriveProvider();
         const diagnostic = error instanceof GoogleAuthDiagnosticError
           ? { provider: 'googledrive', stage: error.stage, status: error.status, reason: error.reason, retryable: error.status === 408 || error.status === 429 || Boolean(error.status && error.status >= 500) }
           : { provider: 'googledrive', stage: 'authorization', reason: (error as Error)?.name || 'unknown', retryable: false };

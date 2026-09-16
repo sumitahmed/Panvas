@@ -47,7 +47,13 @@ async function fetchAccount(accessToken: string): Promise<{ id: string; email?: 
   return { id: String(id), email: value.user?.emailAddress, name: value.user?.displayName };
 }
 
-export function requestBrowserGoogleAccessToken(clientId: string, oauth2: any = (globalThis as any).google?.accounts?.oauth2): Promise<any> {
+const BROWSER_CONNECTION_STORAGE_KEY = 'panvas_browser_google_connection';
+
+export function requestBrowserGoogleAccessToken(
+  clientId: string,
+  oauth2: any = (globalThis as any).google?.accounts?.oauth2,
+  options?: { prompt?: string },
+): Promise<any> {
   if (!oauth2?.initTokenClient) {
     return Promise.reject(new CloudOperationError('connection', { stage: 'gis_load', reason: 'oauth2_unavailable', retryable: true }));
   }
@@ -62,21 +68,36 @@ export function requestBrowserGoogleAccessToken(clientId: string, oauth2: any = 
         },
         error_callback: () => reject(new CloudOperationError('connection', { stage: 'gis_popup', reason: 'popup_failed', retryable: true })),
       });
-      tokenClient.requestAccessToken();
+      tokenClient.requestAccessToken(options?.prompt ? { prompt: options.prompt } : undefined);
     } catch {
       reject(new CloudOperationError('connection', { stage: 'gis_token', reason: 'token_request_failed', retryable: true }));
     }
   });
 }
 
-export async function connectBrowserGoogle(): Promise<ProviderConnectionInfo> {
+export async function connectBrowserGoogle(options?: { prompt?: string }): Promise<ProviderConnectionInfo> {
   const clientId = webClientId();
   if (!clientId) throw new CloudOperationError('configuration', { stage: 'configuration', reason: 'missing_web_client_id', retryable: false });
   await preloadGis();
-  const tokenResponse = await requestBrowserGoogleAccessToken(clientId);
+  const tokenResponse = await requestBrowserGoogleAccessToken(clientId, undefined, { prompt: options?.prompt ?? 'consent select_account' });
   const account = await fetchAccount(tokenResponse.access_token);
-  const connection: ProviderConnectionInfo = { provider: 'googledrive', accountIdentifier: account.id, displayName: account.name, email: account.email, connectedAt: Date.now() };
+  const previous = getBrowserGoogleConnection();
+  const isSame = previous?.accountIdentifier === account.id;
+  const connection: ProviderConnectionInfo = {
+    provider: 'googledrive',
+    accountIdentifier: account.id,
+    displayName: account.name || (isSame ? previous?.displayName : undefined),
+    email: account.email || (isSame ? previous?.email : undefined),
+    connectedAt: isSame && previous ? previous.connectedAt : Date.now(),
+  };
   current = { accessToken: tokenResponse.access_token, expiresAt: Date.now() + Math.max(60, Number(tokenResponse.expires_in ?? 3600) - 60) * 1000, connection };
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(BROWSER_CONNECTION_STORAGE_KEY, JSON.stringify(connection));
+    }
+  } catch {
+    // Local storage may be restricted in private browsing
+  }
   return connection;
 }
 
@@ -90,33 +111,63 @@ export async function getBrowserGoogleToken(): Promise<string | null> {
 /** Re-authorize an access token after Drive rejects it. GIS browser tokens
  * remain memory-only, and the established account must not change silently. */
 export async function refreshBrowserGoogleToken(): Promise<string | null> {
-  const previous = current?.connection;
+  const previous = getBrowserGoogleConnection();
   const clientId = webClientId();
   if (!previous || !clientId) return null;
   try {
     await preloadGis();
     const tokenResponse = await requestBrowserGoogleAccessToken(clientId);
     const account = await fetchAccount(tokenResponse.access_token);
-    if (current?.connection !== previous) return null;
     const sameAccount = account.id === previous.accountIdentifier
       || Boolean(previous.email && account.email && previous.email.toLowerCase() === account.email.toLowerCase());
     if (!sameAccount) return null;
+    const connection: ProviderConnectionInfo = {
+      ...previous,
+      accountIdentifier: account.id,
+      displayName: account.name ?? previous.displayName,
+      email: account.email ?? previous.email,
+    };
     current = {
       accessToken: tokenResponse.access_token,
       expiresAt: Date.now() + Math.max(60, Number(tokenResponse.expires_in ?? 3600) - 60) * 1000,
-      connection: { ...previous, accountIdentifier: account.id, displayName: account.name ?? previous.displayName, email: account.email ?? previous.email },
+      connection,
     };
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(BROWSER_CONNECTION_STORAGE_KEY, JSON.stringify(connection));
+      }
+    } catch {
+      // Local storage unavailable
+    }
     return current.accessToken;
   } catch {
     return null;
   }
 }
 
-export function getBrowserGoogleConnection(): ProviderConnectionInfo | null { return current?.connection ?? null; }
+export function getBrowserGoogleConnection(): ProviderConnectionInfo | null {
+  if (current?.connection) return current.connection;
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const raw = localStorage.getItem(BROWSER_CONNECTION_STORAGE_KEY);
+      if (raw) return JSON.parse(raw) as ProviderConnectionInfo;
+    }
+  } catch {
+    // Local storage unavailable or malformed
+  }
+  return null;
+}
 
 export async function disconnectBrowserGoogle(): Promise<void> {
   const token = current?.accessToken;
   current = null;
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(BROWSER_CONNECTION_STORAGE_KEY);
+    }
+  } catch {
+    // Local storage unavailable
+  }
   if (token && (globalThis as any).google?.accounts?.oauth2?.revoke) {
     await new Promise<void>(resolve => (globalThis as any).google.accounts.oauth2.revoke(token, () => resolve()));
   }

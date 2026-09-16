@@ -73,6 +73,7 @@ export function CloudSyncPanel() {
   } = useCloudSyncStore();
 
   const showToast = useUIStore(state => state.showToast);
+  const clearToast = useUIStore(state => state.clearToast);
   const cloudSyncReviewRequested = useUIStore(state => state.cloudSyncReviewRequested);
   const clearCloudSyncReviewRequest = useUIStore(state => state.clearCloudSyncReviewRequest);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -126,9 +127,11 @@ export function CloudSyncPanel() {
     setIsConnecting(true);
     try {
       const success = await requestConnect('googledrive');
-      if (!success) {
+      if (success) {
+        clearToast();
+      } else {
         const err = useCloudSyncStore.getState().lastError;
-        showToast(err || 'Google Drive needs to be reconnected.', 'error');
+        showToast(err || "Google Drive couldn't be connected. Please try again.", 'error');
       }
     } finally {
       setIsConnecting(false);

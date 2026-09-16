@@ -542,16 +542,33 @@ export class GoogleDriveSyncProvider implements CloudSyncProvider {
   }
   private etag(file: DriveFile): string { return file.md5Checksum || file.version || file.modifiedTime || file.id; }
   private adoptConnection(connection: ProviderConnectionInfo): void {
+    this.clearCaches();
     if (typeof localStorage === 'undefined') return;
     const priorAccount = localStorage.getItem('panvas_gdrive_account_id');
     if (priorAccount !== connection.accountIdentifier) {
-      this.clearCaches();
       for (const key of ['panvas_gdrive_root_id', 'panvas_gdrive_objects_id', 'panvas_gdrive_workspaces_id']) localStorage.removeItem(key);
     }
     localStorage.setItem('panvas_gdrive_account_id', connection.accountIdentifier);
   }
 
-  private clearCaches(): void { this.rootFolderId = null; this.objectsFolderId = null; this.workspacesFolderId = null; this.workspaceFolders.clear(); this.folderPromises.clear(); this.creationIds.clear(); this.manifestFiles.clear(); this.missingManifests.clear(); this.objectFiles.clear(); this.rootJsonFiles.clear(); this.workspaceJsonFiles.clear(); this.objectIndexPromise = null; this.objectIndexLoaded = false; }
+  clearCaches(): void {
+    this.validTokenPromise = null;
+    this.tokenRefreshPromise = null;
+    this.rootPromise = null;
+    this.rootFolderId = null;
+    this.objectsFolderId = null;
+    this.workspacesFolderId = null;
+    this.workspaceFolders.clear();
+    this.folderPromises.clear();
+    this.creationIds.clear();
+    this.manifestFiles.clear();
+    this.missingManifests.clear();
+    this.objectFiles.clear();
+    this.rootJsonFiles.clear();
+    this.workspaceJsonFiles.clear();
+    this.objectIndexPromise = null;
+    this.objectIndexLoaded = false;
+  }
 
   private retryDelay(response: Response, attempt: number): number {
     const retryAfter = response.headers.get('Retry-After');
