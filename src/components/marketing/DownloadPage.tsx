@@ -20,7 +20,7 @@ export function DownloadPage() {
       label="Release / Download"
       title="Download Panvas for Windows."
       intro="Experience a local-first digital research workspace. Your data lives on your disk in human-readable files."
-      aside={<>VERSION 0.1.0<br />Windows x64 NSIS<br />Release Build</>}
+      aside={<>VERSION 0.1.1<br />Windows x64 NSIS<br />Release Build</>}
     >
       <PublicDocument>
         <section>
@@ -141,7 +141,7 @@ export function DownloadPage() {
             }}>
               <ShieldAlert size={20} style={{ flexShrink: 0, marginTop: '2px' }} aria-hidden="true" />
               <div style={{ fontSize: '0.9rem', lineHeight: 1.5 }}>
-                <strong>Unsigned Binary Advisory:</strong> Panvas v0.1.0 is currently unsigned while the official Authenticode certificate pipeline is being established. Windows SmartScreen may display a warning stating <em>"Windows protected your PC"</em>.
+                <strong>Unsigned Binary Advisory:</strong> Panvas v0.1.1 is currently unsigned while the official Authenticode certificate pipeline is being established. Windows SmartScreen may display a warning stating <em>"Windows protected your PC"</em>.
               </div>
             </div>
             <p>
@@ -150,7 +150,7 @@ export function DownloadPage() {
             <ol>
               <li>Click <strong>"More info"</strong> on the Windows SmartScreen dialog.</li>
               <li>Click <strong>"Run anyway"</strong> to proceed with installation.</li>
-              <li>To verify binary integrity beforehand, run <code>Get-FileHash Panvas-0.1.0-Setup.exe -Algorithm SHA256</code> in PowerShell and compare the hash with the verified checksum published above.</li>
+              <li>To verify binary integrity beforehand, run <code>Get-FileHash Panvas-0.1.1-Setup.exe -Algorithm SHA256</code> in PowerShell and compare the hash with the verified checksum published above.</li>
             </ol>
           </div>
         </section>

@@ -54,7 +54,7 @@ export function Footer() {
               </span>
             </Link>
             <span className="text-[11px] font-medium text-[#737373] bg-white/4 border border-white/6 w-fit px-2 py-0.5 rounded mb-4">
-              v0.1.0
+              v0.1.1
             </span>
             <p className="text-sm text-[#737373] leading-relaxed mb-1 max-w-xs">
               A Visual Research Workspace

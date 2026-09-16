@@ -61,7 +61,7 @@ export function StatusBar() {
           </span>
         )}
         <span role="status" aria-label="Connectivity" className="text-panvas-text-tertiary">{cloudPresentation.connectivityLabel}</span>
-        <span className="opacity-50">v0.1.0</span>
+        <span className="opacity-50">v0.1.1</span>
       </div>
     </div>
   );

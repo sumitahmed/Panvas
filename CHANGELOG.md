@@ -2,6 +2,23 @@
 
 All notable Panvas changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-09-16
+
+Production hotfix restoring Ink mode aesthetic fidelity and adding compact navigation page and section management.
+
+### Fixed
+
+- **Ink Mode Visual Contrast**: Restored warm, slightly desaturated appearance (`#F7F4EB` / `247 244 235`) for Ink mode by resetting `:root` Light mode tokens back to neutral white (`#FFFFFF`). Ink mode now has its intended distinct warm-paper look while Light mode remains crisp white.
+- **User Content Preservation**: Verified complete isolation of canvas handwriting strokes, highlighter lines, pen swatches, page templates (such as yellow legal pad and dark paper), PDF annotations, and images from UI theme variables.
+
+### Added
+
+- **Compact Navigation Management**: When the 3-column navigation panel is collapsed, the top breadcrumb dropdowns for sections and pages now provide full management capabilities:
+  - Inline renaming with Enter to commit, Escape to cancel, and dedicated save/cancel buttons.
+  - Context action menus (`...`) with Rename, Move Up, Move Down, and Delete actions.
+  - Direct "+ Add Page" and "+ Add Section" actions in dropdown headers.
+  - Real-time synchronization with workspace persistence without page reload, entity ID regeneration, or data loss.
+
 ## [0.1.0] - 2026-09-14
 
 Initial public release of the local-first visual workspace.

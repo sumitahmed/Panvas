@@ -30,6 +30,28 @@
     --accent-rose: 193 67 83;
     --glass-bg: 255 255 253;
     --glass-border: 218 214 205;
+    /* LIGHT — clean paper and crisp neutral chrome. */
+    --bg-primary: 255 255 255;
+    --bg-secondary: 248 249 250;
+    --bg-tertiary: 241 243 245;
+    --bg-elevated: 255 255 255;
+    --bg-hover: 241 243 245;
+    --bg-active: 233 236 239;
+    --border-subtle: 229 232 235;
+    --border-default: 213 217 222;
+    --border-strong: 156 163 175;
+    --text-primary: 17 24 39;
+    --text-secondary: 75 85 99;
+    --text-tertiary: 107 114 128;
+    --text-accent: 17 24 39;
+    --accent-violet: 124 58 237;
+    --accent-violet-light: 139 92 246;
+    --accent-blue: 37 99 235;
+    --accent-emerald: 16 185 129;
+    --accent-amber: 217 119 6;
+    --accent-rose: 225 29 72;
+    --glass-bg: 255 255 255;
+    --glass-border: 229 232 235;
     --code-comment: #5b6472;
     --code-keyword: #5b21b6;
     --code-string: #047857;
@@ -124,6 +146,7 @@
     --accent-rose: 172 65 86;
     --glass-bg: 247 244 235;
     --glass-border: 60 50 40;
+    --glass-border: 215 205 186;
     --code-comment: #6b6259;
     --code-keyword: #6d3da1;
     --code-string: #2f7652;

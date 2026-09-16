@@ -60,7 +60,7 @@ test('Windows release metadata preserves Panvas user data and excludes developme
   const winTargets = build?.win?.target ?? [];
 
   assert.equal(manifest.name, 'panvas');
-  assert.equal(manifest.version, '0.1.0');
+  assert.equal(manifest.version, '0.1.1');
   assert.equal(build?.appId, 'com.panvas.app');
   assert.equal(build?.productName, 'Panvas');
   assert.equal(build?.win?.artifactName, '${productName}-${version}-Setup.${ext}');
