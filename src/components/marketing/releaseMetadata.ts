@@ -70,8 +70,6 @@ export const PANVAS_RELEASE = {
     downloadUrl: 'https://github.com/sumitahmed/Panvas/releases/download/v0.1.1/Panvas-0.1.1-Setup.exe',
     releaseNotesUrl: 'https://github.com/sumitahmed/Panvas/releases/tag/v0.1.1',
     checksumUrl: 'https://github.com/sumitahmed/Panvas/releases/download/v0.1.1/SHA256SUMS.txt',
-    checksumSha256: '9d4cfcded4e3b76d8880ab4948901de0c56e2595dc793b5eb2433c4430158edd',
-    installerSize: '261,279,635 bytes',
     checksumSha256: '7c158949c74465bffd8c4f2ca9c753e05dd2401a83427c96b936a0fa2d6d207d',
     installerSize: '265,322,528 bytes',
     checksumVerificationNote: 'Verify the installer against the official SHA-256 checksum published on the GitHub Releases page.',
