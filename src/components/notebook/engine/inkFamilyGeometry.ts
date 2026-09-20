@@ -11,6 +11,18 @@ const strategies: Record<InkFamily, (sample: Sample) => number> = {
   felt: s => Math.max(3, s.thickness * 2.5),
 };
 export const INK_FAMILIES = ['ballpoint', 'fountain', 'brush', 'felt'] as const;
+/** Shared by full rendering and incremental wet ink; no trajectory filtering. */
+export function inkWidthAt(family: InkFamily, sample: Sample): number {
+  return Math.max(0.3, strategies[family](sample));
+}
+/** Conservative broad-phase width, evaluated at each strategy's maximum input.
+ * Includes dotted fountain marks; no per-sample trigonometry is needed. */
+export function getInkFamilyMaximumHalfWidth(stroke: Stroke): number {
+  if (!stroke.inkFamily) return 0;
+  const distance = Math.max(1, stroke.thickness * 4);
+  return Math.max(.3, strategies[stroke.inkFamily]({pressure:1,direction:Math.PI/2,
+    distance,length:distance*2,thickness:stroke.thickness})) / 2;
+}
 export function inkSampleWidths(stroke: Stroke, points = stroke.points): number[] {
   const family = stroke.inkFamily;
   if (!family) return points.map(() => stroke.thickness);

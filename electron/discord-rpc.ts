@@ -127,6 +127,11 @@ export class DiscordPresenceService {
     this.logger = options.logger;
 
     this.log(`RPC initialized (Application ID: ${this.clientId}, Asset Key: ${this.assetKey})`);
+    this.logVerbose(`RPC initialized (Application ID: ${this.clientId}, Asset Key: ${this.assetKey})`);
+  }
+
+  private isVerbose(): boolean {
+    return Boolean(process.env.PANVAS_DEBUG_RPC === 'true');
   }
 
   private log(message: string, ...args: unknown[]): void {
@@ -134,6 +139,15 @@ export class DiscordPresenceService {
     if (this.logger) {
       this.logger('log', message, ...args);
     } else {
+      console.log(`[Discord RPC] ${message}`, ...args);
+    }
+  }
+
+  private logVerbose(message: string, ...args: unknown[]): void {
+    if (!this.debugLogs) return;
+    if (this.logger) {
+      this.logger('log', message, ...args);
+    } else if (this.isVerbose()) {
       console.log(`[Discord RPC] ${message}`, ...args);
     }
   }
@@ -163,6 +177,7 @@ export class DiscordPresenceService {
   public start(): void {
     if (this.isDestroyed || this.isConnected || this.isConnecting) return;
     this.log('Starting Discord Rich Presence service...');
+    this.logVerbose('Starting Discord Rich Presence service...');
     void this.tryConnect();
   }
 
@@ -261,6 +276,7 @@ export class DiscordPresenceService {
     if (this.isDestroyed || this.isConnected || this.isConnecting) return;
     this.isConnecting = true;
     this.log('Connecting to local Discord IPC...');
+    this.logVerbose('Connecting to local Discord IPC...');
 
     try {
       const socket = await this.findAndConnectPipe();
@@ -287,6 +303,10 @@ export class DiscordPresenceService {
     this.isConnected = true;
     this.buffer = Buffer.alloc(0);
     this.log('Connected to Discord IPC named pipe successfully.');
+    this.logVerbose('Connected to Discord IPC named pipe successfully.');
+    if (!this.logger && this.debugLogs && !this.isVerbose()) {
+      console.log('[Discord RPC] Connected');
+    }
 
     socket.on('data', (chunk: Buffer) => {
       if (this.socket !== socket) return;
@@ -318,6 +338,7 @@ export class DiscordPresenceService {
     socket.on('close', () => {
       if (this.socket !== socket) return;
       this.log('Discord IPC socket closed.');
+      this.logVerbose('Discord IPC socket closed.');
       this.handleSocketTermination();
     });
 
@@ -350,6 +371,7 @@ export class DiscordPresenceService {
 
     if (wasConnected) {
       this.log('Discord IPC connection terminated.');
+      this.logVerbose('Discord IPC connection terminated.');
     }
 
     if (!this.isDestroyed) {
@@ -361,6 +383,7 @@ export class DiscordPresenceService {
     if (this.isDestroyed || this.reconnectTimer) return;
     const delay = Math.min(this.reconnectIntervalMs * 2 ** Math.min(this.retryAttempts++, 8), 300_000);
     this.log(`Retrying Discord IPC in ${Math.round(delay / 1000)}s.`);
+    this.logVerbose(`Retrying Discord IPC in ${Math.round(delay / 1000)}s.`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       void this.tryConnect();
@@ -396,6 +419,7 @@ export class DiscordPresenceService {
     });
     if (sent) {
       this.log(`Handshake sent to Discord (client_id: ${this.clientId}).`);
+      this.logVerbose(`Handshake sent to Discord (client_id: ${this.clientId}).`);
     } else {
       this.logError(`Failed to send handshake to Discord.`);
       this.handleSocketTermination();
@@ -413,10 +437,10 @@ export class DiscordPresenceService {
     this.activityNonce = nonce;
     this.activityConfirmed = false;
     const payload = { cmd: 'SET_ACTIVITY', args: { pid: process.pid, activity }, nonce };
-    this.log(`Outgoing SET_ACTIVITY payload: ${JSON.stringify(payload)}`);
+    this.logVerbose(`Outgoing SET_ACTIVITY payload: ${JSON.stringify(payload)}`);
     const sent = this.sendFrame(1 /* FRAME */, payload);
     if (sent) {
-      this.log(
+      this.logVerbose(
         `Activity sent; awaiting Discord acknowledgment: "${activity.details}" (large_image: "${activity.assets.large_image}", large_text: "${activity.assets.large_text}").`
       );
     } else {
@@ -438,6 +462,7 @@ export class DiscordPresenceService {
     });
     if (sent) {
       this.log('Clear activity sent; acknowledgment not yet confirmed.');
+      this.logVerbose('Clear activity sent; acknowledgment not yet confirmed.');
     } else {
       this.logError('Failed to clear presence activity.');
     }
@@ -452,9 +477,11 @@ export class DiscordPresenceService {
           if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
           this.handshakeTimer = null;
           this.log('Discord IPC handshake confirmed (READY). Publishing Panvas presence activity...');
+          this.logVerbose('Discord IPC handshake confirmed (READY). Publishing Panvas presence activity...');
           this.sendActivity();
         } else if (data?.cmd === 'SET_ACTIVITY' && this.activityNonce !== null && data.nonce === this.activityNonce) {
           this.log(`Matching SET_ACTIVITY response: ${payloadBuf.toString('utf8')}`);
+          this.logVerbose(`Matching SET_ACTIVITY response: ${payloadBuf.toString('utf8')}`);
           this.activityNonce = null;
           if (data.evt === 'ERROR') {
             this.logError(`Activity publish rejected by Discord: code=${JSON.stringify(data.data?.code ?? null)}, message=${JSON.stringify(data.data?.message ?? null)}, payload=${JSON.stringify(data)}`);
@@ -462,6 +489,10 @@ export class DiscordPresenceService {
             this.activityConfirmed = true;
             this.retryAttempts = 0;
             this.log('Discord acknowledged SET_ACTIVITY; visibility in Discord UI is not verified.');
+            this.logVerbose('Discord acknowledged SET_ACTIVITY; visibility in Discord UI is not verified.');
+            if (!this.logger && this.debugLogs && !this.isVerbose()) {
+              console.log('[Discord RPC] Presence active');
+            }
           } else {
             this.logWarn(`Unexpected SET_ACTIVITY event; not acknowledged: ${JSON.stringify(data.evt)}`);
           }
@@ -489,6 +520,7 @@ export class DiscordPresenceService {
    */
   public destroy(): void {
     this.log('Destroying Discord Rich Presence service.');
+    this.logVerbose('Destroying Discord Rich Presence service.');
     this.isDestroyed = true;
     if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
     this.handshakeTimer = null;
@@ -524,6 +556,7 @@ let activeService: DiscordPresenceService | null = null;
 export function initDiscordRpc(options?: DiscordRpcOptions): DiscordPresenceService {
   if (activeService) {
     activeService['log']?.('initDiscordRpc: Reusing existing active service instance.');
+    activeService['logVerbose']?.('initDiscordRpc: Reusing existing active service instance.');
     return activeService;
   }
   activeService = new DiscordPresenceService(options);

@@ -377,6 +377,8 @@ class FakeDrawingEngine {
   }
   redraw(): void { this.redrawCount += 1; }
   renderLiveStroke(): void {}
+  commitLiveStroke(): void { this.redraw(); }
+  endLiveStroke(): void {}
   renderLasso(): void {}
 }
 
@@ -437,8 +439,11 @@ function createInputOwnershipHarness() {
   } as unknown as HTMLCanvasElement;
   input.attach(canvas);
 
+  let sampleTime = 0;
   const pointer = (phase: 'Down' | 'Move' | 'Up', x: number, y: number, shiftKey = false, buttons = phase === 'Up' ? 0 : 1) => {
     (input as any)[`handlePointer${phase}`]({
+      type: `pointer${phase.toLowerCase()}`,
+      timeStamp: ++sampleTime,
       button: 0,
       buttons,
       pointerId: 17,
@@ -479,7 +484,18 @@ test('lost Windows pointer-up cannot turn later pen hover into stray ink', () =>
   assert.deepEqual(harness.recognitionEvents, ['start', 'cancel', 'start', 'complete']);
 });
 
-test('Pen to Eraser to Pen keeps pointer ownership and handwriting recognition isolated', () => {
+test('Pen to Eraser to Pen keeps pointer ownership and handwriting recognition isolated', t => {
+  const previousRequest = Object.getOwnPropertyDescriptor(globalThis, 'requestAnimationFrame');
+  const previousCancel = Object.getOwnPropertyDescriptor(globalThis, 'cancelAnimationFrame');
+  // This test completes the gesture before its scheduled frame; pointerup drains it.
+  Object.defineProperty(globalThis, 'requestAnimationFrame', { configurable: true, value: () => 1 });
+  Object.defineProperty(globalThis, 'cancelAnimationFrame', { configurable: true, value: () => {} });
+  t.after(() => {
+    if (previousRequest) Object.defineProperty(globalThis, 'requestAnimationFrame', previousRequest);
+    else Reflect.deleteProperty(globalThis, 'requestAnimationFrame');
+    if (previousCancel) Object.defineProperty(globalThis, 'cancelAnimationFrame', previousCancel);
+    else Reflect.deleteProperty(globalThis, 'cancelAnimationFrame');
+  });
   const harness = createInputOwnershipHarness();
   harness.tools.setHandwritingToTextEnabled(true);
   harness.tools.setDrawingTool('pen');
@@ -543,7 +559,7 @@ test('Select click chooses handwriting after Pen without recognition interceptio
   assert.equal(harness.recognitionEvents.length, recognitionCount);
 });
 
-test('pixel eraser cuts its footprint without repainting original marker caps', () => {
+test('pixel eraser splits marker continuously, retains the original ID and restores exact history', () => {
   const original: Stroke = {
     id: 'source-marker', type: 'stroke', tool: 'marker', points: [point(0), point(100)],
     color: '#000', thickness: 10, opacity: 1, createdAt: 0,
@@ -556,11 +572,13 @@ test('pixel eraser cuts its footprint without repainting original marker caps', 
   eraser.startErasing('pixel');
   assert.equal(eraser.eraseAt(50, 20, 'pixel', 5, false), true);
   assert.equal(drawing.redrawCount, 0, 'batched samples must not redraw individually');
-  assert.equal(drawing.strokes.length, 1);
-  assert.deepEqual(drawing.strokes[0].points, original.points);
+  assert.equal(drawing.strokes.length, 2);
+  assert.equal(drawing.strokes[0].id, original.id);
+  assert.deepEqual(drawing.strokes[0].points[0], original.points[0]);
+  assert.deepEqual(drawing.strokes[1].points.at(-1), original.points.at(-1));
   const retained = structuredClone(drawing.strokes);
   assert.equal(regionIntersects(strokeRegion(drawing.strokes[0]), eraserCapsule({x:50,y:20},{x:50,y:20},1)), false);
-  assert.ok(regionIntersects(strokeRegion(drawing.strokes[0]), eraserCapsule({x:44,y:20},{x:44,y:20},.1)));
+  assert.ok(drawing.strokes.every(s => s.points.every(p => p.x <= 30 || p.x >= 70)));
 
   assert.equal(eraser.finishErasing(), true);
   assert.ok(historyCommand);
@@ -585,10 +603,10 @@ test('repeated pixel erasing replaces intermediate segments instead of persistin
   eraser.eraseAt(40, 20, 'pixel', 5, false);
   eraser.eraseAt(60, 20, 'pixel', 5, false);
 
-  assert.equal(drawing.strokes.length, 1);
-  assert.deepEqual(drawing.strokes[0].points, original.points);
-  for (const x of [40,60]) assert.equal(regionIntersects(strokeRegion(drawing.strokes[0]), eraserCapsule({x,y:20},{x,y:20},1)), false);
-  assert.ok(regionIntersects(strokeRegion(drawing.strokes[0]), eraserCapsule({x:50,y:20},{x:50,y:20},1)));
+  assert.equal(drawing.strokes.length, 3);
+  assert.equal(new Set(drawing.strokes.map(s => s.id)).size, 3);
+  for (const x of [40,60]) assert.equal(drawing.strokes.some(s => regionIntersects(strokeRegion(s), eraserCapsule({x,y:20},{x,y:20},.1))), false);
+  assert.ok(drawing.strokes.some(s => regionIntersects(strokeRegion(s), eraserCapsule({x:50,y:20},{x:50,y:20},1))));
 });
 
 test('highlighter-only eraser preserves ink and removes only intersecting highlights', () => {
@@ -1091,6 +1109,8 @@ function createRulerInputHarness(rulerEnabled: boolean, strokePattern: 'solid' |
     },
     redraw: () => { redraws += 1; },
     renderLiveStroke: () => {},
+    commitLiveStroke: () => { redraws++; },
+    endLiveStroke: () => {},
   };
   const history = {
     pushExecuted: (command: any) => { historyCommands.push(command); },
@@ -1119,8 +1139,11 @@ function createRulerInputHarness(rulerEnabled: boolean, strokePattern: 'solid' |
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 600 }),
   };
 
+  let sampleTime = 0;
   const pointer = (phase: 'Down' | 'Move' | 'Up', x: number, y: number) => {
     (input as any)[`handlePointer${phase}`]({
+      type: `pointer${phase.toLowerCase()}`,
+      timeStamp: ++sampleTime,
       button: 0,
       pointerId: 7,
       pointerType: 'mouse',
@@ -1381,6 +1404,8 @@ function createLaserInputHarness() {
     removeStroke: () => undefined,
     redraw: () => { redraws += 1; },
     renderLiveStroke: () => {},
+    commitLiveStroke: () => {},
+    endLiveStroke: () => {},
     renderLasso: () => {},
   };
   const input = new InputManager(

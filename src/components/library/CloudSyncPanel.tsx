@@ -124,6 +124,7 @@ export function CloudSyncPanel() {
   }, [gdStatus, loadReviewChanges, reviewItems.length]);
 
   const handleGoogleConnect = async () => {
+    clearToast();
     setIsConnecting(true);
     try {
       const success = await requestConnect('googledrive');

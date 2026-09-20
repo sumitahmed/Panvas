@@ -3,7 +3,14 @@ import react from '@vitejs/plugin-react';
 import electron from 'vite-plugin-electron/simple';
 import path from 'path';
 import { cpSync, createReadStream, existsSync, statSync } from 'node:fs';
+import dotenv from 'dotenv';
 import { applyDevelopmentBrowserCsp } from './src/config/browserCsp';
+
+dotenv.config();
+dotenv.config({ path: path.resolve(__dirname, '.env.local') });
+
+const googleClientId = process.env.PANVAS_GOOGLE_CLIENT_ID || '';
+const googleClientSecret = process.env.PANVAS_GOOGLE_CLIENT_SECRET || process.env.PANVAS_GOOGLE_SECRET || '';
 
 const excalidrawAssetsDir = path.resolve(__dirname, 'node_modules/@excalidraw/excalidraw/dist/excalidraw-assets');
 
@@ -58,6 +65,12 @@ export default defineConfig(({ command, mode }) => {
             electron({
               main: {
                 entry: 'electron/main.ts',
+                vite: {
+                  define: {
+                    'process.env.PANVAS_GOOGLE_CLIENT_ID': JSON.stringify(googleClientId),
+                    'process.env.PANVAS_GOOGLE_CLIENT_SECRET': JSON.stringify(googleClientSecret),
+                  },
+                },
               },
               preload: {
                 input: 'electron/preload.ts',

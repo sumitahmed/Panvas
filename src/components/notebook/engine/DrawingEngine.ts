@@ -1,4 +1,4 @@
-import { buildInkFamilyGeometry } from './inkFamilyGeometry.ts';
+import { buildInkFamilyGeometry, inkSampleWidths } from './inkFamilyGeometry.ts';
 import type { InkFamily } from './drawingTypes.ts';
 // ============================================
 // Panvas — Drawing Engine
@@ -18,6 +18,11 @@ import { LayerManager } from './LayerManager.ts';
 import { RulerManager } from './RulerManager.ts';
 import { LaserManager } from './LaserManager.ts';
 import { buildStrokePatternGeometry } from './strokePatternGeometry.ts';
+import { gate0Profiler } from '../../../dev/gate0Profiler.ts';
+import { boundsOverlap, eraseBounds, type EraseBounds } from './capsuleErase.ts';
+import { PenGeometry } from './penGeometry.ts';
+import { WetInkSurface } from './WetInkSurface.ts';
+import type { HandwritingTrace } from '../../../dev/handwritingTrace.ts';
 
 export class DrawingEngine {
   private strokes: Stroke[] = [];
@@ -36,6 +41,12 @@ export class DrawingEngine {
   private layerCanvases = new Map<string, CanvasRenderingContext2D>();
   private liveSnapshotCanvas: HTMLCanvasElement | null = null;
   private isLiveDrawing = false;
+  private wetInk: WetInkSurface | null = null;
+  private liveFrame: number | null = null;
+  private pendingInk: Stroke | null = null;
+  private liveTrace: HandwritingTrace | null = null;
+  private frameQueuedAt = 0;
+  private lastFrameAt = 0;
 
   attachLayerCanvas(id: string, canvas: HTMLCanvasElement, width: number, height: number, scale: number): () => void {
     const ctx = this.viewport.configureCanvas(canvas, width, height, scale / Math.sqrt(Math.max(1, this.layerManager.getLayers().length)));
@@ -133,10 +144,14 @@ export class DrawingEngine {
     this.redraw();
   }
 
+  getLayerManager(): LayerManager { return this.layerManager; }
+
   /** Add a completed stroke. Does NOT redraw — caller should call redraw() or render incrementally. */
   addStroke(stroke: Stroke): void {
+    const startedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
     stroke.layerId ??= this.layerManager.getActiveLayerId();
     this.strokes.push(stroke);
+    if (startedAt) gate0Profiler.event('add-stroke', performance.now() - startedAt, { points: stroke.points.length });
   }
 
   canEditActiveLayer(): boolean {
@@ -182,8 +197,37 @@ export class DrawingEngine {
   }
 
   /** Full redraw of all strokes. */
-  redraw(): void {
+  redraw(dirty?: EraseBounds, boundsForStroke?: (stroke: Stroke) => EraseBounds): void {
     if (!this.ctx || !this.canvas) return;
+    const profileStartedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
+    const historicalPoints = profileStartedAt
+      ? this.strokes.reduce((sum, stroke) => sum + stroke.points.length, 0)
+      : 0;
+    // Clip every backing surface in page space, keeping its existing DPR transform.
+    // Repaint all contributors inside the damage, preserving transparency and z-order.
+    const surfaces = dirty ? [this.ctx, ...this.layerCanvases.values()] : [];
+    let cullBounds = dirty;
+    for (const surface of surfaces) {
+      surface.save();
+      const transform = surface.getTransform();
+      this.viewport.applyTransform(surface);
+      const pageTransform = surface.getTransform();
+      const corners = [[dirty!.left,dirty!.top],[dirty!.right,dirty!.top],[dirty!.right,dirty!.bottom],[dirty!.left,dirty!.bottom]]
+        .map(([x,y]) => ({x:pageTransform.a*x+pageTransform.c*y+pageTransform.e,y:pageTransform.b*x+pageTransform.d*y+pageTransform.f}));
+      const left = Math.floor(Math.min(...corners.map(p=>p.x))), top = Math.floor(Math.min(...corners.map(p=>p.y)));
+      const right = Math.ceil(Math.max(...corners.map(p=>p.x))), bottom = Math.ceil(Math.max(...corners.map(p=>p.y)));
+      const inverse = pageTransform.inverse();
+      const pageCorners = [[left,top],[right,top],[right,bottom],[left,bottom]].map(([x,y]) => ({
+        x:inverse.a*x+inverse.c*y+inverse.e,y:inverse.b*x+inverse.d*y+inverse.f,
+      }));
+      cullBounds = {left:Math.min(cullBounds!.left,...pageCorners.map(p=>p.x)),top:Math.min(cullBounds!.top,...pageCorners.map(p=>p.y)),
+        right:Math.max(cullBounds!.right,...pageCorners.map(p=>p.x)),bottom:Math.max(cullBounds!.bottom,...pageCorners.map(p=>p.y))};
+      surface.resetTransform();
+      surface.beginPath();
+      surface.rect(left,top,right-left,bottom-top);
+      surface.clip();
+      surface.setTransform(transform);
+    }
     this.ctx.clearRect(0, 0, this.canvasCssWidth, this.canvasCssHeight);
     
     // Save context state before applying viewport transform
@@ -205,6 +249,7 @@ export class DrawingEngine {
       if (layerCtx) { ctx.save(); this.viewport.applyTransform(ctx); }
       this.imageManager.renderImages(ctx, layer.id);
       for (const stroke of this.strokes) {
+        if (cullBounds && boundsForStroke && !boundsOverlap(cullBounds, boundsForStroke(stroke))) continue;
         const strokeLayerId = stroke.layerId ?? DEFAULT_PAGE_LAYER_ID;
         if (strokeLayerId === layer.id) this.renderStroke(ctx, stroke);
       }
@@ -220,6 +265,20 @@ export class DrawingEngine {
       this.selectionEngine.renderSelection(this.ctx);
     }
     this.renderTransientOverlays();
+    for (const surface of surfaces) surface.restore();
+    if (profileStartedAt) {
+      const duration = performance.now() - profileStartedAt;
+      gate0Profiler.event('drawing-redraw', duration, {
+        strokes: this.strokes.length,
+        points: historicalPoints,
+        layers: this.layerManager.getLayers().length,
+      });
+      const active = gate0Profiler.getActive('ink-gesture') ?? gate0Profiler.getActive('eraser-gesture');
+      gate0Profiler.increment(active, 'redrawCount');
+      gate0Profiler.sample(active, 'redrawDurationMs', duration);
+      gate0Profiler.increment(active, 'historicalStrokesTraversed', this.strokes.length);
+      gate0Profiler.increment(active, 'historicalPointsTraversed', historicalPoints);
+    }
   }
 
   private renderTransientOverlays(): void {
@@ -251,6 +310,30 @@ export class DrawingEngine {
    * Used for both full redraws and live drawing previews.
    */
   private pencilSurface?: HTMLCanvasElement;
+  // Geometry-only cache. Validate samples as selection tools can edit points in
+  // place; WeakMap ownership lets replaced/deleted strokes be collected.
+  private inkPaths = new WeakMap<Stroke, { key: string; samples: number[]; path: Path2D }>();
+  private inkPath(stroke: Stroke): Path2D | null {
+    if (stroke.id === '__live__' || typeof Path2D === 'undefined') return null;
+    const key = `${stroke.centerline}/${stroke.tool}/${stroke.inkFamily}/${stroke.pattern}/${stroke.thickness}`;
+    const cached = this.inkPaths.get(stroke);
+    if (cached?.key === key && cached.samples.length === stroke.points.length * 4
+      && stroke.points.every((p,i) => cached.samples[i*4] === p.x && cached.samples[i*4+1] === p.y
+        && cached.samples[i*4+2] === p.pressure && cached.samples[i*4+3] === p.t)) return cached.path;
+    const path = new Path2D();
+    if (stroke.centerline === 'polyline' && stroke.tool === 'pen' && (!stroke.pattern || stroke.pattern === 'solid')) {
+      const geometry = new PenGeometry();
+      geometry.update(stroke.points);
+      geometry.trace(path, stroke);
+    } else {
+      for (const polygon of buildInkFamilyGeometry(stroke)) {
+        polygon.forEach((p,i) => i ? path.lineTo(p.x,p.y) : path.moveTo(p.x,p.y));
+        path.closePath();
+      }
+    }
+    this.inkPaths.set(stroke, { key, path, samples: stroke.points.flatMap(p => [p.x,p.y,p.pressure,p.t]) });
+    return path;
+  }
   private renderDot(
     ctx: CanvasRenderingContext2D,
     point: StrokePoint,
@@ -296,10 +379,42 @@ export class DrawingEngine {
 
   renderStroke(ctx: CanvasRenderingContext2D, stroke: Stroke): void {
     const { points, color, thickness, opacity, tool } = stroke;
-    if (points.length < 2) return;
     if (!points || points.length === 0) return;
+    if (stroke.centerline === 'polyline' && tool === 'pen' && (!stroke.pattern || stroke.pattern === 'solid')) {
+      ctx.save();
+      traceInkClip(ctx, stroke);
+      ctx.globalAlpha = opacity;
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.fillStyle = color;
+      const path = this.inkPath(stroke);
+      if (path) ctx.fill(path);
+      else {
+        const geometry = new PenGeometry();
+        geometry.update(points);
+        ctx.beginPath();
+        geometry.trace(ctx, stroke);
+        ctx.fill();
+      }
+      ctx.restore();
+      return;
+    }
     if (points.length === 1) {
-      this.renderDot(ctx, points[0], tool, color, thickness, opacity, stroke.inkFamily);
+      ctx.save();
+      traceInkClip(ctx, stroke);
+      if (stroke.inkFamily) {
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.globalAlpha = opacity;
+        ctx.fillStyle = color;
+        const width = inkSampleWidths(stroke)[0];
+        const point = points[0];
+        if (stroke.inkFamily === 'felt') ctx.fillRect(point.x - width / 2, point.y - width / 2, width, width);
+        else {
+          ctx.beginPath();
+          ctx.arc(point.x, point.y, width / 2, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else this.renderDot(ctx, points[0], tool, color, thickness, opacity);
+      ctx.restore();
       return;
     }
 
@@ -312,6 +427,8 @@ export class DrawingEngine {
 
     if (stroke.inkFamily) {
       ctx.fillStyle = stroke.color;
+      const path = this.inkPath(stroke);
+      if (path) { ctx.fill(path); ctx.restore(); return; }
       ctx.beginPath();
       for (const polygon of buildInkFamilyGeometry(stroke)) {
         polygon.forEach((point, i) => i === 0 ? ctx.moveTo(point.x, point.y) : ctx.lineTo(point.x, point.y));
@@ -533,13 +650,19 @@ export class DrawingEngine {
 
   // ---- Live Drawing Preview ----
 
-  /**
-   * Snapshot the committed scene to an offscreen surface so live ink rendering
-   * can restore the background via a single GPU blit instead of redrawing every
-   * stroke, image, and shape on the page.
-   */
-  beginLiveStroke(): void {
+  /** Start a wet-ink session. Solid pens leave the committed scene untouched;
+   * patterned/non-pen previews allocate their legacy snapshot lazily. */
+  beginLiveStroke(trace: HandwritingTrace | null = null): void {
+    this.endLiveStroke();
+    this.isLiveDrawing = true;
+    this.liveTrace = trace;
+    this.lastFrameAt = 0;
+  }
+
+  private ensureLegacySnapshot(): void {
     if (!this.canvas || !this.ctx) return;
+    if (this.liveSnapshotCanvas) return;
+    const startedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
     this.isLiveDrawing = true;
     const targetCtx = this.layerCanvases.get(this.layerManager.getActiveLayerId()) ?? this.ctx;
     const targetCanvas = targetCtx.canvas;
@@ -553,15 +676,124 @@ export class DrawingEngine {
     const snapCtx = this.liveSnapshotCanvas.getContext('2d');
     if (snapCtx) {
       snapCtx.resetTransform();
+      const clearStartedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
       snapCtx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
+      const clearMs = clearStartedAt ? performance.now() - clearStartedAt : 0;
+      const drawStartedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
       snapCtx.drawImage(targetCanvas, 0, 0);
+      const active = gate0Profiler.getActive('ink-gesture');
+      gate0Profiler.sample(active, 'beginSnapshotClearMs', clearMs);
+      gate0Profiler.sample(active, 'beginSnapshotDrawImageMs', drawStartedAt ? performance.now() - drawStartedAt : 0);
+      gate0Profiler.increment(active, 'snapshotPixelsCopied', targetCanvas.width * targetCanvas.height);
+      gate0Profiler.annotate(active, {
+        canvasBackingWidth: targetCanvas.width,
+        canvasBackingHeight: targetCanvas.height,
+        canvasBackingPixels: targetCanvas.width * targetCanvas.height,
+        effectiveDpr: window.devicePixelRatio || 1,
+        layerCount: this.layerManager.getLayers().length,
+        beginLiveStrokeMs: startedAt ? performance.now() - startedAt : 0,
+      });
     }
   }
 
-  /** Terminate live drawing session and release the snapshot buffer. */
+  /** Cancel pending presentation and release the transient surfaces. */
   endLiveStroke(): void {
+    if (this.liveFrame !== null) cancelAnimationFrame(this.liveFrame);
+    this.liveFrame = null;
+    this.pendingInk = null;
+    this.wetInk?.dispose();
+    this.wetInk = null;
+    this.liveTrace = null;
     this.isLiveDrawing = false;
     this.liveSnapshotCanvas = null;
+  }
+
+  /** One presentation per frame; all accepted geometry remains in points. */
+  renderLiveStroke(points: StrokePoint[], tool: DrawingToolId, color: string, thickness: number,
+    opacity: number, pattern: StrokePattern = 'solid', inkFamily?: InkFamily, _liveTip?: StrokePoint): void {
+    if (!this.ctx || !this.canvas) return;
+    this.pendingInk = { id: '__live__', type: 'stroke', points, tool, color, thickness, opacity,
+      pattern, inkFamily, centerline: 'polyline', createdAt: 0 };
+    if (this.liveFrame !== null) return;
+    this.frameQueuedAt = performance.now();
+    this.liveFrame = requestAnimationFrame(() => {
+      this.liveFrame = null;
+      this.flushLiveInk();
+    });
+  }
+
+  private flushLiveInk(finalizing = false): void {
+    const stroke = this.pendingInk;
+    if (!stroke || !this.ctx || !this.canvas) return;
+    this.pendingInk = null;
+    const start = performance.now();
+    const ctx = this.layerCanvases.get(this.layerManager.getActiveLayerId()) ?? this.ctx;
+    const trace = this.liveTrace;
+    if (stroke.tool === 'pen' && stroke.pattern === 'solid' && ctx.canvas.parentElement) {
+      if (!this.wetInk) {
+        ctx.save();
+        this.viewport.applyTransform(ctx);
+        const transform = ctx.getTransform();
+        ctx.restore();
+        this.wetInk = new WetInkSurface(ctx, transform);
+      }
+      const work = this.wetInk.render(stroke);
+      if (trace) {
+        trace.counters.wetPrimitives = (trace.counters.wetPrimitives ?? 0) + work.primitives;
+        trace.counters.wetDirtyPixels = (trace.counters.wetDirtyPixels ?? 0) + work.dirtyPixels;
+        trace.counters.wetRebuilds = (trace.counters.wetRebuilds ?? 0) + Number(work.rebuilt);
+      }
+    } else {
+      // Patterned and non-pen tools retain their existing appearance, but share
+      // frame scheduling. Their geometry is outside the solid-pen prefix path.
+      this.ensureLegacySnapshot();
+      this.paintLegacyLiveStroke(stroke.points, stroke.tool, stroke.color, stroke.thickness,
+        stroke.opacity, stroke.pattern, stroke.inkFamily);
+    }
+    if (trace) {
+      const sample = (name: string, value: number) => (trace.timings[name] ??= []).push(value);
+      sample('wetRenderMs', performance.now() - start);
+      if (!finalizing) sample('scheduledFrameDelayMs', start - this.frameQueuedAt);
+      const raw = trace.raw[trace.raw.length - 1];
+      if (raw && start >= raw.timeStamp) sample('eventToFrameMs', start - raw.timeStamp);
+      if (this.lastFrameAt && !finalizing) sample('activeFrameIntervalMs', start - this.lastFrameAt);
+      trace.frames.push({ time: start, phase: finalizing ? 'commit' : 'frame', points: stroke.points.length,
+        terminal: { ...stroke.points[stroke.points.length - 1] } });
+      // Preserve exactly what the renderer consumed, including chronological rebuilds.
+      if (trace.renderedSource !== stroke.points) trace.rendered = [];
+      trace.renderedSource = stroke.points;
+      for (let i = trace.rendered.length; i < stroke.points.length; i++) trace.rendered.push({ ...stroke.points[i] });
+    }
+    this.lastFrameAt = start;
+  }
+
+  /** Commit the new mark once. Existing page pixels remain authoritative. */
+  commitLiveStroke(stroke: Stroke): void {
+    if (!this.ctx || !this.canvas) return;
+    const ctx = this.layerCanvases.get(stroke.layerId ?? this.layerManager.getActiveLayerId()) ?? this.ctx;
+    // Legacy previews modify the dry surface.
+    if (stroke.tool !== 'pen' || (stroke.pattern && stroke.pattern !== 'solid') || !ctx.canvas.parentElement
+      || this.liveSnapshotCanvas) {
+      this.redraw();
+      return;
+    }
+    // Shapes sit above strokes. Repaint just the new stroke's damage through the
+    // existing clipped redraw path, rather than compositing above those shapes.
+    if (this.shapeManager.getShapes().some(shape =>
+      (shape.layerId ?? DEFAULT_PAGE_LAYER_ID) === (stroke.layerId ?? DEFAULT_PAGE_LAYER_ID))) {
+      this.redraw(eraseBounds(stroke), eraseBounds);
+      return;
+    }
+    this.pendingInk = stroke;
+    this.flushLiveInk(true);
+    if (this.wetInk && this.wetInk.target === ctx) this.wetInk.commit(stroke);
+    else {
+      ctx.save();
+      this.viewport.applyTransform(ctx);
+      this.renderStroke(ctx, stroke);
+      ctx.restore();
+    }
+    this.renderTransientOverlays();
   }
 
   /**
@@ -569,7 +801,7 @@ export class DrawingEngine {
    * Call this during pointerdown and pointermove for immediate live feedback.
    * After pointerup, call addStroke() and redraw().
    */
-  renderLiveStroke(
+  private paintLegacyLiveStroke(
     points: StrokePoint[],
     tool: DrawingToolId,
     color: string,
@@ -580,15 +812,24 @@ export class DrawingEngine {
     liveTip?: StrokePoint,
   ): void {
     if (!this.ctx || !this.canvas) return;
+    const active = gate0Profiler.getActive('ink-gesture');
+    const liveStartedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
 
     const ctx = this.layerCanvases.get(this.layerManager.getActiveLayerId()) ?? this.ctx;
 
     if (this.isLiveDrawing && this.liveSnapshotCanvas) {
       ctx.save();
       ctx.resetTransform();
+      const clearStartedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
       ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+      const clearMs = clearStartedAt ? performance.now() - clearStartedAt : 0;
+      const drawStartedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
       ctx.drawImage(this.liveSnapshotCanvas, 0, 0);
+      const drawMs = drawStartedAt ? performance.now() - drawStartedAt : 0;
       ctx.restore();
+      gate0Profiler.sample(active, 'liveSnapshotClearMs', clearMs);
+      gate0Profiler.sample(active, 'liveSnapshotDrawImageMs', drawMs);
+      gate0Profiler.increment(active, 'snapshotPixelsCopied', ctx.canvas.width * ctx.canvas.height);
     } else {
       this.redraw();
     }
@@ -599,6 +840,7 @@ export class DrawingEngine {
     const strokePoints = liveTip && points.length > 0 && (points[points.length - 1].x !== liveTip.x || points[points.length - 1].y !== liveTip.y)
       ? [...points, liveTip]
       : points;
+    const geometryStartedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
     this.renderStroke(ctx, {
       id: '__live__',
       type: 'stroke',
@@ -611,8 +853,15 @@ export class DrawingEngine {
       inkFamily,
       createdAt: 0,
     });
+    if (geometryStartedAt) gate0Profiler.sample(active, 'liveStrokeGeometryRenderMs', performance.now() - geometryStartedAt);
+    gate0Profiler.increment(active, 'renderStrokeCalls');
+    gate0Profiler.increment(active, 'renderStrokePointIterations', strokePoints.length);
     ctx.restore();
     this.renderTransientOverlays();
+    if (liveStartedAt) {
+      gate0Profiler.sample(active, 'liveRenderDurationMs', performance.now() - liveStartedAt);
+      gate0Profiler.sample(active, 'liveRenderPointCount', strokePoints.length);
+    }
   }
 
   /** Render the transient freehand selection enclosure without persisting page content. */
@@ -649,13 +898,16 @@ export class DrawingEngine {
    */
   findStrokesNearPoint(x: number, y: number, radius: number): string[] {
     const hits: string[] = [];
+    const active = gate0Profiler.getActive('eraser-gesture');
 
     for (const stroke of this.strokes) {
+      gate0Profiler.increment(active, 'strokesScanned');
       if (!this.layerManager.isEditable(stroke.layerId)) continue;
       if (stroke.inkClip && !regionIntersects(strokeRegion(stroke), eraserCapsule({ x, y }, { x, y }, Math.max(radius, 0.01)))) continue;
       const effectiveRadius = radius + getStrokeRenderHalfWidth(stroke);
       const effRadiusSq = effectiveRadius * effectiveRadius;
       const pts = stroke.points;
+      gate0Profiler.increment(active, 'strokePointsInspected', pts?.length ?? 0);
       if (!pts || pts.length === 0) continue;
 
       if (pts.length === 1) {
@@ -669,6 +921,7 @@ export class DrawingEngine {
 
       let hit = false;
       for (let i = 0; i < pts.length - 1; i++) {
+        gate0Profiler.increment(active, 'strokeSegmentsInspected');
         const p1 = pts[i];
         const p2 = pts[i + 1];
         const dx = p2.x - p1.x;
@@ -696,6 +949,7 @@ export class DrawingEngine {
 
       if (hit) {
         hits.push(stroke.id);
+        gate0Profiler.increment(active, 'candidateHits');
       }
     }
 

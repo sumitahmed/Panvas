@@ -3,6 +3,7 @@ import { BlendMode, setLineJoin, clipEvenOdd, closePath, endPath, lineTo, moveTo
 import type { Stroke } from '../../components/notebook/engine/drawingTypes.ts';
 import { buildInkFamilyGeometry, inkPolygonsPath } from '../../components/notebook/engine/inkFamilyGeometry.ts';
 import { buildStrokePatternGeometry } from '../../components/notebook/engine/strokePatternGeometry.ts';
+import { penGeometrySvg } from '../../components/notebook/engine/penGeometry.ts';
 
 export function drawPdfStroke(page: PDFPage, stroke: Stroke, sx = 1, sy = 1) {
   const hex = /^#[\da-f]{6}$/i.test(stroke.color) ? stroke.color.slice(1) : '20242a';
@@ -17,7 +18,10 @@ export function drawPdfStroke(page: PDFPage, stroke: Stroke, sx = 1, sy = 1) {
     }
     page.pushOperators(clipEvenOdd(), endPath());
   }
-  if (stroke.inkFamily) {
+  if (stroke.centerline === 'polyline' && stroke.tool === 'pen' && (stroke.pattern ?? 'solid') === 'solid') {
+    const path = penGeometrySvg(stroke, sx, sy);
+    if (path) page.drawSvgPath(path, { x: 0, y: h, color, opacity: alpha });
+  } else if (stroke.inkFamily) {
     const polygons = buildInkFamilyGeometry(stroke).map(polygon => polygon.map(p => ({ x: p.x * sx, y: p.y * sy })));
     page.drawSvgPath(inkPolygonsPath(polygons), { x: 0, y: h, color, opacity: alpha });
   } else {

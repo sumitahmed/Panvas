@@ -11,6 +11,7 @@ import { ToolManager } from './ToolManager';
 import { HistoryManager } from './HistoryManager';
 import { DrawingEngine } from './DrawingEngine';
 import { EraserEngine } from './EraserEngine';
+import { cloneStrokeSnapshot } from './cloneStrokeSnapshot.ts';
 import { ShapeManager } from './ShapeManager';
 import { TextManager } from './TextManager';
 import { ImageManager } from './ImageManager';
@@ -42,6 +43,8 @@ import {
   type HandwritingRecognitionCommit,
 } from '@/services/recognition/RealTimeHandwritingSession';
 import type { PagePropertyChangeSource } from '../notebookPageRenderState';
+import { gate0Profiler } from '../../../dev/gate0Profiler.ts';
+import { SceneMutationCoordinator } from './sceneMutationCoordinator';
 
 export interface NotebookEngineOptions {
   recognitionProvider?: HandwritingRecognitionProvider;
@@ -100,6 +103,8 @@ export class NotebookEngine {
   private unsubscribeHandwritingTool: (() => void) | null = null;
   private unsubscribeDrawingRevision: (() => void) | null = null;
   private unsubscribeHistoryRevision: (() => void) | null = null;
+  private sceneMutations = new SceneMutationCoordinator();
+  private sceneMutationListeners = new Set<() => void>();
 
   constructor(options: NotebookEngineOptions = {}) {
     this.viewport = new ViewportManager();
@@ -138,11 +143,11 @@ export class NotebookEngine {
       this.handwriting.setActive(state.handwritingToTextEnabled);
     });
     this.unsubscribeDrawingRevision = this.input.onDrawingChange(() => {
-      this.drawingRevision += 1;
+      this.publishSceneMutation('drawing');
     });
     this.unsubscribeHistoryRevision = this.history.subscribe((_canUndo, _canRedo, source) => {
       if (source === 'user') {
-        this.drawingRevision += 1;
+        this.publishSceneMutation('history');
       }
     });
     this.properties = createEmptyDrawingData().properties;
@@ -177,12 +182,12 @@ export class NotebookEngine {
     }
     if (!this.unsubscribeDrawingRevision) {
       this.unsubscribeDrawingRevision = this.input.onDrawingChange(() => {
-        this.drawingRevision += 1;
+        this.publishSceneMutation('drawing');
       });
     }
     if (!this.unsubscribeHistoryRevision) {
       this.unsubscribeHistoryRevision = this.history.subscribe((_canUndo, _canRedo, source) => {
-        if (source === 'user') this.drawingRevision += 1;
+        if (source === 'user') this.publishSceneMutation('history');
       });
     }
     this.drawing.setCanvas(canvas, cssWidth, cssHeight);
@@ -206,10 +211,10 @@ export class NotebookEngine {
 
   /** Get all drawing data for persistence. */
   getDrawingData(): DrawingData {
-    return structuredClone({
+    const startedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
+    const captured: DrawingData = structuredClone({
       version: 3,
       objects: [
-        ...this.drawing.getStrokes(),
         ...this.shapes.getShapes(),
         ...this.texts.getTexts(),
         ...this.images.getImages(),
@@ -219,14 +224,42 @@ export class NotebookEngine {
       audioNotes: this.audio.getAll().map(note => ({ ...note })),
       properties: { ...this.properties },
     });
+    captured.objects = [...this.drawing.getStrokes().map(cloneStrokeSnapshot), ...captured.objects!];
+    if (startedAt) {
+      const duration = performance.now() - startedAt;
+      gate0Profiler.event('get-drawing-data', duration, {
+        objects: captured.objects?.length ?? 0,
+      });
+    }
+    return captured;
   }
 
   getDrawingOwnership(): Readonly<{ pageId: string | null; revision: number }> {
     return { pageId: this.sceneOwnerPageId, revision: this.drawingRevision };
   }
 
+  /** One notification per logical committed scene mutation. */
+  onSceneMutation(listener: () => void): () => void {
+    this.sceneMutationListeners.add(listener);
+    return () => this.sceneMutationListeners.delete(listener);
+  }
+
+  onDrawingGestureLifecycle(listener: (active: boolean) => void): () => void {
+    return this.input.onDrawingGestureLifecycle(listener);
+  }
+
+  private publishSceneMutation(channel: 'drawing' | 'history'): void {
+    // Commands can intentionally notify both managers in one stack. The first channel is
+    // the committed boundary; its paired compatibility notification is not a new mutation.
+    // Snapshot listeners still run synchronously here, before any mutable state can drift.
+    if (!this.sceneMutations.accept(channel)) return;
+    this.drawingRevision += 1;
+    this.sceneMutationListeners.forEach(listener => listener());
+  }
+
   /** Load drawing data (e.g., from disk). Replaces current state. */
   setDrawingData(data: DrawingData | null, pageId: string | null = null): void {
+    this.input.setEraserPageOwner(pageId);
     const ownedData = data ? structuredClone(data) : null;
     this.sceneOwnerPageId = pageId;
     this.drawingRevision += 1;
@@ -420,12 +453,15 @@ export class NotebookEngine {
     return this.properties;
   }
 
-  setProperties(updates: Partial<PageProperties>): void {
+  setProperties(updates: Partial<PageProperties>, source: PagePropertyChangeSource = 'user'): void {
     this.properties = { ...this.properties, ...updates };
-    this.drawingRevision += 1;
+    // A paper-color-only update changes the page shell, not the committed scene.
+    // Keep the scene revision stable so a later page handoff does not recapture
+    // thousands of unchanged ink points just to persist metadata.
+    if (source !== 'appearance') this.drawingRevision += 1;
     const dimensions = resolvePageDimensions(this.properties);
     this.ruler.setMaxLength(Math.max(dimensions.width, dimensions.height));
-    this.notifyPropertiesChange('user');
+    this.notifyPropertiesChange(source);
   }
 
   onPropertiesChange(listener: (props: Readonly<PageProperties>, source: PagePropertyChangeSource) => void): () => void {
@@ -440,10 +476,13 @@ export class NotebookEngine {
   // ---- Cleanup ----
 
   destroy(): void {
+    this.input.flushPendingErasing('destroy');
     this.unsubscribeDrawingRevision?.();
     this.unsubscribeDrawingRevision = null;
     this.unsubscribeHistoryRevision?.();
     this.unsubscribeHistoryRevision = null;
+    this.sceneMutations.clear();
+    this.sceneMutationListeners.clear();
     this.unsubscribeHandwritingLifecycle?.();
     this.unsubscribeHandwritingLifecycle = null;
     this.unsubscribeHandwritingTool?.();

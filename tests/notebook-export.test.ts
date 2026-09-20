@@ -6,6 +6,28 @@ import { exportNotebookPdf, getSectionDividerContent, orderNotebookPages, resolv
 import { extractPdfSourcePage, movePdfPage, normalizePdfPageState, rotatePdfPage } from '../src/services/pdf/pdfPageOperations.ts';
 import type { NotebookPage, NotebookSection } from '../src/types/notebook.ts';
 import { getNotebookCoverIdentity } from '../src/lib/notebookCover.ts';
+import { drawPdfStroke } from '../src/services/pdf/drawPdfStroke.ts';
+import { penGeometrySvg } from '../src/components/notebook/engine/penGeometry.ts';
+
+test('new handwriting exports shared raw-centerline geometry, including dots and every nib', async () => {
+  const pdf = await PDFDocument.create();
+  const page = pdf.addPage();
+  const paths: string[] = [];
+  const originalDraw = page.drawSvgPath.bind(page);
+  page.drawSvgPath = (path, options) => { paths.push(path); originalDraw(path, options); };
+  for (const inkFamily of [undefined, 'ballpoint', 'fountain', 'brush', 'felt'] as const) {
+    for (const points of [[{ x: 10, y: 10, pressure: .5 }], [{ x: 10, y: 10, pressure: .5 }, { x: 20, y: 10, pressure: 1 }, { x: 20, y: 20, pressure: .5 }]]) {
+      const stroke = { id: 'ink', type: 'stroke' as const, tool: 'pen' as const, centerline: 'polyline' as const,
+        points, inkFamily, color: '#123456', opacity: .4, thickness: 3, createdAt: 0 };
+      drawPdfStroke(page, stroke, .75, 1.25);
+      assert.equal(paths.at(-1), penGeometrySvg(stroke, .75, 1.25));
+      assert.ok(paths.at(-1)!.length > 0);
+      assert.ok(!paths.at(-1)!.includes('Q'));
+    }
+  }
+  assert.equal(paths.length, 10);
+  assert.equal((await PDFDocument.load(await pdf.save())).getPageCount(), 1);
+});
 
 const baseProperties = createEmptyDrawingData().properties;
 const pageInput = (id: string, overrides: Partial<typeof baseProperties> = {}, drawing: DrawingData = createEmptyDrawingData()) => ({

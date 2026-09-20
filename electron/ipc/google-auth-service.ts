@@ -263,7 +263,6 @@ export class GoogleAuthService {
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
           res.end(await this.renderHtmlResponse(true, 'Google Drive connected successfully!'));
 
-          cleanup();
           if (!resolved) {
             resolved = true;
             resolve({
@@ -274,6 +273,7 @@ export class GoogleAuthService {
               connectedAt: storedData.connectedAt,
             });
           }
+          cleanup();
         } catch (err) {
           res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
           const publicMessage = err instanceof GoogleAuthDiagnosticError ? err.publicMessage : "Google Drive couldn't be connected. Please return to Panvas and try again.";
@@ -329,13 +329,19 @@ export class GoogleAuthService {
         } catch {
           // ignore close errors
         }
-        if (!resolved) {
-          resolved = true;
-          reject(new GoogleAuthDiagnosticError({ stage: 'authorization', reason: 'cancelled' }));
-        }
       };
 
-      const activeServerHandle: { close: () => void; port?: number } = { close: cleanup };
+      // Resource cleanup must not settle the flow. Only an explicit close
+      // (including superseding authorization) represents cancellation.
+      const activeServerHandle: { close: () => void; port?: number } = {
+        close: () => {
+          if (!resolved) {
+            resolved = true;
+            reject(new GoogleAuthDiagnosticError({ stage: 'authorization', reason: 'cancelled' }));
+          }
+          cleanup();
+        },
+      };
       this.activeAuthServer = activeServerHandle;
     });
   }

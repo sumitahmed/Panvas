@@ -1,7 +1,9 @@
 import type { DrawingData } from './engine/drawingTypes';
+import type { PagePropertySet } from '../../types/notebook';
+import { gate0Profiler } from '../../dev/gate0Profiler.ts';
 
 export type NotebookPageDataCache = Readonly<Record<string, DrawingData>>;
-export type PagePropertyChangeSource = 'load' | 'user';
+export type PagePropertyChangeSource = 'load' | 'user' | 'appearance';
 
 export interface PageOwnedDrawing {
   documentId: string;
@@ -23,6 +25,9 @@ export function capturePageOwnedDrawing(
   renderedSheetId = sheetId,
 ): PageOwnedDrawing | null {
   if (!documentId || !sheetId || sheetId !== sceneOwnerSheetId || sheetId !== renderedSheetId) return null;
+  const startedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
+  const cloned = structuredClone(data);
+  if (startedAt) gate0Profiler.event('capture-page-owned-drawing', performance.now() - startedAt, { objects: cloned.objects?.length ?? 0 });
   return {
     documentId,
     sheetId,
@@ -30,7 +35,31 @@ export function capturePageOwnedDrawing(
     sceneOwnerSheetId,
     saveTargetSheetId: sheetId,
     drawingRevision,
-    data: structuredClone(data),
+    data: cloned,
+  };
+}
+
+/** Capture from a factory that already returns a fresh immutable snapshot. */
+export function captureFreshPageOwnedDrawing(
+  documentId: string,
+  sheetId: string,
+  sceneOwnerSheetId: string,
+  drawingRevision: number,
+  createFreshData: () => DrawingData,
+  renderedSheetId = sheetId,
+): PageOwnedDrawing | null {
+  if (!documentId || !sheetId || sheetId !== sceneOwnerSheetId || sheetId !== renderedSheetId) return null;
+  const startedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
+  const data = createFreshData();
+  if (startedAt) gate0Profiler.event('capture-page-owned-drawing', performance.now() - startedAt, { objects: data.objects?.length ?? 0 });
+  return {
+    documentId,
+    sheetId,
+    renderedSheetId,
+    sceneOwnerSheetId,
+    saveTargetSheetId: sheetId,
+    drawingRevision,
+    data,
   };
 }
 
@@ -43,6 +72,11 @@ export function hasValidPageDrawingOwnership(snapshot: PageOwnedDrawing): boolea
 /** Loading a page updates rendering, but must never be mistaken for an edit. */
 export function mayPersistPagePropertyChange(source: PagePropertyChangeSource): boolean {
   return source === 'user';
+}
+
+/** Paper color is page metadata; it does not change committed drawing objects. */
+export function isPaperColorOnlyUpdate(updates: Partial<PagePropertySet>): boolean {
+  return Object.keys(updates).length === 1 && typeof updates.paperColor === 'string';
 }
 
 /**

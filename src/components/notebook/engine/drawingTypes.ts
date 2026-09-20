@@ -73,6 +73,8 @@ export interface Stroke extends BasePageObject {
   /** Vector path pattern. Missing legacy values render as solid. */
   pattern?: StrokePattern;
   inkFamily?: InkFamily;
+  /** New faithful pen geometry. Absent on saved legacy strokes: retain their renderer. */
+  centerline?: 'polyline';
   /** Retained vector area after erasing, relative to points[0]. Polygon rings may contain holes.
    * Keeps the original pressure path/caps intact; travels with the ink on move/copy. */
   inkClip?: [number, number][][][];

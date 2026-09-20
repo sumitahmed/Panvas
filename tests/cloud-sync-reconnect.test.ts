@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
+
 import { GoogleAuthService, GoogleAuthDiagnosticError, type StoredTokens } from '../electron/ipc/google-auth-service.ts';
 import { GoogleDriveSyncProvider, AuthExpiredError } from '../src/services/cloudsync/googleDriveProvider.ts';
 import { presentCloudError, CloudOperationError } from '../src/services/cloudsync/errors.ts';
@@ -632,4 +634,147 @@ test('18. A failed reconnect can be retried cleanly without dangling servers', a
     assert.equal((err as GoogleAuthDiagnosticError).reason, 'cancelled');
     return true;
   });
+
+});
+
+// Exercise the actual listener and promise lifecycle; only Google and storage are mocked.
+function requestOAuthCallback(url: URL): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const request = http.get(url, { agent: false }, response => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', chunk => { body += chunk; });
+      response.on('end', () => resolve({ status: response.statusCode!, body }));
+      response.on('error', reject);
+    });
+    request.setTimeout(2_000, () => request.destroy(new Error('Callback request timed out')));
+    request.on('error', reject);
+  });
+}
+
+test('successful OAuth callback resolves before cleanup instead of rejecting cancelled', { timeout: 10_000 }, async t => {
+  const opened = Promise.withResolvers<string>();
+  const events: string[] = [];
+  let stored: StoredTokens | null = null;
+  const service = new GoogleAuthService({
+    clientId: 'test-client-id',
+    clientSecret: 'test-secret',
+    openExternal: async url => { opened.resolve(url); },
+    fetchFn: async (input, init) => {
+      const url = new URL(String(input));
+      if (url.href === 'https://oauth2.googleapis.com/token') {
+        assert.equal(init?.method, 'POST');
+        const params = new URLSearchParams(String(init?.body));
+        const authorization = new URL(await opened.promise);
+        assert.equal(params.get('code'), 'test-authorization-code');
+        assert.equal(params.get('redirect_uri'), authorization.searchParams.get('redirect_uri'));
+        assert.equal(params.get('grant_type'), 'authorization_code');
+        const { generateCodeChallenge } = await import('../electron/ipc/google-auth-service.ts');
+        assert.equal(generateCodeChallenge(params.get('code_verifier')!), authorization.searchParams.get('code_challenge'));
+        events.push('token');
+        return Response.json({ access_token: 'test-access', refresh_token: 'test-refresh', expires_in: 3600 });
+      }
+      assert.equal(url.origin + url.pathname, 'https://www.googleapis.com/drive/v3/about');
+      assert.equal(new Headers(init?.headers).get('Authorization'), 'Bearer test-access');
+      events.push('identity');
+      return Response.json({ user: { permissionId: 'canonical-test-account', displayName: 'Test User', emailAddress: 'test@example.com' } });
+    },
+  });
+  // Mock both storage boundaries: never read or write the user's credential file.
+  t.mock.method(service as any, 'readStoredTokens', async () => null);
+  t.mock.method(service as any, 'saveTokens', async (tokens: StoredTokens) => {
+    stored = { ...tokens };
+    events.push('persist');
+  });
+  t.after(() => { (service as any).activeAuthServer?.close(); });
+  const outcome = service.startAuthFlow().then(
+    connection => { events.push('resolve'); return { connection, error: null }; },
+    error => ({ connection: null, error }),
+  );
+  const authorization = new URL(await opened.promise);
+  const callback = new URL(authorization.searchParams.get('redirect_uri')!);
+  assert.equal(callback.hostname, '127.0.0.1');
+  assert.notEqual(callback.port, '0');
+  callback.searchParams.set('state', authorization.searchParams.get('state')!);
+  callback.searchParams.set('code', 'test-authorization-code');
+  const response = await requestOAuthCallback(callback);
+  assert.equal(response.status, 200);
+  assert.match(response.body, /Google Drive connected successfully!/);
+  const result = await outcome;
+  assert.equal(result.error?.reason, undefined, 'Successful authorization must not reject cancelled');
+  assert.equal(result.error, null);
+  assert.ok(result.connection);
+  assert.equal(result.connection.accountIdentifier, 'canonical-test-account');
+  assert.deepEqual(result.connection, {
+    provider: 'googledrive', accountIdentifier: 'canonical-test-account',
+    displayName: 'Test User', email: 'test@example.com', connectedAt: stored!.connectedAt,
+  });
+  assert.deepEqual(events, ['token', 'identity', 'persist', 'resolve']);
+  assert.equal(stored!.refreshToken, 'test-refresh');
+  assert.equal((service as any).activeAuthServer, null);
+  await assert.rejects(requestOAuthCallback(callback), { code: 'ECONNREFUSED' });
+});
+
+for (const scenario of ['invalid-state', 'access-denied', 'token-failure', 'persist-failure'] as const) {
+  test(`OAuth ${scenario} preserves its failure reason and closes the listener`, { timeout: 10_000 }, async t => {
+    const opened = Promise.withResolvers<string>();
+    const persistenceError = new GoogleAuthDiagnosticError({ stage: 'secure_storage', reason: 'test_persist_failed' });
+    const service = new GoogleAuthService({
+      clientId: 'test-client-id', clientSecret: 'test-secret',
+      openExternal: async url => { opened.resolve(url); },
+      fetchFn: async input => {
+        if (String(input).includes('/token')) {
+          if (scenario === 'token-failure') return Response.json({ error: 'invalid_grant' }, { status: 400 });
+          return Response.json({ access_token: 'test-access', expires_in: 3600 });
+        }
+        return Response.json({ user: { permissionId: 'test-account' } });
+      },
+    });
+    t.mock.method(service as any, 'readStoredTokens', async () => null);
+    const save = t.mock.method(service as any, 'saveTokens', async () => { throw persistenceError; });
+    t.after(() => { (service as any).activeAuthServer?.close(); });
+    const outcome = service.startAuthFlow().then(() => null, error => error);
+    const authorization = new URL(await opened.promise);
+    const callback = new URL(authorization.searchParams.get('redirect_uri')!);
+    callback.searchParams.set('state', scenario === 'invalid-state' ? 'wrong-state' : authorization.searchParams.get('state')!);
+    callback.searchParams.set('code', 'test-code');
+    if (scenario === 'access-denied') callback.searchParams.set('error', 'access_denied');
+    const response = await requestOAuthCallback(callback);
+    assert.doesNotMatch(response.body, /Google Drive connected successfully!/);
+    const error = await outcome;
+    assert.ok(error instanceof GoogleAuthDiagnosticError);
+    const expected = {
+      'invalid-state': ['authorization_callback', 'invalid_state', 400],
+      'access-denied': ['authorization_callback', 'access_denied', 200],
+      'token-failure': ['token_exchange', 'invalid_grant', 500],
+      'persist-failure': ['secure_storage', 'test_persist_failed', 500],
+    }[scenario];
+    assert.equal(error.stage, expected[0]);
+    assert.equal(error.reason, expected[1]);
+    assert.equal(response.status, expected[2]);
+    assert.equal(save.mock.callCount(), scenario === 'persist-failure' ? 1 : 0);
+    assert.equal((service as any).activeAuthServer, null);
+    await assert.rejects(requestOAuthCallback(callback), { code: 'ECONNREFUSED' });
+  });
+}
+
+test('OAuth timeout retains timeout reason and closes the listener', { timeout: 10_000 }, async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const opened = Promise.withResolvers<string>();
+  const service = new GoogleAuthService({
+    clientId: 'test-client-id', clientSecret: 'test-secret',
+    openExternal: async url => { opened.resolve(url); },
+  });
+  t.after(() => { (service as any).activeAuthServer?.close(); });
+  const outcome = service.startAuthFlow().then(() => null, error => error);
+  const authorization = new URL(await opened.promise);
+  const callback = new URL(authorization.searchParams.get('redirect_uri')!);
+  t.mock.timers.tick(120_000);
+  const error = await outcome;
+  assert.ok(error instanceof GoogleAuthDiagnosticError);
+  assert.equal(error.stage, 'authorization');
+  assert.equal(error.reason, 'timeout');
+  assert.equal((service as any).activeAuthServer, null);
+  t.mock.timers.reset();
+  await assert.rejects(requestOAuthCallback(callback), { code: 'ECONNREFUSED' });
 });

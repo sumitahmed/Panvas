@@ -158,5 +158,11 @@ export interface PanvasDomainAPI {
 declare global {
   interface Window {
     panvas: PanvasDomainAPI;
+    __PANVAS_GATE0_PROFILER__?: {
+      enable: () => void;
+      disable: () => void;
+      reset: () => void;
+      report: () => import('@/dev/gate0Profiler').Gate0Report;
+    };
   }
 }

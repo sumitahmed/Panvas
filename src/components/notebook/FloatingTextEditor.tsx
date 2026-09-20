@@ -1,3 +1,4 @@
+import { StaticTextPreview } from './StaticTextPreview';
 import { stickyPaperStyle } from './stickyNotes';
 import { textObjectStyle } from './textTypography';
 import React, { useEffect, useRef, useState, useCallback } from 'react';
@@ -24,6 +25,7 @@ import {
   STICKY_NOTE_MIN_HEIGHT,
   type StickyNoteShape,
 } from './stickyNotes';
+import { gate0Profiler } from '@/dev/gate0Profiler';
 
 interface FloatingTextEditorProps {
   object: TextObject;
@@ -42,7 +44,14 @@ interface FloatingTextEditorProps {
   };
 }
 
-export const FloatingTextEditor: React.FC<FloatingTextEditorProps> = ({
+function textHistoryVisualSignature(object: TextObject, fallbackHeight: number): string {
+  return [
+    object.x, object.y, object.width, object.height || fallbackHeight, object.rotation ?? 0,
+    getStickyNoteColor(object), getStickyNoteOpacity(object), getStickyNoteShape(object),
+  ].join('|');
+}
+
+const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
   object,
   engine,
   scale,
@@ -53,6 +62,11 @@ export const FloatingTextEditor: React.FC<FloatingTextEditorProps> = ({
   zIndex,
   pageOffset,
 }) => {
+  gate0Profiler.resource('reactRenders.FloatingTextEditor', 1);
+  useEffect(() => {
+    gate0Profiler.resource('tipTapEditors', 1);
+    return () => gate0Profiler.resource('tipTapEditors', -1);
+  }, []);
   const isSelected = engine.selection.getSelectedElements().some(el => el.id === object.id);
   const stickyNote = isStickyNote(object);
   const [stickyStylePanel, setStickyStylePanel] = useState<'color' | 'shape' | null>(null);
@@ -485,15 +499,20 @@ export const FloatingTextEditor: React.FC<FloatingTextEditorProps> = ({
   }, [object.id]);
 
   useEffect(() => engine.selection.subscribe(() => setStickyRevision(r => r + 1)), [engine]);
+  const historyVisualSignatureRef = useRef(textHistoryVisualSignature(object, textMinHeight));
   useEffect(() => engine.history.subscribe(() => {
     const current = engine.texts.getTexts().find(text => text.id === object.id);
     if (!current) return;
-    setPos({ x: current.x, y: current.y });
-    setSize({ width: current.width, height: current.height || textMinHeight });
+    const nextHeight = current.height || textMinHeight;
+    const signature = textHistoryVisualSignature(current, textMinHeight);
+    if (signature === historyVisualSignatureRef.current) return;
+    historyVisualSignatureRef.current = signature;
+    setPos(previous => previous.x === current.x && previous.y === current.y ? previous : { x: current.x, y: current.y });
+    setSize(previous => previous.width === current.width && previous.height === nextHeight ? previous : { width: current.width, height: nextHeight });
     setStickyRevision(r => r + 1);
   }), [engine, object.id, textMinHeight]);
 
-  if (!editor) return null;
+  if (!editor) return <StaticTextPreview object={object} scale={scale} zIndex={zIndex} offset={pageOffset} />;
 
   const stickyColor = getStickyNoteColor(object);
   const stickyOpacity = getStickyNoteOpacity(object);
@@ -847,3 +866,6 @@ export const FloatingTextEditor: React.FC<FloatingTextEditorProps> = ({
     </div>
   );
 };
+
+export const FloatingTextEditor = React.memo(FloatingTextEditorComponent);
+FloatingTextEditor.displayName = 'FloatingTextEditor';

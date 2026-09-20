@@ -3,7 +3,7 @@ import type { CloudSyncStatus, SafeCloudDiagnostic, SyncEntityKind } from './typ
 export type CloudErrorCode = 'configuration' | 'connection' | 'offline' | 'auth-expired' | 'rate-limited' | 'conflict' | 'review' | 'payload' | 'remote-workspace' | 'remote-account-conflict' | 'account-migration-required' | 'sync';
 
 const PUBLIC_MESSAGES: Record<CloudErrorCode, string> = {
-  configuration: 'Google Drive needs to be reconnected.',
+  configuration: 'Google Drive sign-in is temporarily unavailable.',
   connection: "Couldn't connect to Google Drive. Please try again.",
   offline: "You're offline. Changes will sync when you're back online.",
   'auth-expired': 'Google Drive needs to be reconnected.',

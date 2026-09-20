@@ -185,7 +185,7 @@ test('workspace preflight and conflict choices across native filesystem and Chro
           const outsideSentinel = path.join(temporary, `${scenario}-outside.txt`);
           await writeFile(outsideSentinel, 'must survive reset');
           const nativeReset = await native.resetLocalData();
-          assert.deepEqual(nativeReset.workspaceIds.sort(), ['ws-broken', 'ws-healthy', 'ws-main'].sort());
+          assert.deepEqual(nativeReset.workspaceIds.filter(id => !id.startsWith('ws-system-')).sort(), ['ws-broken', 'ws-healthy', 'ws-main'].sort());
           assert.ok(nativeReset.recoveryPath, 'Electron reset creates a final recovery snapshot');
           assert.equal(await readFile(path.join(nativeReset.recoveryPath, 'workspaces', 'ws-main', '.panvas', 'workspace.json'), 'utf8').then(Boolean), true);
           assert.equal(await readFile(outsideSentinel, 'utf8'), 'must survive reset', 'reset cannot delete outside Panvas storage');
@@ -197,7 +197,7 @@ test('workspace preflight and conflict choices across native filesystem and Chro
           assert.equal(electronSecond.status, 'synced', JSON.stringify(electronSecond));
           assert.equal(electronSecond.conflicts.length, 0);
           const restartedNative = new WorkspaceService();
-          assert.equal((await restartedNative.discoverWorkspaces()).length, 3, 'Electron restart rediscovers one canonical root per workspace');
+          assert.equal((await restartedNative.discoverWorkspaces()).filter(e => !e.workspace.id.startsWith('ws-system-')).length, 3, 'Electron restart rediscovers one canonical root per workspace');
           assert.deepEqual(drive.manifests.get('ws-main'), remoteBeforeReset, 'reset does not mutate Google Drive data');
           return;
         }

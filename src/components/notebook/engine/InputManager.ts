@@ -23,8 +23,13 @@ import { constrainShapeDrag } from './shapeGeometry.ts';
 import type { RulerHit, RulerManager } from './RulerManager.ts';
 import type { LaserManager } from './LaserManager.ts';
 import { InkInputFilter, mapPointerPressure } from './inkInput.ts';
+import { gate0Profiler, type Gate0Record } from '../../../dev/gate0Profiler.ts';
+import { EraserGesture } from './EraserGesture.ts';
+import { InkSamples } from './inkSamples.ts';
+import { startHandwritingTrace, finishHandwritingTrace, type HandwritingTrace } from '../../../dev/handwritingTrace.ts';
 
 export type DrawingChangeListener = () => void;
+export type DrawingGestureListener = (active: boolean) => void;
 export type InkStrokeLifecycleEvent =
   | { type: 'start'; instrument: 'pen' | 'pencil' }
   | { type: 'cancel'; instrument: 'pen' | 'pencil' }
@@ -65,7 +70,13 @@ export class InputManager {
   private cachedCssHeight = 0;
   private lastProcessedClientX = -1;
   private lastProcessedClientY = -1;
-  private hasReceivedRawUpdateInCurrentStroke = false;
+  private inkSamples: InkSamples | null = null;
+  private inkOwner: { canvas: HTMLCanvasElement | null; pageId: string | null } | null = null;
+  private inkRawPoints: StrokePoint[] = [];
+  private inkTrace: HandwritingTrace | null = null;
+  private gate0InkGesture: Gate0Record | null = null;
+  private gate0EraserGesture: Gate0Record | null = null;
+  private gate0LastPointerDispatch: { type: string; x: number; y: number; timeStamp: number } | null = null;
 
   // Select-mode pointer routing. Transform gestures continue to be owned by
   // SelectionEngine; lasso only records the freehand enclosure passed to its existing
@@ -86,6 +97,8 @@ export class InputManager {
   // Change listeners (for autosave)
   private changeListeners: Set<DrawingChangeListener> = new Set();
   private strokeLifecycleListeners: Set<(event: InkStrokeLifecycleEvent) => void> = new Set();
+  private drawingGestureListeners: Set<DrawingGestureListener> = new Set();
+  private drawingGestureActive = false;
 
   constructor(
     toolManager: ToolManager,
@@ -124,6 +137,12 @@ export class InputManager {
     return () => this.strokeLifecycleListeners.delete(listener);
   }
 
+  /** Actual draw-mode contact lifecycle, independent of recognition eligibility. */
+  onDrawingGestureLifecycle(listener: DrawingGestureListener): () => void {
+    this.drawingGestureListeners.add(listener);
+    return () => this.drawingGestureListeners.delete(listener);
+  }
+
   /** Promote an incomplete single-pointer edit into a two-finger viewport gesture. */
   cancelActivePointerInteraction(): void {
     this.cancelTransientInteraction();
@@ -133,10 +152,18 @@ export class InputManager {
     for (const listener of this.strokeLifecycleListeners) listener(event);
   }
 
+  private setDrawingGestureActive(active: boolean): void {
+    if (this.drawingGestureActive === active) return;
+    this.drawingGestureActive = active;
+    for (const listener of this.drawingGestureListeners) listener(active);
+  }
+
   notifyChange(): void {
+    const startedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
     for (const listener of this.changeListeners) {
       listener();
     }
+    if (startedAt) gate0Profiler.event('drawing-notification', performance.now() - startedAt, { listeners: this.changeListeners.size });
   }
 
   /** DOM text surfaces yield to the existing canvas gesture owner for ink and upper-layer hits. */
@@ -168,6 +195,7 @@ export class InputManager {
     canvas.addEventListener('pointermove', this.handlePointerMove);
     canvas.addEventListener('pointerup', this.handlePointerUp);
     canvas.addEventListener('pointercancel', this.handlePointerUp);
+    canvas.addEventListener('lostpointercapture', this.handleEraserCaptureLost);
     if (typeof window !== 'undefined' && 'onpointerrawupdate' in window) {
       canvas.addEventListener('pointerrawupdate', this.handlePointerMove as EventListener);
     }
@@ -182,6 +210,8 @@ export class InputManager {
 
   /** Detach event listeners. Call on unmount. */
   detach(): void {
+    this.flushPendingErasing();
+    this.setDrawingGestureActive(false);
     this.unsubscribeToolState?.();
     this.unsubscribeToolState = null;
     if (!this.canvas) return;
@@ -189,6 +219,7 @@ export class InputManager {
     this.canvas.removeEventListener('pointermove', this.handlePointerMove);
     this.canvas.removeEventListener('pointerup', this.handlePointerUp);
     this.canvas.removeEventListener('pointercancel', this.handlePointerUp);
+    this.canvas.removeEventListener('lostpointercapture', this.handleEraserCaptureLost);
     if (typeof window !== 'undefined' && 'onpointerrawupdate' in window) {
       this.canvas.removeEventListener('pointerrawupdate', this.handlePointerMove as EventListener);
     }
@@ -204,7 +235,7 @@ export class InputManager {
     this.cachedCssHeight = 0;
     this.lastProcessedClientX = -1;
     this.lastProcessedClientY = -1;
-    this.hasReceivedRawUpdateInCurrentStroke = false;
+    this.clearInkSamples('detach');
     this.strokeModeAtStart = null;
     this.strokeContextAtStart = null;
     this.selectionDragMode = 'none';
@@ -222,6 +253,8 @@ export class InputManager {
   // ---- Event Handlers (bound as arrow functions for stable references) ----
 
   private handlePointerDown = (e: PointerEvent): void => {
+    if (this.inkSamples) return;
+    if (this.eraserGesture) return;
     const toolState = this.toolManager.getState();
     if (toolState.rulerEnabled && e.button === 0) {
       const point = this.getCanvasPoint(e);
@@ -285,6 +318,17 @@ export class InputManager {
   };
 
   private handlePointerMove = (e: PointerEvent): void => {
+    if (this.inkSamples && !this.ownsInkEvent(e)) return;
+    if (this.eraserGesture && e.pointerId !== this.eraserGesture.pointerId) return;
+    const activeProfile = this.gate0InkGesture ?? this.gate0EraserGesture;
+    if (activeProfile) {
+      gate0Profiler.increment(activeProfile, e.type === 'pointerrawupdate' ? 'pointerrawupdateDispatches' : 'pointermoveDispatches');
+      const previous = this.gate0LastPointerDispatch;
+      if (previous && previous.type !== e.type && previous.x === e.clientX && previous.y === e.clientY && previous.timeStamp === e.timeStamp) {
+        gate0Profiler.increment(activeProfile, 'overlappingRawAndMoveDispatches');
+      }
+      this.gate0LastPointerDispatch = { type: e.type, x: e.clientX, y: e.clientY, timeStamp: e.timeStamp };
+    }
     // A pointerup can be swallowed while the native window is inactive. Mouse/pen hover
     // reports no pressed buttons, so cancel the orphaned transient gesture before routing
     // the move. Touch does not expose the same buttons contract.
@@ -292,11 +336,14 @@ export class InputManager {
       this.cancelTransientInteraction();
       return;
     }
-    if (this.isDrawing && e.clientX === this.lastProcessedClientX && e.clientY === this.lastProcessedClientY) {
+    // Erasing has its own transport/deduplication. Pen input below is unchanged.
+    if (this.eraserGesture) {
+      this.continueErasing(e);
       return;
     }
-    if (e.type === 'pointerrawupdate') {
-      this.hasReceivedRawUpdateInCurrentStroke = true;
+    if (this.isDrawing && !this.inkSamples && e.clientX === this.lastProcessedClientX && e.clientY === this.lastProcessedClientY) {
+      gate0Profiler.increment(activeProfile, 'rejectedDuplicateDispatches');
+      return;
     }
     this.lastProcessedClientX = e.clientX;
     this.lastProcessedClientY = e.clientY;
@@ -361,6 +408,15 @@ export class InputManager {
   };
 
   private handlePointerUp = (e: PointerEvent): void => {
+    if (this.inkSamples && !this.ownsInkEvent(e)) return;
+    if (this.eraserGesture && e.pointerId !== this.eraserGesture.pointerId) return;
+    if (this.eraserGesture) {
+      // Finish before releasing capture: lostpointercapture may dispatch synchronously.
+      if (e.type === 'pointerup') this.eraserGesture.enqueue(this.getCanvasPoint(e));
+      this.flushPendingErasing(e.type);
+      try { this.canvas?.releasePointerCapture(e.pointerId); } catch { /* Already released. */ }
+      return;
+    }
     if (this.rulerDragMode) {
       this.finishRulerInteraction(e);
       return;
@@ -392,8 +448,6 @@ export class InputManager {
 
     if (this.strokeModeAtStart === 'draw' && this.isDrawing) {
       this.finishDrawing(e);
-    } else if (this.strokeModeAtStart === 'erase' && this.isDrawing) {
-      this.finishErasing();
     } else if (this.strokeModeAtStart === 'shape' && this.isDrawing) {
       this.finishShape();
     } else if (this.strokeModeAtStart === 'select' && this.isDrawing) {
@@ -407,11 +461,18 @@ export class InputManager {
     if (document.visibilityState === 'hidden') this.cancelTransientInteraction();
   };
 
+  private handleEraserCaptureLost = (e: PointerEvent): void => {
+    if (this.eraserGesture?.pointerId === e.pointerId) this.flushPendingErasing('lost-capture');
+  };
+
   private cancelTransientInteraction = (): void => {
+    const wasErasing = this.eraserGesture !== null;
+    this.flushPendingErasing('cancel');
     const cancelledContext = this.strokeContextAtStart;
     const wasDrawingInk = this.isDrawing && this.strokeModeAtStart === 'draw';
 
     this.isDrawing = false;
+    this.setDrawingGestureActive(false);
     this.drawingEngine?.endLiveStroke?.();
     this.strokeModeAtStart = null;
     this.strokeContextAtStart = null;
@@ -420,9 +481,8 @@ export class InputManager {
     this.cachedCssHeight = 0;
     this.lastProcessedClientX = -1;
     this.lastProcessedClientY = -1;
-    this.hasReceivedRawUpdateInCurrentStroke = false;
+    this.clearInkSamples('cancel');
     this.currentPoints = [];
-    this.lastEraserPoint = null;
     this.selectionDragMode = 'none';
     this.lassoPoints = [];
     this.rulerDragMode = null;
@@ -431,7 +491,7 @@ export class InputManager {
     this.panScrollTarget = null;
     this.laserPointerActive = false;
     this.laserManager.clear();
-    this.drawingEngine.redraw();
+    if (!wasErasing) this.drawingEngine.redraw();
 
     if (wasDrawingInk && cancelledContext?.recognitionEligible) {
       this.notifyStrokeLifecycle({
@@ -700,7 +760,7 @@ export class InputManager {
     }
   }
 
-  private getCanvasPoint(e: PointerEvent): StrokePoint {
+  private getCanvasPoint(e: Pick<PointerEvent, 'clientX' | 'clientY' | 'pointerType' | 'pressure'>): StrokePoint {
     if (!this.canvas) return { x: 0, y: 0, pressure: 0.5, t: 0 };
 
     const useCache = this.isDrawing && this.strokeModeAtStart === 'draw' && Boolean(this.cachedCanvasRect);
@@ -739,6 +799,8 @@ export class InputManager {
   }
 
   private startDrawing(e: PointerEvent): void {
+    this.gate0InkGesture = gate0Profiler.start('ink-gesture', { pointerType: e.pointerType });
+    this.gate0LastPointerDispatch = null;
     if (this.canvas) {
       try {
         this.canvas.setPointerCapture(e.pointerId);
@@ -750,15 +812,21 @@ export class InputManager {
       this.cachedCssHeight = this.canvas.clientHeight || (this.canvas.height / (window.devicePixelRatio || 1));
     }
     this.isDrawing = true;
-    this.hasReceivedRawUpdateInCurrentStroke = false;
-    this.drawingEngine?.beginLiveStroke?.();
+    this.setDrawingGestureActive(true);
+    this.inkSamples = new InkSamples(e);
+    this.inkOwner = { canvas: this.canvas, pageId: this.eraserOwnerPageId };
+    this.inkTrace = startHandwritingTrace();
+    this.drawingEngine?.beginLiveStroke?.(this.inkTrace);
     const toolState = this.toolManager.getState();
     this.strokeModeAtStart = toolState.mode;
     this.strokeContextAtStart = resolveDrawingStrokeContext(toolState);
     this.strokeStartTime = Date.now();
     this.inkInputFilter.reset();
-    const firstPoint = this.inkInputFilter.push(this.getRulerConstrainedPoint(e), this.strokeContextAtStart.stabilization);
-    this.currentPoints = [firstPoint];
+    this.currentPoints = [];
+    this.inkRawPoints = [];
+    this.acceptInkSamples(e);
+    const firstPoint = this.inkRawPoints[this.inkRawPoints.length - 1];
+    gate0Profiler.increment(this.gate0InkGesture, 'liveRenderInvocations');
     this.drawingEngine.renderLiveStroke(
       this.currentPoints,
       this.strokeContextAtStart.tool,
@@ -778,18 +846,14 @@ export class InputManager {
   }
 
   private continueDrawing(e: PointerEvent): void {
+    const startedAt = this.inkTrace ? performance.now() : 0;
     const strokeContext = this.strokeContextAtStart ?? resolveDrawingStrokeContext(this.toolManager.getState());
-    const useCoalesced = !this.hasReceivedRawUpdateInCurrentStroke && typeof e.getCoalescedEvents === 'function';
-    const coalesced = useCoalesced ? e.getCoalescedEvents() : [];
-    const eventsToProcess = coalesced.length > 0 ? coalesced : [e];
-
-    let latestRawPoint: StrokePoint | undefined;
-    for (const ev of eventsToProcess) {
-      const rawPoint = this.getRulerConstrainedPoint(ev);
-      latestRawPoint = rawPoint;
-      const point = this.inkInputFilter.push(rawPoint, strokeContext.stabilization);
-      this.currentPoints.push(point);
+    if (!this.acceptInkSamples(e)) {
+      this.traceInkTiming('pointerHandlerMs', startedAt);
+      return;
     }
+    const latestRawPoint = this.inkRawPoints[this.inkRawPoints.length - 1];
+    const renderStartedAt = this.inkTrace ? performance.now() : 0;
 
     this.drawingEngine.renderLiveStroke(
       this.currentPoints,
@@ -801,157 +865,286 @@ export class InputManager {
       strokeContext.inkFamily,
       latestRawPoint,
     );
+    gate0Profiler.increment(this.gate0InkGesture, 'liveRenderInvocations');
+    gate0Profiler.sample(this.gate0InkGesture, 'currentStrokePointCount', this.currentPoints.length);
+    this.traceInkTiming('renderMs', renderStartedAt);
+    this.traceInkTiming('pointerHandlerMs', startedAt);
   }
 
-  private getRulerConstrainedPoint(e: PointerEvent): StrokePoint {
+  private ownsInkEvent(e: PointerEvent): boolean {
+    return Boolean(this.inkSamples?.owns(e) && this.inkOwner?.canvas === this.canvas
+      && this.inkOwner.pageId === this.eraserOwnerPageId);
+  }
+
+  private traceInkTiming(name: string, start: number): void {
+    if (this.inkTrace) (this.inkTrace.timings[name] ??= []).push(performance.now() - start);
+  }
+
+  private acceptInkSamples(e: PointerEvent): boolean {
+    const stream = this.inkSamples;
+    if (!stream || !this.ownsInkEvent(e)) return false;
+    const startedAt = this.inkTrace ? performance.now() : 0;
+    const oldLength = stream.samples.length;
+    const result = stream.consume(e);
+    this.traceInkTiming('normalizationMs', startedAt);
+    gate0Profiler.increment(this.gate0InkGesture, 'coalescedSamples', result.coalesced);
+    gate0Profiler.increment(this.gate0InkGesture, 'acceptedPoints', result.added);
+    if (this.inkTrace) {
+      const counters = this.inkTrace.counters;
+      for (const [key, count] of Object.entries({ dispatches: 1, [e.type]: 1, coalescedSamples: result.coalesced,
+        normalizedSamples: result.added, exactDuplicates: result.duplicates, stationaryUp: result.stationaryUp,
+        rejectedOwner: result.rejectedOwner, invalid: result.invalid, rebuilds: Number(result.rebuild) })) {
+        counters[key] = (counters[key] ?? 0) + count;
+      }
+      this.inkTrace.raw.push(...result.raw.map(sample => ({ ...sample, processingTime: performance.now() })));
+    }
+    if (!result.added) return false;
+    // A delayed dispatch can contribute unique older history. Refilter in chronological
+    // order rather than dropping that history or inserting a backwards segment.
+    if (result.rebuild) {
+      this.inkInputFilter.reset();
+      this.currentPoints = [];
+      this.inkRawPoints = [];
+    }
+    const context = this.strokeContextAtStart!;
+    for (let i = result.rebuild ? 0 : oldLength; i < stream.samples.length; i++) {
+      const sample = stream.samples[i];
+      const raw = this.getRulerConstrainedPoint(sample);
+      // Lift events commonly report zero pressure. Retain the last contact
+      // pressure while preserving a distinct terminal XY/timestamp.
+      if (e.type === 'pointerup' && sample.timeStamp === e.timeStamp && sample.pressure === 0
+        && this.inkRawPoints.length) raw.pressure = this.inkRawPoints[this.inkRawPoints.length - 1].pressure;
+      raw.t = sample.timeStamp - stream.startedAt;
+      this.inkRawPoints.push(raw);
+      this.currentPoints.push(this.inkInputFilter.push(raw, context.stabilization));
+      if (this.inkTrace) {
+        this.inkTrace.counters.filterInputs = (this.inkTrace.counters.filterInputs ?? 0) + 1;
+        this.inkTrace.counters.filteredOutputs = (this.inkTrace.counters.filteredOutputs ?? 0) + 1;
+      }
+    }
+    return true;
+  }
+
+  private clearInkSamples(outcome: string, committed: StrokePoint[] = []): void {
+    if (this.inkTrace) {
+      this.inkTrace.normalized = this.inkSamples?.samples.map(sample => ({ ...sample })) ?? [];
+      this.inkTrace.stabilized = this.currentPoints.map(point => ({ ...point }));
+      this.inkTrace.committed = committed.map(point => ({ ...point }));
+      this.inkTrace.counters.committedPoints = committed.length;
+      const raw = this.inkRawPoints[this.inkRawPoints.length - 1], final = committed[committed.length - 1];
+      this.inkTrace.finalEndpointDifference = raw && final ? Math.hypot(raw.x - final.x, raw.y - final.y) : 0;
+      finishHandwritingTrace(this.inkTrace, outcome);
+    }
+    this.inkTrace = null;
+    this.inkSamples = null;
+    this.inkOwner = null;
+    this.inkRawPoints = [];
+  }
+
+  private getRulerConstrainedPoint(e: Pick<PointerEvent, 'clientX' | 'clientY' | 'pointerType' | 'pressure'>): StrokePoint {
     const point = this.getCanvasPoint(e);
     return this.rulerManager.snapPointToEdge(point).point;
   }
 
-  private finishDrawing(_e: PointerEvent): void {
+  private finishDrawing(e: PointerEvent): void {
+    const traceStartedAt = this.inkTrace ? performance.now() : 0;
+    if (e.type === 'pointerup') this.acceptInkSamples(e);
+    const finalTip = this.inkRawPoints[this.inkRawPoints.length - 1];
+    const filteredPoints = this.currentPoints;
+    // Exactly the same endpoint extension used by the live renderer. Do not feed
+    // the raw tip back through stabilization or change the filter's parameters.
+    if (finalTip && this.currentPoints.length && (this.currentPoints[this.currentPoints.length - 1].x !== finalTip.x
+      || this.currentPoints[this.currentPoints.length - 1].y !== finalTip.y)) this.currentPoints = [...this.currentPoints, { ...finalTip }];
+    const finishStartedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
     this.isDrawing = false;
-    this.drawingEngine?.endLiveStroke?.();
+    this.setDrawingGestureActive(false);
     this.cachedCanvasRect = null;
     this.cachedCssWidth = 0;
     this.cachedCssHeight = 0;
     this.lastProcessedClientX = -1;
     this.lastProcessedClientY = -1;
-    this.hasReceivedRawUpdateInCurrentStroke = false;
+    // Keep trace ownership until this commit has been recorded; release input now.
+    const trace = this.inkTrace;
+    if (trace) trace.stabilized = filteredPoints.map(point => ({ ...point }));
+    if (trace) trace.normalized = this.inkSamples?.samples.map(sample => ({ ...sample })) ?? [];
+    this.inkSamples = null;
+    this.inkOwner = null;
     const gestureMode = this.strokeModeAtStart;
     this.strokeModeAtStart = null;
     const strokeContext = this.strokeContextAtStart ?? resolveDrawingStrokeContext(this.toolManager.getState());
     this.strokeContextAtStart = null;
-    if (this.currentPoints.length < 1) {
-      this.currentPoints = [];
-      this.drawingEngine.redraw();
-      if (strokeContext.recognitionEligible) {
-        this.notifyStrokeLifecycle({
-          type: 'cancel',
-          instrument: strokeContext.tool as 'pen' | 'pencil',
-        });
-      }
-      return;
-    }
-
-    const toolState = this.toolManager.getState();
-    if (
-      !strokeContext.recognitionEligible
-      && gestureMode === 'draw'
-      && toolState.scribbleToErase
-      && (strokeContext.tool === 'pen' || strokeContext.tool === 'pencil')
-      && analyzeScribble(this.currentPoints).isScribble
-    ) {
-      const targets = findScribbleTargets(
-        this.currentPoints,
-        (x, y, radius) => this.drawingEngine.findStrokesNearPoint(x, y, radius),
-        Math.max(3, strokeContext.thickness),
-      );
-      if (this.eraserEngine.eraseStrokeIds(targets)) {
+    try {
+      if (this.currentPoints.length < 1) {
         this.currentPoints = [];
-        this.notifyChange();
+        this.drawingEngine.redraw();
+        if (strokeContext.recognitionEligible) {
+          this.notifyStrokeLifecycle({
+            type: 'cancel',
+            instrument: strokeContext.tool as 'pen' | 'pencil',
+          });
+        }
+        gate0Profiler.finish(this.gate0InkGesture, { finishDrawingMs: finishStartedAt ? performance.now() - finishStartedAt : 0, cancelled: true });
+        this.gate0InkGesture = null;
         return;
       }
-    }
 
-    if (
-      !strokeContext.recognitionEligible
-      && gestureMode === 'draw'
-      && toolState.circleToSelect
-      && (strokeContext.tool === 'pen' || strokeContext.tool === 'pencil')
-      && analyzeCircleGesture(this.currentPoints).isCircle
-      && this.selectionEngine.selectWithinLoop(this.currentPoints) > 0
-    ) {
-      this.currentPoints = [];
-      this.toolManager.setMode('select');
-      return;
-    }
+      const toolState = this.toolManager.getState();
+      if (
+        !strokeContext.recognitionEligible
+        && gestureMode === 'draw'
+        && toolState.scribbleToErase
+        && (strokeContext.tool === 'pen' || strokeContext.tool === 'pencil')
+        && analyzeScribble(this.currentPoints).isScribble
+      ) {
+        const targets = findScribbleTargets(
+          this.currentPoints,
+          (x, y, radius) => this.drawingEngine.findStrokesNearPoint(x, y, radius),
+          Math.max(3, strokeContext.thickness),
+        );
+        if (this.eraserEngine.eraseStrokeIds(targets)) {
+          this.currentPoints = [];
+          this.notifyChange();
+          return;
+        }
+      }
 
-    const recognizedLine = !strokeContext.recognitionEligible && gestureMode === 'draw' && toolState.straightLineRecognition
-      ? recognizeStraightLine(this.currentPoints, toolState.snapRecognizedLines)
-      : null;
-    const recognizedShape = !recognizedLine?.isLine
-      && gestureMode === 'draw'
-      && !strokeContext.recognitionEligible
-      && toolState.roughShapeRecognition
-      && (strokeContext.tool === 'pen' || strokeContext.tool === 'pencil')
-      ? recognizeRoughShape(this.currentPoints, toolState.snapRecognizedShapes)
-      : null;
+      if (
+        !strokeContext.recognitionEligible
+        && gestureMode === 'draw'
+        && toolState.circleToSelect
+        && (strokeContext.tool === 'pen' || strokeContext.tool === 'pencil')
+        && analyzeCircleGesture(this.currentPoints).isCircle
+        && this.selectionEngine.selectWithinLoop(this.currentPoints) > 0
+      ) {
+        this.currentPoints = [];
+        this.toolManager.setMode('select');
+        return;
+      }
 
-    if (recognizedShape?.isShape && recognizedShape.shapeType) {
-      const shape: Shape = {
-        id: generateId('shp'),
-        type: 'shape',
-        shapeType: recognizedShape.shapeType,
-        x: recognizedShape.x,
-        y: recognizedShape.y,
-        width: recognizedShape.width,
-        height: recognizedShape.height,
+      const recognizedLine = !strokeContext.recognitionEligible && gestureMode === 'draw' && toolState.straightLineRecognition
+        ? recognizeStraightLine(this.currentPoints, toolState.snapRecognizedLines)
+        : null;
+      const recognizedShape = !recognizedLine?.isLine
+        && gestureMode === 'draw'
+        && !strokeContext.recognitionEligible
+        && toolState.roughShapeRecognition
+        && (strokeContext.tool === 'pen' || strokeContext.tool === 'pencil')
+        ? recognizeRoughShape(this.currentPoints, toolState.snapRecognizedShapes)
+        : null;
+
+      if (recognizedShape?.isShape && recognizedShape.shapeType) {
+        const shape: Shape = {
+          id: generateId('shp'),
+          type: 'shape',
+          shapeType: recognizedShape.shapeType,
+          x: recognizedShape.x,
+          y: recognizedShape.y,
+          width: recognizedShape.width,
+          height: recognizedShape.height,
+          color: strokeContext.color,
+          strokeWidth: strokeContext.thickness,
+          fill: null,
+          rotation: 0,
+          opacity: strokeContext.opacity,
+          createdAt: Date.now(),
+        };
+        this.shapeManager.addShape(shape);
+        this.drawingEngine.redraw();
+        this.recordCommittedShape(shape, `Recognize ${shape.shapeType}`);
+        this.currentPoints = [];
+        return;
+      }
+
+      const committedPoints = recognizedLine?.isLine
+        ? recognizedLine.points
+        : this.currentPoints;
+
+      if (trace) {
+        trace.committed = committedPoints.map(point => ({ ...point }));
+        trace.counters.committedPoints = committedPoints.length;
+        const endpoint = committedPoints[committedPoints.length - 1];
+        trace.finalEndpointDifference = endpoint && finalTip ? Math.hypot(endpoint.x - finalTip.x, endpoint.y - finalTip.y) : 0;
+      }
+
+      const stroke = {
+        id: generateId('strk'),
+        type: 'stroke' as const,
+        tool: strokeContext.tool,
+        points: committedPoints,
         color: strokeContext.color,
-        strokeWidth: strokeContext.thickness,
-        fill: null,
-        rotation: 0,
+        thickness: strokeContext.thickness,
         opacity: strokeContext.opacity,
+        pattern: strokeContext.strokePattern,
+        inkFamily: strokeContext.inkFamily,
+        centerline: 'polyline' as const,
         createdAt: Date.now(),
       };
-      this.shapeManager.addShape(shape);
-      this.drawingEngine.redraw();
-      this.recordCommittedShape(shape, `Recognize ${shape.shapeType}`);
-      this.currentPoints = [];
-      return;
-    }
 
-    const committedPoints = recognizedLine?.isLine
-      ? recognizedLine.points
-      : [...this.currentPoints];
+      // Add stroke to engine
+      const commitPaintStartedAt = trace ? performance.now() : 0;
+      this.drawingEngine.addStroke(stroke);
+      this.drawingEngine.commitLiveStroke(stroke);
+      this.traceInkTiming('commitPaintMs', commitPaintStartedAt);
 
-    const stroke = {
-      id: generateId('strk'),
-      type: 'stroke' as const,
-      tool: strokeContext.tool,
-      points: committedPoints,
-      color: strokeContext.color,
-      thickness: strokeContext.thickness,
-      opacity: strokeContext.opacity,
-      pattern: strokeContext.strokePattern,
-      inkFamily: strokeContext.inkFamily,
-      createdAt: Date.now(),
-    };
-
-    // Add stroke to engine
-    this.drawingEngine.addStroke(stroke);
-    this.drawingEngine.redraw();
-
-    // Push to unified history (already executed, so use pushExecuted)
-    this.historyManager.pushExecuted({
-      description: `Draw ${stroke.tool} stroke`,
-      createdObjectIds: [stroke.id],
-      execute: () => {
-        this.drawingEngine.addStroke(stroke);
-        this.drawingEngine.redraw();
-        this.notifyChange();
-      },
-      undo: () => {
-        this.drawingEngine.removeStroke(stroke.id);
-        this.drawingEngine.redraw();
-        this.notifyChange();
-      },
-    });
-
-    this.currentPoints = [];
-    this.notifyChange();
-    if (strokeContext.recognitionEligible) {
-      this.notifyStrokeLifecycle({
-        type: 'complete',
-        instrument: strokeContext.tool as 'pen' | 'pencil',
-        stroke: structuredClone(stroke),
+      // Push to unified history (already executed, so use pushExecuted)
+      const historyStartedAt = trace ? performance.now() : 0;
+      this.historyManager.pushExecuted({
+        description: `Draw ${stroke.tool} stroke`,
+        createdObjectIds: [stroke.id],
+        execute: () => {
+          this.drawingEngine.addStroke(stroke);
+          this.drawingEngine.redraw();
+          this.notifyChange();
+        },
+        undo: () => {
+          this.drawingEngine.removeStroke(stroke.id);
+          this.drawingEngine.redraw();
+          this.notifyChange();
+        },
       });
+
+      this.traceInkTiming('historyAndCaptureMs', historyStartedAt);
+      this.currentPoints = [];
+      const notifyStartedAt = trace ? performance.now() : 0;
+      this.notifyChange();
+      this.traceInkTiming('notificationMs', notifyStartedAt);
+      if (strokeContext.recognitionEligible) {
+        this.notifyStrokeLifecycle({
+          type: 'complete',
+          instrument: strokeContext.tool as 'pen' | 'pencil',
+          stroke: structuredClone(stroke),
+        });
+      }
+      gate0Profiler.finish(this.gate0InkGesture, {
+        finishDrawingMs: finishStartedAt ? performance.now() - finishStartedAt : 0,
+        committedPoints: stroke.points.length,
+        tool: stroke.tool,
+      });
+      this.gate0InkGesture = null;
+    } finally {
+      this.drawingEngine.endLiveStroke();
+      if (trace) trace.mapped = this.inkRawPoints.map(point => ({ ...point }));
+      this.traceInkTiming('pointerUpTailMs', traceStartedAt);
+      finishHandwritingTrace(trace, e.type === 'pointercancel' ? 'cancel' : 'complete');
+      this.inkTrace = null;
+      this.inkRawPoints = [];
     }
   }
 
   // ---- Erasing ----
-  private lastEraserPoint: { x: number; y: number } | null = null;
+  private eraserGesture: EraserGesture | null = null;
+  private eraserOwnerPageId: string | null = null;
+
+  setEraserPageOwner(pageId: string | null): void {
+    // Existing scene replacement boundary also invalidates this engine's transient ink.
+    if (this.inkSamples) this.cancelTransientInteraction();
+    this.flushPendingErasing('page-replacement');
+    this.eraserOwnerPageId = pageId;
+  }
 
   private startErasing(e: PointerEvent): void {
+    this.gate0EraserGesture = gate0Profiler.start('eraser-gesture', { pointerType: e.pointerType });
+    this.gate0LastPointerDispatch = null;
     if (this.canvas) {
       try {
         this.canvas.setPointerCapture(e.pointerId);
@@ -961,39 +1154,50 @@ export class InputManager {
     this.strokeModeAtStart = 'erase';
     
     const toolState = this.toolManager.getState();
-    this.eraserEngine.startErasing(toolState.eraserMode);
-    
     const point = this.getCanvasPoint(e);
     const radius = Math.max(3, toolState.thickness || 12);
-
-    this.lastEraserPoint = { x: point.x, y: point.y };
-
-    if (toolState.eraserMode !== 'all') {
-      this.eraserEngine.eraseAt(point.x, point.y, toolState.eraserMode, radius);
-    }
+    // Capture owning managers, mode and radius once; never look up a newly active page.
+    const eraser = this.eraserEngine;
+    this.eraserGesture = new EraserGesture(
+      e.pointerId, typeof window !== 'undefined' && 'onpointerrawupdate' in window,
+      toolState.eraserMode, radius,
+      {
+        pageId: this.eraserOwnerPageId,
+        begin: mode => eraser.startErasing(mode, false),
+        sweep: (start, end, mode, width) => eraser.eraseSweep(start, end, mode, width, false),
+        present: () => eraser.present(),
+        complete: () => eraser.finishErasing(),
+      },
+      this.gate0EraserGesture,
+      undefined, 8, true,
+    );
+    this.eraserGesture.enqueue(point);
   }
 
   private continueErasing(e: PointerEvent): void {
-    const toolState = this.toolManager.getState();
-    if (toolState.eraserMode === 'all') return;
-
-    const point = this.getCanvasPoint(e);
-    const radius = Math.max(3, toolState.thickness || 12);
-    const didModify = this.eraserEngine.eraseSweep(this.lastEraserPoint ?? point, point, toolState.eraserMode, radius, false);
-
-    if (didModify) this.drawingEngine.redraw();
-    this.lastEraserPoint = { x: point.x, y: point.y };
+    const gesture = this.eraserGesture;
+    if (!gesture?.acceptsMovement(e)) return;
+    const samples = e.getCoalescedEvents?.() ?? [];
+    for (const sample of samples) gesture.enqueue(this.getCanvasPoint(sample));
+    gesture.enqueue(this.getCanvasPoint(e));
+    gate0Profiler.increment(this.gate0EraserGesture, 'moveSamples', Math.max(1, samples.length));
   }
 
-  private finishErasing(): void {
+  flushPendingErasing(reason = 'ownership-flush'): void {
+    const gesture = this.eraserGesture;
+    if (!gesture) return;
+    const profile = this.gate0EraserGesture;
+    const started = performance.now();
+    // Clear the input owner before synchronous history listeners capture the scene.
+    this.eraserGesture = null;
     this.isDrawing = false;
     this.strokeModeAtStart = null;
-    this.lastEraserPoint = null;
-    const changed = this.eraserEngine.finishErasing();
-    this.drawingEngine.redraw();
+    const changed = gesture.finish();
     if (changed) {
       this.notifyChange();
     }
+    gate0Profiler.finish(profile, { changed, completionReason: reason, pointerUpTailMs: reason === 'pointerup' ? performance.now() - started : null });
+    this.gate0EraserGesture = null;
   }
 
   // ---- Shape Drawing ----

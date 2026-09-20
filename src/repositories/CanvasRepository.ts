@@ -11,6 +11,7 @@ import type { CanvasData, CustomBlock, BlockType, PdfFileData, ImageFileData } f
 import type { SyncQueueItem } from '@/types/sync';
 import { buildCanonicalCanvasPayload, isValidCanvasScenePayload, selectCanonicalCanvasScene } from './canvasSceneStorage';
 import { recordLocalChangeDetached } from '@/services/cloudsync/recordLocalChange';
+import { gate0Profiler } from '@/dev/gate0Profiler';
 
 export class CanvasRepository {
   // ---- Canvas File CRUD ----
@@ -326,10 +327,15 @@ export class CanvasRepository {
   }
 
   async getPdf(userId: string | null, id: string): Promise<PdfFileData | undefined> {
+    const startedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
+    const finishProfile = (source: string) => {
+      if (startedAt) gate0Profiler.event('pdf-repository-read', performance.now() - startedAt, { id, source });
+    };
     if (typeof window !== 'undefined' && window.panvas) {
       const stored = await window.panvas.binary.getPdf(id).catch(() => null);
       if (stored?.data) {
         const meta = await canvasDB.getPdfFile(userId, id).catch(() => undefined);
+        finishProfile('electron');
         return {
           id,
           canvasFileId: meta?.canvasFileId ?? '',
@@ -349,6 +355,7 @@ export class CanvasRepository {
         console.warn('[CanvasRepo] PDF write-through to filesystem failed:', err);
       });
     }
+    finishProfile('dexie');
     return local;
   }
 
@@ -368,9 +375,14 @@ export class CanvasRepository {
   }
 
   async getImage(id: string): Promise<ImageFileData | undefined> {
+    const startedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
+    const finishProfile = (source: string) => {
+      if (startedAt) gate0Profiler.event('image-repository-read', performance.now() - startedAt, { id, source });
+    };
     if (typeof window !== 'undefined' && window.panvas) {
       const stored = await window.panvas.binary.getImage(id).catch(() => null);
       if (stored?.data) {
+        finishProfile('electron');
         return {
           id,
           canvasFileId: '',
@@ -389,6 +401,7 @@ export class CanvasRepository {
         console.warn('[CanvasRepo] image write-through to filesystem failed:', err);
       });
     }
+    finishProfile('dexie');
     return local;
   }
 

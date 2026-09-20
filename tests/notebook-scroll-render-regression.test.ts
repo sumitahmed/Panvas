@@ -7,6 +7,8 @@ import { DEFAULT_PAGE_PROPERTY_SET, type Notebook, type NotebookPage, type PageP
 import {
   mayApplyPageLoadToEngine,
   mergeLoadedPageData,
+  isPaperColorOnlyUpdate,
+  mayPersistPagePropertyChange,
   resolveNotebookPageRenderData,
 } from '../src/components/notebook/notebookPageRenderState.ts';
 
@@ -110,7 +112,7 @@ test('stale focused-page loads cannot write into another page engine', () => {
   assert.equal(mayApplyPageLoadToEngine('B', 'B', 2, 2), true);
 });
 
-test('scroll focus changes unmount canvases but engine destruction remains owner-only', async () => {
+test('scroll focus detaches interaction but engine destruction remains owner-only', async () => {
   const [renderer, pageView, engine] = await Promise.all([
     readFile('src/components/notebook/NotebookRenderer.tsx', 'utf8'),
     readFile('src/components/notebook/NotebookPageView.tsx', 'utf8'),
@@ -125,23 +127,85 @@ test('scroll focus changes unmount canvases but engine destruction remains owner
   assert.match(renderer, /const incomingData = sectionDataCacheRef\.current\[targetPageId\];/);
   assert.match(renderer, /if \(!incomingData\)[\s\S]*setActivePage\(targetPageId\);[\s\S]*return;/);
   assert.doesNotMatch(renderer, /sectionDataCacheRef\.current\[targetPageId\] \|\| \{/);
-  assert.match(renderer, /notebookEngine\.unmount\(\);\s*notebookEngine\.setDrawingData\(incomingData, targetPageId\);/);
+  assert.match(renderer, /notebookEngine\.unmount\(\);[\s\S]*notebookEngine\.setDrawingData\(incomingData, targetPageId\);/);
   assert.match(engine, /mount\([\s\S]*if \(!this\.unsubscribeDrawingRevision\)[\s\S]*if \(!this\.unsubscribeHistoryRevision\)/);
 });
 
-test('shared canvas handoff is synchronously cleared and ownership-gated', async () => {
+test('shared interaction handoff preserves page-owned visual and ownership guards', async () => {
   const [renderer, pageView] = await Promise.all([
     readFile('src/components/notebook/NotebookRenderer.tsx', 'utf8'),
     readFile('src/components/notebook/NotebookPageView.tsx', 'utf8'),
   ]);
   assert.match(renderer, /key=\{pos\.id\}/);
   assert.match(renderer, /sceneOwnerPageId=\{isFocused \? notebookEngine\.getDrawingOwnership\(\)\.pageId/);
-  assert.match(pageView, /useLayoutEffect\(\(\) => \{[\s\S]*clearCanvasSurface\(canvasRef\.current\)/);
+  assert.doesNotMatch(pageView, /clearCanvasSurface/);
+  assert.match(pageView, /data-stable-page-visual=\{page.id\}/);
+  assert.match(pageView, /data-committed-page-id=\{page.id\}/);
+  assert.match(renderer, /residentIds.has\(pos.id\) \|\| isFocused/);
+  assert.doesNotMatch(renderer, /<InactivePagePreview/);
+  assert.match(renderer, /if \(backing\) backing.style.visibility = 'visible'/);
   assert.match(pageView, /data-rendered-page-id=\{page\.id\}/);
   assert.match(pageView, /data-scene-owner-page-id=\{sceneOwnerPageId\}/);
-  assert.match(pageView, /visibility: sceneReady \? 'visible' : 'hidden'/);
+  assert.match(pageView, /visibility: liveSceneReady \? 'visible' : 'hidden'/);
   assert.match(pageView, /const liveSceneReady = isFocused && sceneReady/);
   assert.match(pageView, /\{liveSceneReady && layeredDrawing && orderedLayers\.map/);
   assert.match(pageView, /\{liveSceneReady && liveTextObjects\.map/);
-  assert.match(pageView, /context\.reset\(\)|canvas\.width = canvas\.width/);
+  assert.match(pageView, /if \(!liveSceneReady/);
+  assert.match(pageView, /getCanvasElement\(\) === canvas/);
+});
+
+test('paper color updates keep the retained scene surface and persistence path metadata-only', async () => {
+  const [pageView, renderer, engine] = await Promise.all([
+    readFile('src/components/notebook/NotebookPageView.tsx', 'utf8'),
+    readFile('src/components/notebook/NotebookRenderer.tsx', 'utf8'),
+    readFile('src/components/notebook/engine/NotebookEngine.ts', 'utf8'),
+  ]);
+
+  assert.equal(isPaperColorOnlyUpdate({ paperColor: '#232323' }), true);
+  assert.equal(isPaperColorOnlyUpdate({ paperColor: '#232323', template: 'Ruled' }), false);
+  assert.equal(mayPersistPagePropertyChange('appearance'), false);
+
+  // The retained-canvas effect tracks scene identities, not the data wrapper
+  // whose properties field is replaced by a palette click.
+  assert.match(pageView, /data\?\.objects/);
+  assert.match(pageView, /data\?\.strokes/);
+  assert.match(pageView, /data\?\.shapes/);
+  assert.match(pageView, /data\?\.layers/);
+  assert.doesNotMatch(pageView, /\}, \[data, width, height, page\.type/);
+
+  assert.match(renderer, /notebookEngine\.setProperties\(properties, isPaperColorOnlyChange \? 'appearance' : 'user'\)/);
+  assert.match(engine, /setProperties\(updates: Partial<PageProperties>, source: PagePropertyChangeSource = 'user'\)/);
+  assert.match(engine, /if \(source !== 'appearance'\) this\.drawingRevision \+= 1/);
+});
+
+
+test('resident window stays bounded over repeated 5/10/20/50-page traversal, reorder and restore', async () => {
+  const { residentPageIds } = await import('../src/components/notebook/pageVisualWindow.ts');
+  for (const count of [5, 10, 20, 50]) {
+    const pages = Array.from({ length: count }, (_, i) => ({ id: `page-${i}`, x: 0, y: i * 1020, width: 700, height: 1000 }));
+    for (let pass = 0; pass < 4; pass++) for (let index = 0; index < count; index++) {
+      const top = index * 1020 + 600;
+      const resident = residentPageIds(pages, top, 800);
+      assert.ok(resident.size <= 4);
+      for (const page of pages.filter(p => p.y + p.height >= top && p.y <= top + 800)) assert.ok(resident.has(page.id));
+    }
+    const reordered = pages.map((p, i) => ({ ...p, id: pages[count - i - 1].id }));
+    assert.ok(residentPageIds(reordered, 0, 800).has(pages[count - 1].id));
+    assert.ok(!residentPageIds(pages.filter(p => p.id !== 'page-0'), 0, 800).has('page-0'));
+    assert.ok(residentPageIds(pages, 0, 800).has('page-0'));
+  }
+});
+
+test('seam deadband prevents repeated ownership churn and follows a fast jump', async () => {
+  const { dominantPageId } = await import('../src/components/notebook/pageVisualWindow.ts');
+  const pages = Array.from({ length: 10 }, (_, i) => ({ id: String(i), x: 0, y: i * 1020, width: 700, height: 1000 }));
+  let focus = '0';
+  for (const center of [998, 1005, 1015, 1002, 1020, 1010]) {
+    focus = dominantPageId(pages, center, focus, 24)!;
+    assert.equal(focus, '0');
+  }
+  focus = dominantPageId(pages, 1045, focus, 24)!;
+  assert.equal(focus, '1');
+  for (const center of [1015, 1005, 1010]) assert.equal(dominantPageId(pages, center, focus, 24), '1');
+  assert.equal(dominantPageId(pages, 9500, focus, 24), '9');
 });

@@ -55,7 +55,13 @@ export class WorkspaceService {
   private workspaceDiscoveryComplete = false;
 
   constructor() {
-    this.defaultBaseDir = path.join(app.getPath('documents'), 'Panvas');
+    const profileRoot = process.env.PANVAS_GATE0_PROFILE === '1'
+      ? process.env.PANVAS_GATE0_WORKSPACE_ROOT
+      : undefined;
+    if (profileRoot && !path.isAbsolute(profileRoot)) {
+      throw new Error('PANVAS_GATE0_WORKSPACE_ROOT must be absolute.');
+    }
+    this.defaultBaseDir = profileRoot ? path.resolve(profileRoot) : path.join(app.getPath('documents'), 'Panvas');
     this.baseDir = this.defaultBaseDir;
   }
 

@@ -5,6 +5,7 @@
 // Every user action becomes a HistoryCommand with execute() and undo().
 
 import type { HistoryCommand } from './drawingTypes.ts';
+import { gate0Profiler } from '../../../dev/gate0Profiler.ts';
 
 export type HistoryChangeSource = 'user' | 'load';
 export type HistoryChangeListener = (
@@ -30,11 +31,13 @@ export class HistoryManager {
   }
 
   private notify(source: HistoryChangeSource = 'user'): void {
+    const startedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
     const canUndo = this.undoStack.length > 0;
     const canRedo = this.redoStack.length > 0;
     for (const listener of this.listeners) {
       listener(canUndo, canRedo, source);
     }
+    if (startedAt) gate0Profiler.event('history-notification', performance.now() - startedAt, { listeners: this.listeners.size, source });
   }
 
   /** Push a new command and execute it. Clears the redo stack. */

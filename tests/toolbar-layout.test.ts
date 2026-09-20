@@ -317,7 +317,8 @@ test('high-DPR 400% backing remains bounded and active pages exceed inactive pre
   assert.ok(Math.floor(595 * active) * Math.floor(842 * active) <= MAX_ACTIVE_CANVAS_PIXELS);
 
   const pageView = await readFile(new URL('../src/components/notebook/NotebookPageView.tsx', import.meta.url), 'utf8');
-  assert.match(pageView, /isFocused\s*\? renderScale\s*:\s*Math\.min\(renderScale, MAX_INACTIVE_PAGE_RENDER_ZOOM\)/);
+  assert.match(pageView, /notebookEngine.drawing.setScaleMultiplier\(renderScale\)/);
+  assert.match(pageView, /Math\.min\(renderScale, MAX_INACTIVE_PAGE_RENDER_ZOOM\)/);
   assert.match(pageView, /drawing\.setScaleMultiplier\(Math\.min\(renderScale, MAX_INACTIVE_PAGE_RENDER_ZOOM\)\)/);
 });
 

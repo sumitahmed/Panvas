@@ -23,6 +23,7 @@ import {
   hexToRgba,
   isStickyNote,
 } from './stickyNotes';
+import { gate0Profiler } from '@/dev/gate0Profiler';
 
 interface InactivePagePreviewProps {
   workspaceId: string;
@@ -35,16 +36,20 @@ interface InactivePagePreviewProps {
   pageNumberText: string;
   /** Immutable page-owned snapshot supplied by the notebook renderer. */
   data?: DrawingData;
-  onClick?: () => void;
-  onActivate?: () => void;
+  onActivatePage?: (pageId: string) => void;
 }
 
 const StaticTextPreview: React.FC<{ object: TextObject; scale: number; offset?: { x: number; y: number } }> = ({ object, scale, offset }) => {
+  gate0Profiler.resource('reactRenders.InactiveStaticTextPreview', 1);
   const editor = useEditor({
     editable: false,
     extensions: notebookTipTapExtensions,
     content: object.content,
   });
+  useEffect(() => {
+    gate0Profiler.resource('tipTapEditors', 1);
+    return () => gate0Profiler.resource('tipTapEditors', -1);
+  }, []);
 
   if (!editor) return null;
 
@@ -98,9 +103,23 @@ const StaticTextPreview: React.FC<{ object: TextObject; scale: number; offset?: 
   );
 };
 
-export const InactivePagePreview: React.FC<InactivePagePreviewProps> = ({
-  workspaceId, notebookId, notebook, page, width, height, scale, pageNumberText, data: pageSnapshot, onClick, onActivate
+const InactivePagePreviewComponent: React.FC<InactivePagePreviewProps> = ({
+  workspaceId, notebookId, notebook, page, width, height, scale, pageNumberText, data: pageSnapshot, onActivatePage
 }) => {
+  gate0Profiler.resource('reactRenders.InactivePagePreview', 1);
+  useEffect(() => {
+    gate0Profiler.resource('reactCommits.InactivePagePreview', 1);
+  });
+  useEffect(() => {
+    gate0Profiler.resource('mountedPages', 1);
+    gate0Profiler.resource('inactivePreviews', 1);
+    gate0Profiler.resource('canvases', 1);
+    return () => {
+      gate0Profiler.resource('mountedPages', -1);
+      gate0Profiler.resource('inactivePreviews', -1);
+      gate0Profiler.resource('canvases', -1);
+    };
+  }, []);
   const [loadedData, setLoadedData] = useState<DrawingData | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -198,6 +217,7 @@ export const InactivePagePreview: React.FC<InactivePagePreviewProps> = ({
     let mounted = true;
 
     async function loadPdf() {
+      const loadStartedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
       try {
         const userId = useAuthStore.getState().user?.id ?? null;
         const pdfFile = await canvasRepository.getPdf(userId, page.pdfDataId!);
@@ -213,10 +233,17 @@ export const InactivePagePreview: React.FC<InactivePagePreviewProps> = ({
         // slice(0) copies: pdf.js takes ownership of the buffer.
         const bytes = new Uint8Array(pdfFile.data.slice(0));
         const loadingTask = pdfjsLib.getDocument({ data: bytes });
+        gate0Profiler.resource('pdfLoadingTasks', 1);
+        gate0Profiler.event('pdf-loading-task-start', undefined, { pageId: page.id, focused: false });
         const doc = await loadingTask.promise;
+        gate0Profiler.resource('pdfLoadingTasks', -1);
+        gate0Profiler.resource('pdfDocuments', 1);
+        gate0Profiler.event('pdf-document-load', loadStartedAt ? performance.now() - loadStartedAt : undefined, { pageId: page.id, focused: false });
 
         if (!mounted) {
           loadingTask.destroy();
+          gate0Profiler.resource('pdfDocuments', -1);
+          gate0Profiler.event('pdf-destroy', undefined, { pageId: page.id, reason: 'resolved-after-unmount' });
           return;
         }
         
@@ -236,10 +263,14 @@ export const InactivePagePreview: React.FC<InactivePagePreviewProps> = ({
         canvas.width = scaledViewport.width;
         canvas.height = scaledViewport.height;
 
+        const renderStartedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
+        gate0Profiler.resource('pdfRenderTasks', 1);
         await pdfPage.render({
           canvasContext: ctx,
           viewport: scaledViewport,
         }).promise;
+        gate0Profiler.resource('pdfRenderTasks', -1);
+        gate0Profiler.event('pdf-render', renderStartedAt ? performance.now() - renderStartedAt : undefined, { pageId: page.id, focused: false });
       } catch (err) {
         console.error('Failed to load PDF preview:', err);
       }
@@ -250,11 +281,7 @@ export const InactivePagePreview: React.FC<InactivePagePreviewProps> = ({
   }, [page.type, page.pdfDataId, width, height]);
 
   const handleTriggerActivate = () => {
-    if (onActivate) {
-      onActivate();
-    } else if (onClick) {
-      onClick();
-    }
+    onActivatePage?.(page.id);
   };
 
   return (
@@ -289,3 +316,6 @@ export const InactivePagePreview: React.FC<InactivePagePreviewProps> = ({
     </div>
   );
 };
+
+export const InactivePagePreview = React.memo(InactivePagePreviewComponent);
+InactivePagePreview.displayName = 'InactivePagePreview';

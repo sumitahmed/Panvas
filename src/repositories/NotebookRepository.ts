@@ -5,6 +5,7 @@ import { queuePageSearchSave, type PageSearchSaveContext } from '@/services/sear
 import { clearAncestorDeletion } from '@/services/library/trashModel';
 import { recordLocalChangeDetached } from '@/services/cloudsync/recordLocalChange';
 import { parsePdfAnnotationStorageId } from '@/lib/pdfAnnotationStorage';
+import { gate0Profiler } from '@/dev/gate0Profiler';
 
 export class NotebookRepository {
   async getAll(userId: string | null): Promise<Notebook[]> {
@@ -210,10 +211,15 @@ export class NotebookRepository {
   }
 
   async loadDrawingData(workspaceId: string, notebookId: string, pageId: string): Promise<any> {
+    const startedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
     if (typeof window !== 'undefined' && window.panvas?.notebook) {
-      return window.panvas.notebook.loadDrawing(workspaceId, notebookId, pageId);
+      const result = await window.panvas.notebook.loadDrawing(workspaceId, notebookId, pageId);
+      if (startedAt) gate0Profiler.event('notebook-repository-read', performance.now() - startedAt, { pageId, source: 'electron' });
+      return result;
     }
-    return notebookDB.loadDrawingData(workspaceId, notebookId, pageId);
+    const result = await notebookDB.loadDrawingData(workspaceId, notebookId, pageId);
+    if (startedAt) gate0Profiler.event('notebook-repository-read', performance.now() - startedAt, { pageId, source: 'dexie' });
+    return result;
   }
 
   async setNotebookPageDefaults(workspaceId: string, notebookId: string, updates: PagePropertySet): Promise<void> {

@@ -3,6 +3,14 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'url';
 import { app, BrowserWindow, ipcMain, screen, shell, type WebContents } from 'electron';
 import { isAudioOnlyMediaCheck, isAudioOnlyMediaRequest, isTrustedRendererUrl } from './security-policy.js';
+import { registerDomainHandlers } from './ipc/domain-handlers.js';
+import { registerKnowledgeHandlers } from './ipc/knowledge-handlers.js';
+import { registerRecognitionHandlers } from './ipc/recognition-handlers.js';
+import { registerCloudSyncHandlers } from './ipc/cloudsync-handlers.js';
+import { registerCloudSyncDiagnosticHandler } from './ipc/cloudsync-diagnostic-handler.js';
+import { initDiscordRpc, destroyDiscordRpc } from './discord-rpc.js';
+import { writeQueue } from './ipc/write-queue.js';
+import { GracefulShutdownController } from './graceful-shutdown.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,6 +24,40 @@ const __dirname = path.dirname(__filename);
 // │ └── index.html
 
 process.env.APP_ROOT = path.join(__dirname, '..');
+
+// Gate 0 performance runs must never touch the normal Electron profile. This
+// switch is development-only, opt-in, and leaves the app id and default path
+// unchanged for every ordinary launch.
+if (!app.isPackaged && process.env.PANVAS_GATE0_PROFILE === '1') {
+  const isolatedUserData = process.env.PANVAS_GATE0_USER_DATA;
+  if (!isolatedUserData || !path.isAbsolute(isolatedUserData)) {
+    throw new Error('PANVAS_GATE0_USER_DATA must be an absolute disposable path.');
+  }
+  app.setPath('userData', isolatedUserData);
+  const debuggingPort = process.env.PANVAS_GATE0_DEBUG_PORT;
+  if (debuggingPort && /^\d{4,5}$/.test(debuggingPort)) {
+    app.commandLine.appendSwitch('remote-debugging-port', debuggingPort);
+  }
+}
+
+export function focusExistingWindow(targetWindow: {
+  isMinimized(): boolean;
+  restore(): void;
+  isVisible(): boolean;
+  show(): void;
+  focus(): void;
+} | null | undefined): void {
+  if (!targetWindow) return;
+  if (targetWindow.isMinimized()) {
+    targetWindow.restore();
+  }
+  if (!targetWindow.isVisible()) {
+    targetWindow.show();
+  }
+  targetWindow.focus();
+}
+
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
 
 export const MAIN_DIST = path.join(process.env.APP_ROOT, 'dist-electron');
 export const RENDERER_DIST = path.join(process.env.APP_ROOT, 'dist');
@@ -128,56 +170,55 @@ function createWindow() {
   });
 }
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-    win = null;
-  }
-});
-
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow();
-  }
-});
-
-import { registerDomainHandlers } from './ipc/domain-handlers.js';
-import { registerKnowledgeHandlers } from './ipc/knowledge-handlers.js';
-import { registerRecognitionHandlers } from './ipc/recognition-handlers.js';
-import { registerCloudSyncHandlers } from './ipc/cloudsync-handlers.js';
-import { registerCloudSyncDiagnosticHandler } from './ipc/cloudsync-diagnostic-handler.js';
-import { initDiscordRpc, destroyDiscordRpc } from './discord-rpc.js';
-import { writeQueue } from './ipc/write-queue.js';
-import { GracefulShutdownController } from './graceful-shutdown.js';
-
-const gracefulShutdown = new GracefulShutdownController({
-  begin: () => writeQueue.beginShutdown(),
-  flush: () => writeQueue.flush(),
-  quit: () => app.quit(),
-  onFailure: (error) => console.error('[Shutdown] Pending writes did not flush cleanly.', error),
-  timeoutMs: 15_000,
-});
-
-let discordRpcDestroyed = false;
-app.on('before-quit', () => {
-  if (!discordRpcDestroyed) {
-    discordRpcDestroyed = true;
-    destroyDiscordRpc();
-  }
-});
-
-app.on('before-quit', (event) => {
-  gracefulShutdown.handleBeforeQuit(event);
-});
-
-app.whenReady().then(() => {
-  registerDomainHandlers();
-  registerKnowledgeHandlers();
-  registerRecognitionHandlers();
-  registerCloudSyncHandlers(ipcMain);
-  registerCloudSyncDiagnosticHandler(ipcMain);
-  initDiscordRpc({
-    debugLogs: !app.isPackaged,
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    focusExistingWindow(win);
   });
-  createWindow();
-});
+
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') {
+      app.quit();
+      win = null;
+    }
+  });
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow();
+    }
+  });
+
+  const gracefulShutdown = new GracefulShutdownController({
+    begin: () => writeQueue.beginShutdown(),
+    flush: () => writeQueue.flush(),
+    quit: () => app.quit(),
+    onFailure: (error) => console.error('[Shutdown] Pending writes did not flush cleanly.', error),
+    timeoutMs: 15_000,
+  });
+
+  let discordRpcDestroyed = false;
+  app.on('before-quit', () => {
+    if (!discordRpcDestroyed) {
+      discordRpcDestroyed = true;
+      destroyDiscordRpc();
+    }
+  });
+
+  app.on('before-quit', (event) => {
+    gracefulShutdown.handleBeforeQuit(event);
+  });
+
+  app.whenReady().then(() => {
+    registerDomainHandlers();
+    registerKnowledgeHandlers();
+    registerRecognitionHandlers();
+    registerCloudSyncHandlers(ipcMain);
+    registerCloudSyncDiagnosticHandler(ipcMain);
+    initDiscordRpc({
+      debugLogs: !app.isPackaged,
+    });
+    createWindow();
+  });
+}

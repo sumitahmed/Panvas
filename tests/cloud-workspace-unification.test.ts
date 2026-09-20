@@ -516,7 +516,7 @@ test('public cloud errors never expose configuration, secret, HTTP, or internal 
     const shown = presentCloudError(new Error(internal), 'authorization');
     assert.doesNotMatch(shown.message, /PANVAS_|client_secret|400|invalid_request/i);
   }
-  assert.equal(presentCloudError(new Error('PANVAS_GOOGLE_CLIENT_ID missing'), 'authorization').message, 'Google Drive needs to be reconnected.');
+  assert.equal(presentCloudError(new Error('PANVAS_GOOGLE_CLIENT_ID missing'), 'authorization').message, 'Google Drive sign-in is temporarily unavailable.');
   assert.equal(presentCloudError(Object.assign(new Error('raw'), { name: 'AuthExpiredError' }), 'sync').message, 'Google Drive needs to be reconnected.');
 
   const [store, panel, indicator, handlers, auth] = await Promise.all([
