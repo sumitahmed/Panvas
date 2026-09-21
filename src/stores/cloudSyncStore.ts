@@ -1058,6 +1058,7 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
     // empty; it never creates a bootstrap shell first.
     deviceResetInProgress = false;
     set({ isResetting: false });
+    set({ isResetting: false, isSyncing: false });
     await get().triggerSync();
     const final: CloudSyncState = get();
     const terminal = final.statusByProvider.googledrive === 'synced' || final.statusByProvider.googledrive === 'synced-review';
