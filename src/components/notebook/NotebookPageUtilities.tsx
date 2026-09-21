@@ -38,10 +38,22 @@ export function NotebookPageUtilities({ engine, workspaceId, notebookId, ownerId
     {editable && <NotebookLayersControl engine={engine} onChange={onChange} />}
     {editable && <NotebookElementsControl engine={engine} workspaceId={workspaceId} onInsert={onChange} />}
     <NotebookAudioControl engine={engine} owner={audioOwner} canRecord={editable} onPageDataPersisted={onPageDataPersisted} onDelete={onVoiceDelete} onRename={onVoiceRename} />
+    {onPrintPage && (
+      <button
+        type="button"
+        onClick={() => onPrintPage()}
+        disabled={isExporting}
+        className="panvas-icon-control h-9 w-9 focus-ring disabled:opacity-50"
+        aria-label="Print page"
+        title="Print page"
+      >
+        <Printer size={16} />
+      </button>
+    )}
     {onExportPage && onExportNotebook && (
       <div ref={pdfMenuRef} className="relative">
         <button type="button" onClick={() => setIsPdfMenuOpen(value => !value)} disabled={isExporting} className="panvas-icon-control h-9 w-9 focus-ring disabled:opacity-50" aria-label="Export and print" title="Export and print" aria-haspopup="menu" aria-expanded={isPdfMenuOpen}><Download size={16} /></button>
-        {isPdfMenuOpen && <div role="menu" aria-label="Export and print" className="panvas-overlay panvas-floating-surface absolute right-0 top-10 z-50 min-w-56 p-1 shadow-xl">
+        {isPdfMenuOpen && <div role="menu" aria-label="Export and print" className="panvas-floating-surface absolute right-0 top-10 z-50 min-w-56 p-1 shadow-xl rounded-xl border border-panvas-border-subtle">
           <button role="menuitem" type="button" onClick={() => { setIsPdfMenuOpen(false); onExportPage(); }} disabled={isExporting} className="panvas-menu-item w-full disabled:opacity-50"><FileDown size={15} />Export Page to PDF</button>
           <button role="menuitem" type="button" onClick={() => { setIsPdfMenuOpen(false); onExportNotebook(); }} disabled={isExporting} className="panvas-menu-item w-full disabled:opacity-50"><Download size={15} />Export Notebook to PDF</button>
           {onPrintPage && <button role="menuitem" type="button" onClick={() => { setIsPdfMenuOpen(false); onPrintPage(); }} disabled={isExporting} className="panvas-menu-item w-full disabled:opacity-50"><Printer size={15} />Print Page</button>}
@@ -75,7 +87,7 @@ export function NotebookPageUtilities({ engine, workspaceId, notebookId, ownerId
   return (
     <div ref={compactMenuRef} className="relative">
       <button type="button" onClick={() => setIsOpen(value => !value)} className="panvas-page-utilities panvas-icon-control h-11 w-11 rounded-xl focus-ring" title="Page utilities" aria-label="Page utilities" aria-expanded={isOpen}><MoreHorizontal size={17} /></button>
-      {isOpen && <div role="menu" aria-label="Page utilities" className="panvas-overlay panvas-floating-surface absolute right-0 top-12 flex items-center p-1.5">{controls}</div>}
+      {isOpen && <div role="menu" aria-label="Page utilities" className="panvas-floating-surface absolute right-0 top-12 z-50 flex items-center p-1.5 shadow-xl rounded-xl border border-panvas-border-subtle">{controls}</div>}
     </div>
   );
 }

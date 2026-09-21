@@ -307,6 +307,7 @@ export class DiscordPresenceService {
     if (!this.logger && this.debugLogs && !this.isVerbose()) {
       console.log('[Discord RPC] Connected');
     }
+    this.log('Connected');
 
     socket.on('data', (chunk: Buffer) => {
       if (this.socket !== socket) return;
@@ -493,6 +494,7 @@ export class DiscordPresenceService {
             if (!this.logger && this.debugLogs && !this.isVerbose()) {
               console.log('[Discord RPC] Presence active');
             }
+            this.log('Presence active');
           } else {
             this.logWarn(`Unexpected SET_ACTIVITY event; not acknowledged: ${JSON.stringify(data.evt)}`);
           }

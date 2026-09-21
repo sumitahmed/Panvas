@@ -162,9 +162,10 @@ interface NotebookFloatingToolbarProps {
   hideCollapseButton?: boolean;
   fullscreenToolOnly?: boolean;
   availableWidth?: number | null;
+  pageUtilities?: React.ReactNode;
 }
 
-export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = ({ editor, engine, saveKey, workspaceId, hasSelectedStrokes = false, onConvertHandwriting, embedded = false, hideCollapseButton = false, fullscreenToolOnly = false, availableWidth }) => {
+export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = ({ editor, engine, saveKey, workspaceId, hasSelectedStrokes = false, onConvertHandwriting, embedded = false, hideCollapseButton = false, fullscreenToolOnly = false, availableWidth, pageUtilities }) => {
   const isPhone = useIsMobileViewport();
   const compactTools = useIsMobileViewport(1023);
   // Derive the displayed tool from the same ToolManager snapshot used by input routing.
@@ -945,12 +946,21 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
               )}
             </button>
 
-            <OverlayManager isOpen={showOverflow} onClose={() => setShowOverflow(false)} anchorRef={overflowAnchorRef} placement="bottom-end">
+            <OverlayManager isOpen={showOverflow} onClose={() => setShowOverflow(false)} anchorRef={overflowAnchorRef} placement={isPhone ? 'top-end' : 'bottom-end'}>
               <div
                 className="panvas-floating-surface flex w-max flex-col gap-2 p-2 max-[599px]:w-[min(20rem,calc(100vw-1.5rem))] max-[599px]:max-h-[60vh] max-[599px]:overflow-y-auto"
                 role="menu"
                 aria-label="More Tools"
               >
+                {pageUtilities && (
+                  <div>
+                    {isPhone && <div className="px-2 pb-1 text-xs font-medium text-panvas-text-secondary">Page actions</div>}
+                    <div className="flex items-center gap-1 max-[599px]:flex-wrap max-[599px]:justify-start">
+                      {pageUtilities}
+                    </div>
+                    {layout.overflow.length > 0 && <div className="h-[1px] w-full bg-panvas-border-subtle my-1" />}
+                  </div>
+                )}
                 {isConfigurableDrawingTool(activeTool) && !toolState.handwritingToTextEnabled && !showInlineWritingPresets && currentSettings && (
                   <>
                      <WritingPresetStrip

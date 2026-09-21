@@ -2610,7 +2610,32 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       </main>
 
       {isMobileViewport && workspaceViewMode === 'edit' && <div className="panvas-mobile-tool-dock">
-        <NotebookFloatingToolbar editor={activeEditor} engine={notebookEngine} workspaceId={workspace?.id} hasSelectedStrokes={notebookEngine.selection.hasSelectedStrokes()} onConvertHandwriting={openHandwritingConversion} />
+        <NotebookFloatingToolbar
+          editor={activeEditor}
+          engine={notebookEngine}
+          workspaceId={workspace?.id}
+          hasSelectedStrokes={notebookEngine.selection.hasSelectedStrokes()}
+          onConvertHandwriting={openHandwritingConversion}
+          pageUtilities={
+            <NotebookPageUtilities
+              engine={notebookEngine}
+              workspaceId={workspace?.id}
+              notebookId={notebook?.id}
+              ownerId={focusedPage?.id}
+              editable={workspaceViewMode === 'edit'}
+              onPageDataPersisted={handlePageAudioPersisted}
+              onVoiceDelete={handleDeleteVoiceNote}
+              onVoiceRename={handleRenameVoiceNote}
+              onChange={handleLayersChange}
+              onExportPage={() => void handleExportPagePdf()}
+              onExportNotebook={() => void handleExportNotebookPdf()}
+              onPrintPage={() => void handlePrintPage()}
+              onPrintNotebook={() => void handlePrintNotebook()}
+              isExporting={isExportingPdf}
+              embedded
+            />
+          }
+        />
       </div>}
 
       {/* Static properties panel on the right */}

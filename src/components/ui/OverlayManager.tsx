@@ -9,6 +9,7 @@ interface OverlayManagerProps {
   anchorRef: React.RefObject<HTMLElement | null>;
   placement?: 'bottom-start' | 'bottom-end' | 'top-start' | 'top-end';
   offset?: { x: number; y: number };
+  asSheet?: boolean;
 }
 
 export function OverlayManager({ 
@@ -17,9 +18,11 @@ export function OverlayManager({
   onClose, 
   anchorRef, 
   placement = 'bottom-start',
-  offset = { x: 0, y: 4 }
+  offset = { x: 0, y: 4 },
+  asSheet = false
 }: OverlayManagerProps) {
   const isPhone = useIsMobileViewport();
+  const shouldUseSheet = isPhone && asSheet;
   const overlayRef = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState({ top: -9999, left: -9999 });
 
@@ -118,16 +121,17 @@ export function OverlayManager({
   return createPortal(
     <div
       ref={overlayRef}
-      className={`panvas-overlay fixed overflow-auto ${isPhone ? 'panvas-mobile-sheet' : ''}`}
-      style={isPhone ? { bottom: 'var(--panvas-keyboard-inset, 0px)' } : {
+      className={`panvas-overlay fixed overflow-auto ${shouldUseSheet ? 'panvas-mobile-sheet' : ''}`}
+      style={shouldUseSheet ? { bottom: 'var(--panvas-keyboard-inset, 0px)' } : {
         top: position.top,
         left: position.left,
         maxWidth: 'calc(100vw - 24px)',
         maxHeight: 'calc(100vh - 24px)',
-        visibility: position.top === -9999 ? 'hidden' : 'visible'
+        visibility: position.top === -9999 ? 'hidden' : 'visible',
+        zIndex: 60,
       }}
     >
-      {isPhone && <button type="button" onClick={onClose} className="panvas-sheet-close" aria-label="Close panel">Done</button>}
+      {shouldUseSheet && <button type="button" onClick={onClose} className="panvas-sheet-close" aria-label="Close panel">Done</button>}
       {children}
     </div>,
     document.body

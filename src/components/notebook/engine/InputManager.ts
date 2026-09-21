@@ -572,11 +572,7 @@ export class InputManager {
         type: 'doc', 
         content: [{ 
           type: 'paragraph', 
-          content: [{
-            type: 'text',
-            text: '',
-            marks: [{ type: 'textStyle', attrs: { color: this.toolManager.getState().color, fontFamily: this.textManager.getDefaultFontFamily() } }]
-          }] 
+          content: [],
         }] 
       },
       createdAt: Date.now(),

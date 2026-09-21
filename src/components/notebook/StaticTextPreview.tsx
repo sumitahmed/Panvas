@@ -6,9 +6,51 @@ import { textObjectStyle } from './textTypography';
 import { stickyPaperStyle, getStickyNoteColor, getStickyNoteOpacity, getStickyNoteShape, getShapeBorderRadius, hexToRgba, isStickyNote } from './stickyNotes';
 import { gate0Profiler } from '@/dev/gate0Profiler';
 
+function sanitizeTipTapDoc(content: unknown): Record<string, any> | null {
+  if (!content || typeof content !== 'object') return null;
+  const raw = content as Record<string, any>;
+
+  function sanitizeNode(node: any): any {
+    if (!node || typeof node !== 'object') return null;
+    if (node.type === 'text') {
+      if (typeof node.text !== 'string' || node.text.length === 0) {
+        return null;
+      }
+      return node;
+    }
+    if (Array.isArray(node.content)) {
+      const sanitizedChildren = node.content.map(sanitizeNode).filter(Boolean);
+      return {
+        ...node,
+        content: sanitizedChildren,
+      };
+    }
+    return node;
+  }
+
+  const sanitized = sanitizeNode(raw);
+  if (!sanitized) return null;
+  if (sanitized.type !== 'doc') {
+    return {
+      type: 'doc',
+      content: Array.isArray(sanitized) ? sanitized : [sanitized],
+    };
+  }
+  return sanitized;
+}
+
 export const StaticTextPreview: React.FC<{ object: TextObject; scale: number; zIndex?: number; offset?: { x: number; y: number } }> = ({ object, scale, zIndex, offset }) => {
   gate0Profiler.resource('reactRenders.StaticTextPreview', 1);
-  const html = useMemo(() => generateHTML(object.content, notebookTipTapExtensions), [object.content]);
+  const html = useMemo(() => {
+    try {
+      const doc = sanitizeTipTapDoc(object.content);
+      if (!doc) return '';
+      return generateHTML(doc, notebookTipTapExtensions);
+    } catch (err) {
+      console.warn('[StaticTextPreview] Failed to generate HTML from text content:', err);
+      return '';
+    }
+  }, [object.content]);
 
   const isSticky = isStickyNote(object);
   const stickyColor = getStickyNoteColor(object);

@@ -48,6 +48,23 @@ function localExcalidrawAssets() {
   };
 }
 
+function cleanElectronRollupOptions() {
+  return {
+    name: 'panvas-clean-electron-rollup-options',
+    configResolved(config: any) {
+      if (config.build?.rollupOptions) {
+        delete config.build.rollupOptions.platform;
+        const outputs = Array.isArray(config.build.rollupOptions.output)
+          ? config.build.rollupOptions.output
+          : config.build.rollupOptions.output ? [config.build.rollupOptions.output] : [];
+        for (const out of outputs) {
+          delete out.codeSplitting;
+        }
+      }
+    },
+  };
+}
+
 export default defineConfig(({ command, mode }) => {
   const isWebOnly = mode === 'web' || mode === 'landing' || process.env.PANVAS_DEV_WEB === 'true' || Boolean(process.env.VERCEL);
 
@@ -66,6 +83,7 @@ export default defineConfig(({ command, mode }) => {
               main: {
                 entry: 'electron/main.ts',
                 vite: {
+                  plugins: [cleanElectronRollupOptions()],
                   define: {
                     'process.env.PANVAS_GOOGLE_CLIENT_ID': JSON.stringify(googleClientId),
                     'process.env.PANVAS_GOOGLE_CLIENT_SECRET': JSON.stringify(googleClientSecret),
@@ -74,6 +92,9 @@ export default defineConfig(({ command, mode }) => {
               },
               preload: {
                 input: 'electron/preload.ts',
+                vite: {
+                  plugins: [cleanElectronRollupOptions()],
+                },
               },
               renderer: {},
             }),
