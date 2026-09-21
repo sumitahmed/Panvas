@@ -327,33 +327,29 @@ export function LibraryWorkspace() {
   return <main className="panvas-library h-full overflow-auto bg-panvas-bg-secondary/40"><div className="mx-auto flex min-h-full max-w-[1640px] gap-6 px-5 py-7 lg:px-8 2xl:px-10">
     <LibraryNavigator view={view} onSelectView={selectView} folders={liveFolders} folderId={folderId} onSelectFolder={selectFolder} />
     <section className="min-w-0 flex-1 pb-12">
-      <header className="flex flex-wrap items-end justify-between gap-5">
-        <div>
-          <p className="text-xs text-panvas-text-tertiary">{view === 'cloud' ? 'Cloud Sync' : activeWorkspace?.name ?? 'Local workspace'}</p>
-          <h1 className="mt-1 text-[30px] font-semibold tracking-tight text-panvas-text-primary">
-            {folderId
-              ? liveFolders.find(item => item.id === folderId)?.name ?? 'Folder'
-              : view === 'cloud'
-              ? 'Cloud Sync'
-              : view === 'library'
-              ? 'Library'
-              : view[0].toUpperCase() + view.slice(1)}
-          </h1>
-          <p className="mt-2 text-sm text-panvas-text-secondary">
-            {view === 'cloud'
-              ? 'Sync your Panvas work across devices using your own cloud account.'
-              : folderId
-              ? 'Items organized inside this folder.'
-              : view === 'recent'
-              ? 'Recently opened and modified notebooks, canvases, and PDFs.'
-              : view === 'favorites'
-              ? 'Starred items across your active workspace.'
-              : view === 'trash'
-              ? 'Deleted notebooks, canvases, sections, and pages.'
-              : 'Your local notebooks, canvases, PDFs, folders, favorites, and trash.'}
-          </p>
-        </div>
-        {view !== 'cloud' && (
+      {view !== 'cloud' && (
+        <header className="flex flex-wrap items-end justify-between gap-5">
+          <div>
+            <p className="text-xs text-panvas-text-tertiary">{folderId ? 'Folder' : activeWorkspace?.name ?? 'Local workspace'}</p>
+            <h1 className="mt-1 text-[30px] font-semibold tracking-tight text-panvas-text-primary">
+              {folderId
+                ? liveFolders.find(item => item.id === folderId)?.name ?? 'Folder'
+                : view === 'library'
+                ? 'Library'
+                : view[0].toUpperCase() + view.slice(1)}
+            </h1>
+            <p className="mt-2 text-sm text-panvas-text-secondary">
+              {folderId
+                ? 'Items organized inside this folder.'
+                : view === 'recent'
+                ? 'Recently opened and modified notebooks, canvases, and PDFs.'
+                : view === 'favorites'
+                ? 'Starred items across your active workspace.'
+                : view === 'trash'
+                ? 'Deleted notebooks, canvases, sections, and pages.'
+                : 'Your local notebooks, canvases, PDFs, folders, favorites, and trash.'}
+            </p>
+          </div>
           <div className="flex flex-wrap items-center gap-2">
             <input ref={importInputRef} type="file" accept=".panvas-backup.json,.json,.panvas-backup" onChange={handleImportBackup} className="hidden" />
             {view === 'trash' && <button
@@ -394,8 +390,8 @@ export function LibraryWorkspace() {
               </div>}
             </div>
           </div>
-        )}
-      </header>
+        </header>
+      )}
 
       {/* Compact Browse switcher for mobile/tablet */}
       <div className="mt-5 flex flex-wrap gap-2 lg:hidden" aria-label="Library views">
@@ -419,7 +415,7 @@ export function LibraryWorkspace() {
       </div>
 
       {view === 'cloud' ? (
-        <div className="mt-8">
+        <div className="mt-2 sm:mt-4">
           <CloudSyncPanel />
         </div>
       ) : (

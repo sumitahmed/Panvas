@@ -9,6 +9,9 @@ import { applyDevelopmentBrowserCsp } from './src/config/browserCsp';
 dotenv.config();
 dotenv.config({ path: path.resolve(__dirname, '.env.local') });
 
+const defaultWebClientId = '486992017517-uog6ucb24pkidgp5tcg1icuif4a3sprc.apps.googleusercontent.com';
+const googleWebClientId = process.env.VITE_PANVAS_GOOGLE_WEB_CLIENT_ID || defaultWebClientId;
+process.env.VITE_PANVAS_GOOGLE_WEB_CLIENT_ID = googleWebClientId;
 const googleClientId = process.env.PANVAS_GOOGLE_CLIENT_ID || '';
 const googleClientSecret = process.env.PANVAS_GOOGLE_CLIENT_SECRET || process.env.PANVAS_GOOGLE_SECRET || '';
 
@@ -66,10 +69,18 @@ function cleanElectronRollupOptions() {
 }
 
 export default defineConfig(({ command, mode }) => {
-  const isWebOnly = mode === 'web' || mode === 'landing' || process.env.PANVAS_DEV_WEB === 'true' || Boolean(process.env.VERCEL);
+  const isWebOnly =
+    mode === 'web' ||
+    mode === 'landing' ||
+    process.env.PANVAS_DEV_WEB === 'true' ||
+    process.env.PANVAS_WEB_BUILD === 'true' ||
+    Boolean(process.env.VERCEL) ||
+    Boolean(process.env.VERCEL_ENV) ||
+    Boolean(process.env.CF_PAGES) ||
+    Boolean(process.env.NETLIFY);
 
   return {
-    base: './',
+    base: isWebOnly ? '/' : './',
     plugins: [
       react(),
       {
@@ -116,8 +127,9 @@ export default defineConfig(({ command, mode }) => {
   define: {
     'process.env': {
       IS_PREACT: 'false',
-      NODE_ENV: JSON.stringify(process.env.NODE_ENV || 'development')
-    }
+      NODE_ENV: JSON.stringify(process.env.NODE_ENV || 'development'),
+    },
+    'import.meta.env.VITE_PANVAS_GOOGLE_WEB_CLIENT_ID': JSON.stringify(googleWebClientId),
   },
   server: {
     port: 3000,

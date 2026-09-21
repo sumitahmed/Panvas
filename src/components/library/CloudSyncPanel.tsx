@@ -124,6 +124,10 @@ export function CloudSyncPanel() {
   }, [gdStatus, loadReviewChanges, reviewItems.length]);
 
   const handleGoogleConnect = async () => {
+    if (!browserConfigured) {
+      showToast('Google Drive connection is not configured in this build.', 'error');
+      return;
+    }
     clearToast();
     setIsConnecting(true);
     try {
@@ -234,17 +238,17 @@ export function CloudSyncPanel() {
   };
 
   return (
-    <section className="mx-auto w-full max-w-2xl pb-8" aria-labelledby="cloud-sync-heading">
-      <div className="mb-7 flex items-start gap-3">
+    <section className="w-full max-w-3xl pb-8" aria-labelledby="cloud-sync-heading">
+      <div className="mb-7 flex items-start gap-3.5">
         <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-panvas-border-default bg-panvas-bg-elevated shadow-sm">
           <Cloud size={20} className="text-panvas-accent-blue" aria-hidden="true" />
         </span>
         <div className="min-w-0">
           <p className="mb-1 text-2xs font-semibold uppercase tracking-[0.16em] text-panvas-text-tertiary">Storage</p>
-          <h2 id="cloud-sync-heading" className="text-2xl font-semibold tracking-tight text-panvas-text-primary">
+          <h1 id="cloud-sync-heading" className="text-2xl sm:text-[28px] font-semibold tracking-tight text-panvas-text-primary">
             Cloud Sync
-          </h2>
-          <p className="mt-1 max-w-xl text-sm leading-5 text-panvas-text-secondary">
+          </h1>
+          <p className="mt-1.5 max-w-xl text-sm leading-relaxed text-panvas-text-secondary">
             Keep your Panvas work available across devices with your own Google Drive account.
           </p>
         </div>
@@ -293,9 +297,9 @@ export function CloudSyncPanel() {
             ) : (
               <button
                 type="button"
-                disabled={isConnecting || gdStatus === 'connecting' || !browserConfigured}
+                disabled={isConnecting || gdStatus === 'connecting'}
                 onClick={handleGoogleConnect}
-                className="panvas-action-button panvas-action-button--primary w-full self-start focus-ring sm:w-auto sm:self-auto"
+                className="panvas-action-button panvas-action-button--primary w-full self-start focus-ring sm:w-auto sm:self-auto shrink-0"
               >
                 {isConnecting || gdStatus === 'connecting' ? 'Connecting…' : 'Connect Google Drive'}
               </button>
@@ -326,7 +330,7 @@ export function CloudSyncPanel() {
             </div>
           )}
           {!gdConnected && !browserConfigured && (
-            <p className="mt-3 border-t border-panvas-border-subtle pt-3 text-2xs text-panvas-text-tertiary">
+            <p className="mx-5 mb-5 border-t border-panvas-border-subtle pt-3 text-2xs text-panvas-text-tertiary">
               Google Drive connection is not configured in this build.
             </p>
           )}

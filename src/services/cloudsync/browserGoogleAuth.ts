@@ -9,8 +9,14 @@ let current: BrowserToken | null = null;
 let scriptPromise: Promise<void> | null = null;
 
 function webClientId(): string {
-  const meta = (typeof import.meta !== 'undefined' && (import.meta as any).env) ? (import.meta as any).env : {} as Record<string, string | undefined>;
-  return (meta.VITE_PANVAS_GOOGLE_WEB_CLIENT_ID || '').trim();
+  try {
+    const meta = (typeof import.meta !== 'undefined' && (import.meta as any).env) ? (import.meta as any).env : {} as Record<string, string | undefined>;
+    const id = (meta.VITE_PANVAS_GOOGLE_WEB_CLIENT_ID || '').trim();
+    if (id) return id;
+  } catch {
+    // Node test environments without import.meta.env
+  }
+  return '';
 }
 
 export function isBrowserGoogleConfigured(): boolean { return webClientId().length > 0; }

@@ -31,6 +31,7 @@
     "test:browser-integrity": "node --test tests/browser-integrity.test.ts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
     "build": "npm run typecheck && vite build",
+    "build:web": "npm run typecheck && vite build --mode web",
     "check:release": "node scripts/check-release.mjs",
     "checksum": "node scripts/write-checksums.mjs",
     "audit:sync": "node scripts/audit-sync-coverage.mjs",
