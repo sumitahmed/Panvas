@@ -119,6 +119,12 @@ contextBridge.exposeInMainWorld('panvas', {
       deleteObject: (workspaceId: string, hash: string) => ipcRenderer.invoke('cloudsync:drive:deleteObject', workspaceId, hash),
       moveObject: (workspaceId: string, fromHash: string, toHash: string) => ipcRenderer.invoke('cloudsync:drive:moveObject', workspaceId, fromHash, toHash),
       getMetadata: (workspaceId: string, hash: string) => ipcRenderer.invoke('cloudsync:drive:getMetadata', workspaceId, hash),
+      findCandidatePanvasRoots: () => ipcRenderer.invoke('cloudsync:drive:findCandidatePanvasRoots'),
+      readRootJson: (name: string) => ipcRenderer.invoke('cloudsync:drive:readRootJson', name),
+      readWorkspaceJson: (workspaceId: string, name: string) => ipcRenderer.invoke('cloudsync:drive:readWorkspaceJson', workspaceId, name),
+      readCandidateRootJson: (rootFolderId: string, name: string) => ipcRenderer.invoke('cloudsync:drive:readCandidateRootJson', rootFolderId, name),
+      readCandidateWorkspaceJson: (rootFolderId: string, workspaceId: string, name: string) => ipcRenderer.invoke('cloudsync:drive:readCandidateWorkspaceJson', rootFolderId, workspaceId, name),
+      getCandidateObject: (rootFolderId: string, hash: string) => ipcRenderer.invoke('cloudsync:drive:getCandidateObject', rootFolderId, hash),
     },
     driveV2: {
       readRootJson: (name: string) => ipcRenderer.invoke('cloudsync:driveV2:readRootJson', name),

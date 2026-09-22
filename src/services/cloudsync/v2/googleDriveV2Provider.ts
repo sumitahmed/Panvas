@@ -5,8 +5,10 @@ export class GoogleDriveSyncV2Provider implements SyncV2Provider {
   private readonly drive: GoogleDriveSyncProvider;
   constructor(options: GoogleDriveProviderOptions = {}) {
     this.drive = new GoogleDriveSyncProvider({ ...options, remoteNamespace: 'sync-v2' });
+    this.drive = new GoogleDriveSyncProvider({ storageSpace: 'appDataFolder', ...options, remoteNamespace: 'sync-v2' });
   }
 
+  getDriveProvider(): GoogleDriveSyncProvider { return this.drive; }
   readProfile() { return this.drive.readRootJson<SyncV2Profile>('profile.json'); }
   writeProfile(value: SyncV2Profile, ifMatch: string | null) { return this.drive.writeRootJson('profile.json', value, ifMatch); }
   readCatalog() { return this.drive.readRootJson<SyncV2Catalog>('catalog.json'); }

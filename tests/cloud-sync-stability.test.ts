@@ -440,7 +440,7 @@ test('browser GIS initializes a token client, requests access, and reports missi
   };
   const response = await requestBrowserGoogleAccessToken('web-client.apps.googleusercontent.com', oauth2);
   assert.equal(config.client_id, 'web-client.apps.googleusercontent.com');
-  assert.equal(config.scope, 'https://www.googleapis.com/auth/drive.file');
+  assert.equal(config.scope, 'https://www.googleapis.com/auth/drive.appdata email profile openid');
   assert.equal(requestCount, 1);
   assert.equal(response.access_token, 'memory-only-token');
   await assert.rejects(connectBrowserGoogle(), (error: Error) => error instanceof CloudOperationError && error.code === 'configuration');
@@ -448,7 +448,7 @@ test('browser GIS initializes a token client, requests access, and reports missi
 
 class DeviceManifestStateCtor implements DeviceManifestState { lastSeenRevision = 0 }
 
-test('browser sync security keeps secrets out and both OAuth flows request only drive.file', async () => {
+test('browser sync security keeps secrets out and OAuth flows request least privilege with appdata', async () => {
   const [auth, electronAuth, store, env, preload] = await Promise.all([
     fs.readFile(new URL('../src/services/cloudsync/browserGoogleAuth.ts', import.meta.url), 'utf8'),
     fs.readFile(new URL('../electron/ipc/google-auth-service.ts', import.meta.url), 'utf8'),
@@ -456,5 +456,5 @@ test('browser sync security keeps secrets out and both OAuth flows request only 
     fs.readFile(new URL('../.env.example', import.meta.url), 'utf8'),
     fs.readFile(new URL('../electron/preload.ts', import.meta.url), 'utf8'),
   ]);
-  assert.match(auth, /initTokenClient/); assert.match(auth, /requestAccessToken/); assert.match(auth, /VITE_PANVAS_GOOGLE_WEB_CLIENT_ID/); assert.doesNotMatch(auth, /VITE_PANVAS_GOOGLE_CLIENT_ID|VITE_GOOGLE_CLIENT_ID/); assert.doesNotMatch(`${auth}\n${store}\n${preload}`, /PANVAS_GOOGLE_CLIENT_SECRET|VITE_.*CLIENT_SECRET/); assert.match(env, /^PANVAS_GOOGLE_CLIENT_ID=$/m); assert.match(env, /^PANVAS_GOOGLE_CLIENT_SECRET=$/m); assert.doesNotMatch(env, /^PANVAS_GOOGLE_(?:CLIENT_ID|CLIENT_SECRET)=.+$/m); assert.doesNotMatch(`${auth}\n${electronAuth}`, /userinfo\.email|userinfo\.profile|openid email profile/); assert.match(store, /runSyncCycle/); assert.match(store, /applyRemoteChanges/); assert.match(store, /crypto\.randomUUID/); assert.match(store, /lastSyncedByProvider/);
+  assert.match(auth, /initTokenClient/); assert.match(auth, /requestAccessToken/); assert.match(auth, /VITE_PANVAS_GOOGLE_WEB_CLIENT_ID/); assert.doesNotMatch(auth, /VITE_PANVAS_GOOGLE_CLIENT_ID|VITE_GOOGLE_CLIENT_ID/); assert.doesNotMatch(`${auth}\n${store}\n${preload}`, /PANVAS_GOOGLE_CLIENT_SECRET|VITE_.*CLIENT_SECRET/); assert.match(env, /^PANVAS_GOOGLE_CLIENT_ID=$/m); assert.match(env, /^PANVAS_GOOGLE_CLIENT_SECRET=$/m); assert.doesNotMatch(env, /^PANVAS_GOOGLE_(?:CLIENT_ID|CLIENT_SECRET)=.+$/m); assert.doesNotMatch(`${auth}\n${electronAuth}`, /userinfo\.email|userinfo\.profile/); assert.match(store, /runSyncCycle/); assert.match(store, /applyRemoteChanges/); assert.match(store, /crypto\.randomUUID/); assert.match(store, /lastSyncedByProvider/);
 });

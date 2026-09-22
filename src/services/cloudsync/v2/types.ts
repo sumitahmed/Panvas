@@ -112,8 +112,12 @@ export interface SyncV2ConflictStore {
   preserve(conflict: SyncV2MigrationConflict): Promise<'created' | 'present'>;
   hasUnresolved(profileId: string): Promise<boolean>;
   listUnresolved?(profileId: string): Promise<SyncV2MigrationConflict[]>;
+  hasUnresolved(profileId?: string): Promise<boolean>;
+  listUnresolved?(profileId?: string): Promise<SyncV2MigrationConflict[]>;
   /** Acknowledges a preserved review without deleting its recovery bytes. */
   resolve?(conflictId: string, profileId: string): Promise<boolean>;
+  resolve?(conflictId: string, profileId?: string): Promise<boolean>;
+  remove?(conflictId: string): Promise<void>;
   /** Removes device-local review/recovery records during an explicit reset. */
   clear?(): Promise<void>;
 }

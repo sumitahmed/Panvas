@@ -42,6 +42,8 @@ export interface GoogleDriveProviderOptions {
   /** Optional child namespace below Panvas/. Legacy sync leaves this unset. */
   remoteNamespace?: string;
   assertCurrent?: () => void;
+  storageSpace?: 'appDataFolder' | 'drive';
+  rootFolderId?: string;
 }
 
 const DEFAULT_API_BASE = 'https://www.googleapis.com/drive/v3';
@@ -65,6 +67,8 @@ export class GoogleDriveSyncProvider implements CloudSyncProvider {
   private readonly randomFn: () => number;
   private readonly remoteNamespace: string | null;
   private readonly assertCurrent: () => void;
+  private readonly storageSpace: 'appDataFolder' | 'drive';
+  private readonly optionsRootFolderId: string | null;
   private metrics = EMPTY_METRICS();
   private rootFolderId: string | null = null;
   private objectsFolderId: string | null = null;
@@ -104,6 +108,8 @@ export class GoogleDriveSyncProvider implements CloudSyncProvider {
     this.randomFn = options.randomFn ?? Math.random;
     this.remoteNamespace = options.remoteNamespace?.trim() || null;
     this.assertCurrent = options.assertCurrent ?? (() => {});
+    this.storageSpace = options.storageSpace ?? (this.remoteNamespace === 'sync-v2' ? 'appDataFolder' : 'drive');
+    this.optionsRootFolderId = options.rootFolderId ?? null;
   }
 
   resetRequestMetrics(): void { this.metrics = EMPTY_METRICS(); }
@@ -177,11 +183,22 @@ export class GoogleDriveSyncProvider implements CloudSyncProvider {
   }
 
   private async discoverAppRoot(): Promise<string> {
-    const panvasRootId = await this.findOrCreateFolder('Panvas', 'root');
+    const parent = this.storageSpace === 'appDataFolder' ? 'appDataFolder' : 'root';
+    const panvasRootId = this.optionsRootFolderId ?? await this.findOrCreateFolder('Panvas', parent);
     const rootId = this.remoteNamespace ? await this.findOrCreateFolder(this.remoteNamespace, panvasRootId) : panvasRootId;
     const [objectsId, workspacesId] = await Promise.all([this.findOrCreateFolder('objects', rootId), this.findOrCreateFolder('workspaces', rootId)]);
     this.rootFolderId = rootId; this.objectsFolderId = objectsId; this.workspacesFolderId = workspacesId;
     return rootId;
+  }
+
+  async findCandidatePanvasRoots(): Promise<DriveFile[]> {
+    const electronDrive = this.electronDrive() as any;
+    if (electronDrive?.findCandidatePanvasRoots) return this.unwrapElectronDrive(electronDrive.findCandidatePanvasRoots());
+    const token = await this.getValidToken();
+    const query = `name = 'Panvas' and mimeType = 'application/vnd.google-apps.folder' and trashed = false and 'root' in parents`;
+    const response = await this.request('Candidate Panvas roots discovery', `${this.apiBaseUrl}/files?q=${encodeURIComponent(query)}&spaces=drive&fields=files(id,name,modifiedTime)`, { headers: { Authorization: `Bearer ${token}` } });
+    if (!response.ok) await this.handleHttpError(response, 'Candidate Panvas roots discovery');
+    return (await response.json()).files ?? [];
   }
 
   async readManifest(workspaceId: string): Promise<RemoteManifestRead> {
@@ -356,7 +373,7 @@ export class GoogleDriveSyncProvider implements CloudSyncProvider {
     await this.ensureAppRoot();
     const token = await this.getValidToken();
     const query = `mimeType = 'application/vnd.google-apps.folder' and trashed = false and '${this.workspacesFolderId}' in parents`;
-    const response = await this.request('Remote workspace discovery', `${this.apiBaseUrl}/files?q=${encodeURIComponent(query)}&spaces=drive&pageSize=1000&fields=files(id,name,modifiedTime)`, { headers: { Authorization: `Bearer ${token}` } });
+    const response = await this.request('Remote workspace discovery', `${this.apiBaseUrl}/files?q=${encodeURIComponent(query)}&spaces=${this.storageSpace}&pageSize=1000&fields=files(id,name,modifiedTime)`, { headers: { Authorization: `Bearer ${token}` } });
     if (!response.ok) await this.handleHttpError(response, 'Remote workspace discovery');
     const rawFiles: DriveFile[] = (await response.json()).files ?? [];
     const validFolders = rawFiles.filter((file: DriveFile) => file.name !== 'default' && /^ws-[A-Za-z0-9_-]+$/.test(file.name));
@@ -439,7 +456,7 @@ export class GoogleDriveSyncProvider implements CloudSyncProvider {
       let pageToken: string | undefined;
       do {
         const query = `trashed = false and '${escapeQuery(this.objectsFolderId!)}' in parents`;
-        const params = new URLSearchParams({ q: query, spaces: 'drive', pageSize: '1000', fields: 'nextPageToken,files(id,name,size,md5Checksum,version,modifiedTime,mimeType)' });
+        const params = new URLSearchParams({ q: query, spaces: this.storageSpace, pageSize: '1000', fields: 'nextPageToken,files(id,name,size,md5Checksum,version,modifiedTime,mimeType)' });
         if (pageToken) params.set('pageToken', pageToken);
         const response = await this.request('Object index discovery', `${this.apiBaseUrl}/files?${params.toString()}`, { headers: { Authorization: `Bearer ${token}` } });
         if (!response.ok) await this.handleHttpError(response, 'Object index discovery');
@@ -467,13 +484,18 @@ export class GoogleDriveSyncProvider implements CloudSyncProvider {
 
   private async findOrCreateFolder(name: string, parentFolderId: string): Promise<string> {
     const token = await this.getValidToken();
-    const parent = parentFolderId === 'root' ? "'root' in parents" : `'${escapeQuery(parentFolderId)}' in parents`;
+    const parent = parentFolderId === 'root'
+      ? "'root' in parents"
+      : parentFolderId === 'appDataFolder'
+        ? "'appDataFolder' in parents"
+        : `'${escapeQuery(parentFolderId)}' in parents`;
     const query = `name = '${escapeQuery(name)}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false and ${parent}`;
-    const search = await this.request(`Folder search for "${name}"`, `${this.apiBaseUrl}/files?q=${encodeURIComponent(query)}&spaces=drive&fields=files(id,name)`, { headers: { Authorization: `Bearer ${token}` } });
+    const search = await this.request(`Folder search for "${name}"`, `${this.apiBaseUrl}/files?q=${encodeURIComponent(query)}&spaces=${this.storageSpace}&fields=files(id,name)`, { headers: { Authorization: `Bearer ${token}` } });
     if (!search.ok) await this.handleHttpError(search, `Folder search for "${name}"`);
     const found = (await search.json()).files?.[0]; if (found) return found.id;
     const id = await this.creationId(name, parentFolderId);
-    const metadata: Record<string, unknown> = { id, name, mimeType: 'application/vnd.google-apps.folder' }; if (parentFolderId !== 'root') metadata.parents = [parentFolderId];
+    const metadata: Record<string, unknown> = { id, name, mimeType: 'application/vnd.google-apps.folder' };
+    if (parentFolderId !== 'root') metadata.parents = [parentFolderId];
     const created = await this.request(`Folder creation for "${name}"`, `${this.apiBaseUrl}/files?fields=id,name`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json; charset=utf-8' }, body: JSON.stringify(metadata) });
     if (created.status === 409 && await this.getFileMetadata(id)) return id;
     if (!created.ok) await this.handleHttpError(created, `Folder creation for "${name}"`); return (await created.json()).id;
@@ -491,7 +513,7 @@ export class GoogleDriveSyncProvider implements CloudSyncProvider {
 
   private async findFile(name: string, parentFolderId: string): Promise<DriveFile | null> {
     const token = await this.getValidToken(); const query = `name = '${escapeQuery(name)}' and trashed = false and '${escapeQuery(parentFolderId)}' in parents`;
-    const response = await this.request(`File search for "${name}"`, `${this.apiBaseUrl}/files?q=${encodeURIComponent(query)}&spaces=drive&fields=files(id,name,size,md5Checksum,version,modifiedTime,mimeType)`, { headers: { Authorization: `Bearer ${token}` } });
+    const response = await this.request(`File search for "${name}"`, `${this.apiBaseUrl}/files?q=${encodeURIComponent(query)}&spaces=${this.storageSpace}&fields=files(id,name,size,md5Checksum,version,modifiedTime,mimeType)`, { headers: { Authorization: `Bearer ${token}` } });
     if (!response.ok) await this.handleHttpError(response, `File search for "${name}"`); return (await response.json()).files?.[0] ?? null;
   }
 
@@ -515,7 +537,7 @@ export class GoogleDriveSyncProvider implements CloudSyncProvider {
     if (!pending) {
       pending = (async () => {
         const token = await this.getValidToken();
-        const response = await this.request('File ID allocation', `${this.apiBaseUrl}/files/generateIds?count=1&space=drive&type=files`, { headers: { Authorization: `Bearer ${token}` } });
+        const response = await this.request('File ID allocation', `${this.apiBaseUrl}/files/generateIds?count=1&space=${this.storageSpace}&type=files`, { headers: { Authorization: `Bearer ${token}` } });
         if (!response.ok) await this.handleHttpError(response, 'File ID allocation');
         const id = (await response.json()).ids?.[0];
         if (typeof id !== 'string' || !id) throw new CloudOperationError('sync', { stage: 'file-id-allocation', reason: 'missing-file-id', retryable: true });
@@ -625,6 +647,9 @@ export class GoogleDriveSyncProvider implements CloudSyncProvider {
     if (response.status === 429) throw new RateLimitedError();
     let reason = response.statusText || 'unknown'; let message = `HTTP ${response.status}`;
     try { const text = await response.text(); if (text) { try { const json = JSON.parse(text); message = json.error?.message || message; reason = json.error?.errors?.[0]?.reason || json.error?.status || reason; } catch { message = text.substring(0, 120).replace(/\s+/g, ' '); } } } catch { /* sanitized fallback */ }
+    if (response.status === 403 && (reason === 'ACCESS_TOKEN_SCOPE_INSUFFICIENT' || reason === 'insufficient_scope' || message.includes('ACCESS_TOKEN_SCOPE_INSUFFICIENT') || message.toLowerCase().includes('insufficient scope'))) {
+      throw new AuthExpiredError('Google authorization lacks required scope. Re-authentication required.');
+    }
     throw new GoogleDriveApiError({ stage, status: response.status, reason, message });
   }
 }

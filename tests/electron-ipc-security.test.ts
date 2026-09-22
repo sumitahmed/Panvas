@@ -11,6 +11,8 @@ const CLOUDSYNC_CHANNELS = [
   'cloudsync:drive:ensureAppRoot', 'cloudsync:drive:listRemoteWorkspaces', 'cloudsync:drive:readManifest',
   'cloudsync:drive:writeManifest', 'cloudsync:drive:getObject', 'cloudsync:drive:putObjectIfAbsent',
   'cloudsync:drive:deleteObject', 'cloudsync:drive:moveObject', 'cloudsync:drive:getMetadata',
+  'cloudsync:drive:findCandidatePanvasRoots', 'cloudsync:drive:readRootJson', 'cloudsync:drive:readWorkspaceJson',
+  'cloudsync:drive:readCandidateRootJson', 'cloudsync:drive:readCandidateWorkspaceJson', 'cloudsync:drive:getCandidateObject',
   'cloudsync:driveV2:readRootJson', 'cloudsync:driveV2:writeRootJson', 'cloudsync:driveV2:readWorkspaceJson',
   'cloudsync:driveV2:writeWorkspaceJson', 'cloudsync:driveV2:getObject', 'cloudsync:driveV2:putObjectIfAbsent',
   'cloudsync:driveV2:getMetadata',

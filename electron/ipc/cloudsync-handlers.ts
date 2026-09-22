@@ -18,23 +18,28 @@ function assertObjectHash(value: unknown): asserts value is string {
   if (typeof value !== 'string' || !OBJECT_HASH.test(value)) throw new Error('Invalid object identifier.');
 }
 
-const driveAuthority = new SyncRunAuthority();
-let driveProvider = createDriveProvider();
-let driveV2Provider = createDriveProvider('sync-v2');
+function assertRootFile(name: unknown): asserts name is string {
+  if (name !== 'profile.json' && name !== 'catalog.json') throw new Error('Invalid V2 root file.');
+}
 
-function createDriveProvider(remoteNamespace?: string): GoogleDriveSyncProvider {
+const driveAuthority = new SyncRunAuthority();
+let driveProvider = createDriveProvider(undefined, 'drive');
+let driveV2Provider = createDriveProvider('sync-v2', 'appDataFolder');
+
+function createDriveProvider(remoteNamespace?: string, storageSpace?: 'appDataFolder' | 'drive'): GoogleDriveSyncProvider {
   return new GoogleDriveSyncProvider({
     tokenProvider: () => googleAuthService.getValidAccessToken(),
     tokenRefresher: () => googleAuthService.forceRefreshAccessToken(),
     remoteNamespace,
+    storageSpace,
     assertCurrent: driveAuthority.capture(),
   });
 }
 
 function resetDriveProvider(): void {
   driveAuthority.invalidate();
-  driveProvider = createDriveProvider();
-  driveV2Provider = createDriveProvider('sync-v2');
+  driveProvider = createDriveProvider(undefined, 'drive');
+  driveV2Provider = createDriveProvider('sync-v2', 'appDataFolder');
 }
 
 async function safeDriveCall<T>(stage: string, operation: () => Promise<T>) {
@@ -134,10 +139,55 @@ export function registerCloudSyncHandlers(registrar: IpcHandleRegistrar) {
     assertWorkspaceId(workspaceId); assertObjectHash(hash);
     return driveProvider.getMetadata(workspaceId, hash);
   }));
+  registerPrivilegedHandler('cloudsync:drive:findCandidatePanvasRoots', () => safeDriveCall('candidate-roots', () => driveProvider.findCandidatePanvasRoots()));
+  registerPrivilegedHandler('cloudsync:drive:readRootJson', (name: unknown) => safeDriveCall('drive-root-read', async () => {
+    assertRootFile(name); return driveProvider.readRootJson(name);
+  }));
+  registerPrivilegedHandler('cloudsync:drive:readWorkspaceJson', (workspaceId: unknown, name: unknown) => safeDriveCall('drive-workspace-read', async () => {
+    assertWorkspaceId(workspaceId); if (name !== 'manifest.json') throw new Error('Invalid workspace file.');
+    return driveProvider.readWorkspaceJson(workspaceId, name);
+  }));
+  registerPrivilegedHandler('cloudsync:drive:readCandidateRootJson', (rootFolderId: unknown, name: unknown) => safeDriveCall('candidate-root-read', async () => {
+    if (typeof rootFolderId !== 'string') throw new Error('Invalid root folder ID.');
+    assertRootFile(name);
+    const candidate = new GoogleDriveSyncProvider({
+      tokenProvider: () => googleAuthService.getValidAccessToken(),
+      tokenRefresher: () => googleAuthService.forceRefreshAccessToken(),
+      remoteNamespace: 'sync-v2',
+      storageSpace: 'drive',
+      rootFolderId,
+      assertCurrent: driveAuthority.capture(),
+    });
+    return candidate.readRootJson(name);
+  }));
+  registerPrivilegedHandler('cloudsync:drive:readCandidateWorkspaceJson', (rootFolderId: unknown, workspaceId: unknown, name: unknown) => safeDriveCall('candidate-ws-read', async () => {
+    if (typeof rootFolderId !== 'string') throw new Error('Invalid root folder ID.');
+    assertWorkspaceId(workspaceId);
+    if (name !== 'manifest.json') throw new Error('Invalid workspace file.');
+    const candidate = new GoogleDriveSyncProvider({
+      tokenProvider: () => googleAuthService.getValidAccessToken(),
+      tokenRefresher: () => googleAuthService.forceRefreshAccessToken(),
+      remoteNamespace: 'sync-v2',
+      storageSpace: 'drive',
+      rootFolderId,
+      assertCurrent: driveAuthority.capture(),
+    });
+    return candidate.readWorkspaceJson(workspaceId, name);
+  }));
+  registerPrivilegedHandler('cloudsync:drive:getCandidateObject', (rootFolderId: unknown, hash: unknown) => safeDriveCall('candidate-object', async () => {
+    if (typeof rootFolderId !== 'string') throw new Error('Invalid root folder ID.');
+    assertObjectHash(hash);
+    const candidate = new GoogleDriveSyncProvider({
+      tokenProvider: () => googleAuthService.getValidAccessToken(),
+      tokenRefresher: () => googleAuthService.forceRefreshAccessToken(),
+      remoteNamespace: 'sync-v2',
+      storageSpace: 'drive',
+      rootFolderId,
+      assertCurrent: driveAuthority.capture(),
+    });
+    return candidate.getObject('v2', hash);
+  }));
 
-  function assertRootFile(name: unknown): asserts name is string {
-    if (name !== 'profile.json' && name !== 'catalog.json') throw new Error('Invalid V2 root file.');
-  }
   registerPrivilegedHandler('cloudsync:driveV2:readRootJson', (name: unknown) => safeDriveCall('v2-root-read', async () => {
     assertRootFile(name); return driveV2Provider.readRootJson(name);
   }));

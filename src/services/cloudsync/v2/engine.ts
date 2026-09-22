@@ -6,6 +6,7 @@ import { CloudOperationError, presentCloudError, sanitizeCloudDiagnostic, type C
 import { semanticSystemBootstrapBytes } from '../payloadSource.ts';
 import type { SafeCloudDiagnostic, SyncEntityKind } from '../types.ts';
 import type { SyncV2BaselineRecord, SyncV2BaselineStore, SyncV2Catalog, SyncV2ConflictResolution, SyncV2ConflictStore, SyncV2LocalAdapter, SyncV2LocalSource, SyncV2Manifest, SyncV2Profile, SyncV2Provider, SyncV2Record, SyncV2WorkspaceClassification, SyncV2WorkspaceOutcome } from './types.ts';
+import type { LegacyMigrationResult } from './legacyMigration.ts';
 
 const keyOf = (value: { kind?: SyncEntityKind; entityType?: SyncEntityKind; id?: string; entityId?: string }) => `${value.kind ?? value.entityType}:${value.id ?? value.entityId}`;
 const phase: Record<SyncEntityKind, number> = { workspace: 0, folder: 1, notebook: 2, notebookSection: 3, notebookPage: 4, canvasFile: 4, pageContent: 5, pageDrawing: 5, canvasScene: 5, customBlock: 6, asset: 7 };
@@ -203,6 +204,8 @@ export async function runCloudSyncV2(input: {
   resolutions?: readonly SyncV2ConflictResolution[];
   onProgress?: (message: string) => void;
   assertCurrent?: () => void;
+  environment?: 'desktop' | 'web';
+  legacyMigrator?: () => Promise<LegacyMigrationResult>;
 }): Promise<SyncV2Result> {
   const result: SyncV2Result = { status: 'error', uploaded: 0, downloaded: 0, preservedConflicts: 0, conflicts: [], workspaceOutcomes: [] };
   const workspaceOutcomeById = new Map<string, SyncV2WorkspaceOutcome>();
@@ -222,8 +225,35 @@ export async function runCloudSyncV2(input: {
     const localProfile = await input.baselines.loadProfile();
     if (localProfile && localProfile.accountIdentifier !== input.accountIdentifier) return blocked(result, 'local-account-mismatch');
 
-    const [profileRead, catalogRead] = await Promise.all([input.provider.readProfile(), input.provider.readCatalog()]);
+    let [profileRead, catalogRead] = await Promise.all([input.provider.readProfile(), input.provider.readCatalog()]);
     assertCurrent();
+
+    if (!catalogRead.value || catalogRead.value.workspaces.length === 0) {
+      if (input.legacyMigrator) {
+        input.onProgress?.('Checking for legacy data to migrate…');
+        const migrationResult = await input.legacyMigrator();
+        if (migrationResult.status === 'migrated') {
+          [profileRead, catalogRead] = await Promise.all([input.provider.readProfile(), input.provider.readCatalog()]);
+          assertCurrent();
+        } else if (migrationResult.status === 'migration-recovery-required') {
+          const shown = presentCloudError(new CloudOperationError('account-migration-required', {
+            stage: 'legacy-migration',
+            reason: migrationResult.reason,
+            operation: 'migrate',
+            retryable: false,
+          }));
+          return { ...result, status: 'synced-review', error: shown.message, errorCode: shown.code, diagnostic: shown.diagnostic };
+        }
+      } else if (input.environment === 'web') {
+        const shown = presentCloudError(new CloudOperationError('cloud-not-initialized', {
+          stage: 'cloud-validation',
+          reason: 'cloud-not-initialized',
+          operation: 'initialize-cloud',
+          retryable: false,
+        }));
+        return { ...result, status: 'synced-review', error: shown.message, errorCode: 'cloud-not-initialized', diagnostic: shown.diagnostic };
+      }
+    }
     if (profileRead.value && !validProfile(profileRead.value)) throw v2Failure('profile-validation', 'invalid-cloud-profile', 'read-profile');
     if (catalogRead.value && !validCatalog(catalogRead.value)) throw v2Failure('catalog-validation', 'invalid-cloud-catalog', 'read-catalog');
     if (profileRead.value && profileRead.value.accountIdentifier !== input.accountIdentifier) return blocked(result, 'remote-account-mismatch');
@@ -903,6 +933,21 @@ export async function runCloudSyncV2(input: {
     // Keep the aggregate status reviewable when other workspaces completed,
     // while retaining the conflict code for callers that need to distinguish
     // a genuine two-sided edit from an orphan/recovery warning.
+
+    // Post-sync convergence check: verify local workspaces match remote catalog
+    const postSyncLocalIds = (await input.source.listWorkspaceIds()).filter(id => id !== 'default').sort();
+    const postSyncRemoteIds = [...nextCatalog.values()].map(w => w.workspaceId).sort();
+    const converged = postSyncLocalIds.length === postSyncRemoteIds.length && postSyncLocalIds.every((id, idx) => id === postSyncRemoteIds[idx]);
+    if (!converged && !reviewRequired && !workspaceReviewRequired) {
+      const diagnostic = sanitizeCloudDiagnostic({ stage: 'convergence-check', reason: 'convergence-check-failed', operation: 'verify-convergence', retryable: false });
+      return {
+        ...result,
+        status: 'synced-review',
+        errorCode: 'sync',
+        diagnostic,
+      };
+    }
+
     return {
       ...result,
       status: reviewRequired || workspaceReviewRequired ? 'synced-review' : 'synced',

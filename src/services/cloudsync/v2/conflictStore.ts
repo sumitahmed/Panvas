@@ -10,27 +10,102 @@ class SyncV2ConflictDB extends Dexie {
   }
 }
 
-const conflictDB = new SyncV2ConflictDB();
+let conflictDBInstance: SyncV2ConflictDB | null = null;
+const memoryRows = new Map<string, SyncV2MigrationConflict>();
+
+function getDB(): SyncV2ConflictDB | null {
+  if (typeof indexedDB === 'undefined') return null;
+  if (!conflictDBInstance) {
+    try {
+      conflictDBInstance = new SyncV2ConflictDB();
+    } catch {
+      return null;
+    }
+  }
+  return conflictDBInstance;
+}
 
 export const dexieSyncV2ConflictStore: SyncV2ConflictStore = {
   async preserve(conflict) {
-    if (await conflictDB.conflicts.get(conflict.conflictId)) return 'present';
-    await conflictDB.conflicts.put(conflict);
+    const db = getDB();
+    if (db) {
+      try {
+        if (await db.conflicts.get(conflict.conflictId)) return 'present';
+        await db.conflicts.put(conflict);
+        return 'created';
+      } catch {
+        // Fall back to in-memory below
+      }
+    }
+    if (memoryRows.has(conflict.conflictId)) return 'present';
+    memoryRows.set(conflict.conflictId, structuredClone(conflict));
     return 'created';
   },
-  async hasUnresolved(profileId) {
-    return (await conflictDB.conflicts.where('profileId').equals(profileId).filter(item => item.resolvedAt === null).count()) > 0;
+  async hasUnresolved(profileId?: string) {
+    const db = getDB();
+    if (db) {
+      try {
+        if (profileId) {
+          return (await db.conflicts.where('profileId').equals(profileId).filter(item => item.resolvedAt === null).count()) > 0;
+        }
+        return (await db.conflicts.filter(item => item.resolvedAt === null).count()) > 0;
+      } catch {
+        // Fall back to in-memory below
+      }
+    }
+    return [...memoryRows.values()].some(row => (!profileId || row.profileId === profileId) && row.resolvedAt === null);
   },
-  async listUnresolved(profileId) {
-    return conflictDB.conflicts.where('profileId').equals(profileId).filter(item => item.resolvedAt === null).toArray();
+  async listUnresolved(profileId?: string) {
+    const db = getDB();
+    if (db) {
+      try {
+        if (profileId) {
+          return await db.conflicts.where('profileId').equals(profileId).filter(item => item.resolvedAt === null).toArray();
+        }
+        return await db.conflicts.filter(item => item.resolvedAt === null).toArray();
+      } catch {
+        // Fall back to in-memory below
+      }
+    }
+    return [...memoryRows.values()].filter(row => (!profileId || row.profileId === profileId) && row.resolvedAt === null);
   },
   async resolve(conflictId, profileId) {
-    const conflict = await conflictDB.conflicts.get(conflictId);
-    if (!conflict || conflict.profileId !== profileId || conflict.resolvedAt !== null) return false;
-    await conflictDB.conflicts.update(conflictId, { resolvedAt: Date.now() });
+    const db = getDB();
+    if (db) {
+      try {
+        const conflict = await db.conflicts.get(conflictId);
+        if (!conflict || (profileId && conflict.profileId !== profileId) || conflict.resolvedAt !== null) return false;
+        await db.conflicts.update(conflictId, { resolvedAt: Date.now() });
+        return true;
+      } catch {
+        // Fall back to in-memory below
+      }
+    }
+    const conflict = memoryRows.get(conflictId);
+    if (!conflict || (profileId && conflict.profileId !== profileId) || conflict.resolvedAt !== null) return false;
+    conflict.resolvedAt = Date.now();
     return true;
   },
+  async remove(conflictId: string) {
+    const db = getDB();
+    if (db) {
+      try {
+        await db.conflicts.delete(conflictId);
+      } catch {
+        // Fall back to memory
+      }
+    }
+    memoryRows.delete(conflictId);
+  },
   async clear() {
-    await conflictDB.conflicts.clear();
+    const db = getDB();
+    if (db) {
+      try {
+        await db.conflicts.clear();
+      } catch {
+        // Fall back to memory
+      }
+    }
+    memoryRows.clear();
   },
 };

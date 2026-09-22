@@ -25,6 +25,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { SyncRunAuthority, guardSyncCalls } from '@/services/cloudsync/runAuthority';
 import { planAccountAdoption } from '@/services/cloudsync/v2/accountAdoption';
 import type { SyncV2ConflictChoice, SyncV2ConflictResolution, SyncV2ProfileState, SyncV2WorkspaceOutcome } from '@/services/cloudsync/v2/types';
+import { inspectAndMigrateLegacyPanvasRoot } from '@/services/cloudsync/v2/legacyMigration';
 import { migrateFromDexieToFs } from '@/lib/migration';
 import { completeDeviceResetHydration, resetBrowserLocalData } from '@/services/cloudsync/deviceReset';
 
@@ -218,6 +219,11 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
         const status = useCloudSyncStore.getState().statusByProvider.googledrive;
         if (status === 'synced' || status === 'synced-review') {
           generic.forEach(item => pendingV2ConflictResolutions.delete(conflictResolutionKey(item)));
+          const profile = await getV2BaselineStore().loadProfile();
+          for (const item of generic) {
+            await dexieSyncV2ConflictStore.resolve?.(item.conflictId, profile?.profileId ?? '');
+          }
+          await get().loadReviewChanges();
           return true;
         }
         return false;
@@ -233,6 +239,8 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
         set({ reviewItems: remaining.map(item => ({ conflictId: item.conflictId, workspaceId: item.workspaceId, entityKind: item.entityKind, entityId: item.entityId })) });
         return false;
       }
+      await get().loadReviewChanges();
+      if (get().reviewItems.length > 0) return false;
       set(state => ({
         reviewItems: [],
         statusByProvider: { ...state.statusByProvider, googledrive: 'synced' },
@@ -249,19 +257,14 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
     if (!CLOUD_SYNC_V2_ENABLED) { set({ reviewItems: [] }); return; }
     try {
       const profile = await getV2BaselineStore().loadProfile();
-      const stored = profile && dexieSyncV2ConflictStore.listUnresolved
-        ? await dexieSyncV2ConflictStore.listUnresolved(profile.profileId)
+      const stored = dexieSyncV2ConflictStore.listUnresolved
+        ? await dexieSyncV2ConflictStore.listUnresolved(profile?.profileId)
         : [];
       // Keep archived bytes, but do not reintroduce quarantined descendants
       // into the normal conflict controls when the panel reloads its review.
       const quarantined = new Set(get().workspaceRecoveryIssues.map(item => item.workspaceId));
       const list = stored.filter(item => !quarantined.has(item.workspaceId));
-      // Generic V2 conflicts are returned by the engine rather than persisted
-      // as migration sidecars. Keep those ephemeral rows visible when there is
-      // no durable migration record to replace them with.
-      if (list.length > 0 || get().reviewItems.length === 0) {
-        set({ reviewItems: list.map(item => ({ conflictId: item.conflictId, workspaceId: item.workspaceId, entityKind: item.entityKind, entityId: item.entityId })) });
-      }
+      set({ reviewItems: list.map(item => ({ conflictId: item.conflictId, workspaceId: item.workspaceId, entityKind: item.entityKind, entityId: item.entityId })) });
     } catch {
       set({ reviewItems: [] });
     }
@@ -294,12 +297,12 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
       if (CLOUD_SYNC_V2_ENABLED) {
         set(state => ({
           bindings: [], migrationWorkspaceIds: [],
-          reviewItems: [],
           connectionByProvider: { ...state.connectionByProvider, googledrive: info },
           lastSyncedByProvider: { ...state.lastSyncedByProvider, googledrive: lastSuccess(info) },
-           statusByProvider: { ...state.statusByProvider, googledrive: isOnline() ? 'connected' : 'offline' },
+          statusByProvider: { ...state.statusByProvider, googledrive: isOnline() ? 'connected' : 'offline' },
           workspaceStatusById: { ...state.workspaceStatusById, ...Object.fromEntries(localIds.map(id => [id, 'connected'])) },
         }));
+        await get().loadReviewChanges();
         if (isOnline() && get().autoSync) void get().triggerSync();
         return;
       }
@@ -724,6 +727,7 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
           || Boolean(connection.email && binding.providerAccountId.toLowerCase() === connection.email.toLowerCase()));
       });
       if (foreignIds.length) throw new CloudOperationError('account-migration-required', { stage: 'workspace-account-isolation', reason: 'workspace-bound-to-different-account', workspaceId: foreignIds[0], retryable: false });
+      const isElectron = typeof window !== 'undefined' && Boolean(window.panvas);
       const v2 = await runCloudSyncV2({
         accountIdentifier: connection.accountIdentifier,
         provider: new GoogleDriveSyncV2Provider({ assertCurrent }),
@@ -731,6 +735,20 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
         adapter: syncV2LocalAdapter,
         baselines: getV2BaselineStore(),
         conflictStore: dexieSyncV2ConflictStore,
+        environment: isElectron ? 'desktop' : 'web',
+        legacyMigrator: isElectron ? async () => {
+          return inspectAndMigrateLegacyPanvasRoot({
+            accountIdentifier: connection.accountIdentifier,
+            localWorkspaceIds: ownedIds,
+            canonicalProvider: new GoogleDriveSyncV2Provider({ assertCurrent }),
+            legacyDriveProvider: googleDriveProvider,
+            assertCurrent,
+            onProgress: message => {
+              assertCurrent();
+              set({ progress: { stage: 'preparing', completed: 0, total: 1, message } });
+            },
+          });
+        } : undefined,
         resolutions: [...pendingV2ConflictResolutions.entries()].map(([key, resolution]) => {
           const [workspaceId, kind, ...idParts] = key.split(':');
           return { workspaceId, kind: kind as SyncV2ConflictResolution['kind'], id: idParts.join(':'), choice: resolution };
@@ -760,15 +778,47 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
         ? workspaceOutcomes.filter(outcome => outcome.status === 'synced' || outcome.status === 'synced-review').map(outcome => outcome.workspaceId)
         : (finalStatus === 'synced' || finalStatus === 'synced-review' ? localIds : []);
       const syncedAt = !rerunPending && successfulWorkspaceIds.length > 0 && (finalStatus === 'synced' || finalStatus === 'synced-review') ? Date.now() : null;
-      const publicMessage = finalStatus === 'synced-review' ? publicCloudMessage('review') : finalStatus === 'synced' ? null : publicCloudMessage(v2.errorCode ?? (finalStatus === 'conflict' ? 'conflict' : 'sync'));
+      const publicMessage = v2.errorCode ? publicCloudMessage(v2.errorCode) : finalStatus === 'synced-review' ? publicCloudMessage('review') : finalStatus === 'synced' ? null : publicCloudMessage(finalStatus === 'conflict' ? 'conflict' : 'sync');
       const conflictReviewItems = (v2.conflicts ?? []).map(conflict => ({
         conflictId: `sync-conflict:${conflict.workspaceId}:${conflict.kind}:${conflict.id}`,
         workspaceId: conflict.workspaceId,
         entityKind: conflict.kind,
         entityId: conflict.id,
       }));
+      if (conflictReviewItems.length > 0) {
+        const profile = await getV2BaselineStore().loadProfile();
+        const profileId = profile?.profileId || connection.accountIdentifier;
+        for (const item of conflictReviewItems) {
+          await dexieSyncV2ConflictStore.preserve({
+            conflictId: item.conflictId,
+            profileId,
+            workspaceId: item.workspaceId,
+            entityKind: item.entityKind,
+            entityId: item.entityId,
+            parentId: null,
+            localHash: '',
+            remoteHash: '',
+            localBytes: new Uint8Array(),
+            createdAt: Date.now(),
+            resolvedAt: null,
+          });
+        }
+      }
       if (v2.diagnostic && finalStatus !== 'synced' && finalStatus !== 'synced-review') logAccountSyncFailure(v2.diagnostic);
-      if (syncedAt) { retryAttempts = 0; lastSuccess(connection, syncedAt); pendingV2ConflictResolutions.clear(); }
+      if (syncedAt) {
+        retryAttempts = 0;
+        lastSuccess(connection, syncedAt);
+        pendingV2ConflictResolutions.clear();
+        const profile = await getV2BaselineStore().loadProfile();
+        const unresolved = await dexieSyncV2ConflictStore.listUnresolved?.(profile?.profileId);
+        if (unresolved) {
+          for (const item of unresolved) {
+            if (item.conflictId.startsWith('sync-conflict:')) {
+              await dexieSyncV2ConflictStore.resolve?.(item.conflictId, item.profileId);
+            }
+          }
+        }
+      }
       else if (!rerunPending && finalStatus !== 'auth-expired' && finalStatus !== 'account-migration-required') scheduleRetry(v2.diagnostic);
       set(state => ({
         isSyncing: rerunPending,
@@ -1020,7 +1070,7 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
       statusByProvider: { ...state.statusByProvider, googledrive: 'syncing' },
       lastError: null,
       lastDiagnostic: null,
-      progress: { stage: 'preparing', completed: 0, total: 1, message: 'Resetting this device…' },
+      progress: { stage: 'preparing', completed: 0, total: 1, message: 'Validating remote data…' },
       lastSyncedByProvider: { ...state.lastSyncedByProvider, googledrive: null },
       lastSyncedByWorkspaceId: {},
       workspaceStatusById: {},
@@ -1034,6 +1084,44 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
       // If the first Electron migration has not completed yet, join it before
       // deletion. This prevents a deferred legacy import from repopulating a
       // freshly-reset filesystem after the reset gate is released.
+      // Step 1: Pre-validate remote snapshot from canonical storage before touching local data
+      const provider = new GoogleDriveSyncV2Provider();
+      const [profileRead, catalogRead] = await Promise.all([provider.readProfile(), provider.readCatalog()]);
+      const catalog = catalogRead.value;
+      if (!catalog || !Array.isArray(catalog.workspaces) || catalog.workspaces.length === 0) {
+        throw new CloudOperationError('sync', {
+          stage: 'device-reset-validation',
+          reason: 'remote-catalog-empty',
+          operation: 'validate-remote',
+          errorMessage: 'Cannot reset this device: remote Google Drive storage has no synced workspaces.',
+          retryable: false,
+        });
+      }
+      for (const entry of catalog.workspaces) {
+        if (!entry.workspaceId || !entry.workspaceId.startsWith('ws-')) {
+          throw new CloudOperationError('sync', {
+            stage: 'device-reset-validation',
+            reason: 'invalid-workspace-id',
+            operation: 'validate-remote',
+            errorMessage: 'Cannot reset this device: remote storage contains invalid workspace data.',
+            retryable: false,
+          });
+        }
+        const manifestRead = await provider.readManifest(entry.workspaceId);
+        if (!manifestRead.value || manifestRead.value.workspaceId !== entry.workspaceId) {
+          throw new CloudOperationError('sync', {
+            stage: 'device-reset-validation',
+            reason: 'remote-manifest-missing',
+            operation: 'validate-remote',
+            errorMessage: `Cannot reset this device: remote manifest for workspace ${entry.workspaceId} could not be validated.`,
+            retryable: false,
+          });
+        }
+      }
+
+      // Step 2: Validation succeeded! Only now is local data cleared
+      clearLastSuccess(connection);
+      set({ progress: { stage: 'preparing', completed: 0, total: 1, message: 'Resetting local data…' } });
       if (typeof window !== 'undefined' && window.panvas) {
         await migrateFromDexieToFs();
         try { localStorage.setItem('panvas.dexieMigration.canonicalDestinations.v1', 'true'); } catch { /* optional marker */ }
@@ -1043,10 +1131,19 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
       }
       pendingV2ConflictResolutions.clear();
       deviceStates.clear();
+      if (dexieSyncV2ConflictStore.clear) await dexieSyncV2ConflictStore.clear();
       set({ progress: { stage: 'preparing', completed: 0, total: 1, message: 'Downloading your Google Drive work…' } });
     } catch (error) {
       const shown = presentCloudError(error, 'device-reset');
-      set(state => ({ isResetting: false, isSyncing: false, statusByProvider: { ...state.statusByProvider, googledrive: 'error' }, lastError: shown.message, lastDiagnostic: shown.diagnostic, progress: null }));
+      const userMessage = (error as any)?.diagnostic?.errorMessage || shown.message;
+      set(state => ({
+        isResetting: false,
+        isSyncing: false,
+        statusByProvider: { ...state.statusByProvider, googledrive: 'error' },
+        lastError: userMessage,
+        lastDiagnostic: shown.diagnostic,
+        progress: null,
+      }));
       logAccountSyncFailure(shown.diagnostic);
       deviceResetInProgress = false;
       return false;
@@ -1056,17 +1153,14 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
     // immediate normal V2 run now sees an empty replica and either downloads
     // the verified cloud roots or leaves the device empty when the cloud is
     // empty; it never creates a bootstrap shell first.
+    // Step 3: Trigger sync to pull and apply verified remote snapshot
     deviceResetInProgress = false;
-    set({ isResetting: false });
     set({ isResetting: false, isSyncing: false });
     await get().triggerSync();
     const final: CloudSyncState = get();
     const terminal = final.statusByProvider.googledrive === 'synced' || final.statusByProvider.googledrive === 'synced-review';
     if (terminal) {
       completeDeviceResetHydration();
-      if (!(typeof window !== 'undefined' && window.panvas)) {
-        await initializeDatabase(userId);
-      }
       // An empty remote account still represents a successful reset/sync run;
       // keep the last-run indicator truthful even when no workspace outcome
       // supplied a timestamp.

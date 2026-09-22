@@ -2,7 +2,7 @@ import type { ProviderConnectionInfo } from './types.ts';
 import { CloudOperationError } from './errors.ts';
 
 const GIS_SRC = 'https://accounts.google.com/gsi/client';
-const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.appdata email profile openid';
 
 interface BrowserToken { accessToken: string; expiresAt: number; connection: ProviderConnectionInfo }
 let current: BrowserToken | null = null;

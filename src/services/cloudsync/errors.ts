@@ -1,6 +1,6 @@
 import type { CloudSyncStatus, SafeCloudDiagnostic, SyncEntityKind } from './types.ts';
 
-export type CloudErrorCode = 'configuration' | 'connection' | 'offline' | 'auth-expired' | 'rate-limited' | 'conflict' | 'review' | 'payload' | 'remote-workspace' | 'remote-account-conflict' | 'account-migration-required' | 'sync';
+export type CloudErrorCode = 'configuration' | 'connection' | 'offline' | 'auth-expired' | 'rate-limited' | 'conflict' | 'review' | 'payload' | 'remote-workspace' | 'remote-account-conflict' | 'account-migration-required' | 'cloud-not-initialized' | 'sync';
 
 const PUBLIC_MESSAGES: Record<CloudErrorCode, string> = {
   configuration: 'Google Drive sign-in is temporarily unavailable.',
@@ -14,6 +14,7 @@ const PUBLIC_MESSAGES: Record<CloudErrorCode, string> = {
   'remote-workspace': 'An older synced workspace needs recovery. Your other workspaces can continue syncing. Your local work is safe.',
   'remote-account-conflict': 'This Google Drive account already contains a different Panvas sync space. Nothing was changed.',
   'account-migration-required': 'This local sync is linked to another Google account. Choose “Use this account” to move it safely, or reconnect the account that owns it.',
+  'cloud-not-initialized': 'Cloud storage has not been initialized from an existing Panvas device yet.',
   sync: "Couldn't sync right now. Your local work is safe.",
 };
 
@@ -199,7 +200,7 @@ function statusFor(code: CloudErrorCode): CloudSyncStatus {
   if (code === 'auth-expired') return 'auth-expired';
   if (code === 'rate-limited') return 'rate-limited';
   if (code === 'conflict' || code === 'remote-account-conflict') return 'conflict';
-  if (code === 'review') return 'synced-review';
+  if (code === 'review' || code === 'cloud-not-initialized') return 'synced-review';
   if (code === 'account-migration-required') return 'account-migration-required';
   return 'error';
 }

@@ -79,7 +79,7 @@ const GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const GOOGLE_REVOKE_ENDPOINT = 'https://oauth2.googleapis.com/revoke';
 const GOOGLE_USERINFO_ENDPOINT = 'https://www.googleapis.com/drive/v3/about?fields=user(permissionId,displayName,emailAddress)';
 
-const SCOPES = 'https://www.googleapis.com/auth/drive.file';
+const SCOPES = 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.appdata';
 
 async function getElectronModule() {
   try {
