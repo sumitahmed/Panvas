@@ -108,7 +108,7 @@ export class GoogleDriveSyncProvider implements CloudSyncProvider {
     this.randomFn = options.randomFn ?? Math.random;
     this.remoteNamespace = options.remoteNamespace?.trim() || null;
     this.assertCurrent = options.assertCurrent ?? (() => {});
-    this.storageSpace = options.storageSpace ?? (this.remoteNamespace === 'sync-v2' ? 'appDataFolder' : 'drive');
+    this.storageSpace = options.storageSpace ?? 'drive';
     this.optionsRootFolderId = options.rootFolderId ?? null;
   }
 

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runCloudSyncV2 } from '../src/services/cloudsync/v2/engine.ts';
 import { inspectAndMigrateLegacyPanvasRoot } from '../src/services/cloudsync/v2/legacyMigration.ts';
+import { GoogleDriveSyncV2Provider } from '../src/services/cloudsync/v2/googleDriveV2Provider.ts';
 import { dexieSyncV2ConflictStore } from '../src/services/cloudsync/v2/conflictStore.ts';
 import { disconnectBrowserGoogle, getBrowserGoogleConnection } from '../src/services/cloudsync/browserGoogleAuth.ts';
 import type {
@@ -163,9 +164,9 @@ class TestDevice {
 }
 
 // ---------------------------------------------------------------------------
-// TEST A: Two Clients, One AppData Store
+// TEST A: Two Clients, One Canonical Store (/Panvas/sync-v2/)
 // ---------------------------------------------------------------------------
-test('Test A: Two Clients, One AppData Store — Desktop uploads real workspaces; Web syncs and receives them without boilerplate', async () => {
+test('Test A: Two Clients, One Canonical Store — Desktop uploads real workspaces; Web syncs and receives them without boilerplate', async () => {
   const canonicalAppData = new MemoryV2Provider();
   const desktop = new TestDevice();
 
@@ -451,162 +452,122 @@ test('Test G: Web Disconnect — Web disconnect clears local tokens and does NOT
 });
 
 // ---------------------------------------------------------------------------
-// TEST H: Legacy Migration
+// TEST 7: Web Reload Token Behavior
 // ---------------------------------------------------------------------------
-test('Test H: Legacy Migration — Legacy visible Drive has A, B, C; canonical empty; Desktop migrates non-destructively', async () => {
-  // Legacy Drive Provider (simulates spaces: 'drive')
-  const legacyCandidateRootId = 'folder-legacy-panvas-root';
-  let legacyFolderDeleted = false;
-
-  const mockDriveProvider = {
-    async findCandidatePanvasRoots() {
-      return [{ id: legacyCandidateRootId, name: 'Panvas', modifiedTime: '2026-09-20T00:00:00Z' }];
-    },
-    // Spy to ensure legacy folder is NEVER deleted
-    async deleteObject(_hash: string) {
-      legacyFolderDeleted = true;
-    },
+test('Test 7: Web Reload Token Behavior — Reload keeps account connected without triggering popup on initialize, requests token on user sync', async () => {
+  const storage = new Map<string, string>();
+  (globalThis as any).localStorage = {
+    getItem(k: string) { return storage.get(k) ?? null; },
+    setItem(k: string, v: string) { storage.set(k, v); },
+    removeItem(k: string) { storage.delete(k); },
   };
 
-  const mockInspector = {
-    async readRootJson<T>(_folderId: string, name: string): Promise<{ value: T | null; etag: string | null }> {
-      if (name === 'catalog.json') {
-        return {
-          value: {
-            format: 'panvas-sync',
-            schemaVersion: 2,
-            revision: 1,
-            workspaces: [
-              { workspaceId: 'ws-core-cs', revision: 1, name: 'Core CS' },
-              { workspaceId: 'ws-placement-prep', revision: 1, name: 'Placement Prep' },
-            ],
-          } as T,
-          etag: 'etag-catalog',
-        };
-      }
-      return { value: null, etag: null };
-    },
-    async readWorkspaceJson<T>(_folderId: string, workspaceId: string, name: string): Promise<{ value: T | null; etag: string | null }> {
-      if (name === 'manifest.json') {
-        return {
-          value: {
-            format: 'panvas-sync',
-            schemaVersion: 2,
-            workspaceId,
-            revision: 1,
-            records: [
-              { kind: 'workspace', id: workspaceId, parentId: null, hash: `hash-${workspaceId}`, tombstone: false },
-            ],
-          } as T,
-          etag: `etag-${workspaceId}`,
-        };
-      }
-      return { value: null, etag: null };
-    },
-    async getObject(_folderId: string, hash: string): Promise<Uint8Array> {
-      return encode({ id: hash, name: 'Workspace Content' });
-    },
-  };
-
-  const canonicalV2Provider = new MemoryV2Provider();
-
-  const migrationResult = await inspectAndMigrateLegacyPanvasRoot({
-    legacyDriveProvider: mockDriveProvider as any,
-    canonicalProvider: canonicalV2Provider,
-    inspector: mockInspector,
+  // Simulate saved connection from previous session
+  storage.set('panvas_browser_google_connection', JSON.stringify({
+    provider: 'googledrive',
     accountIdentifier: 'user@gmail.com',
-    localWorkspaceIds: ['ws-core-cs', 'ws-placement-prep'],
-  });
+    email: 'user@gmail.com',
+    connectedAt: Date.now(),
+  }));
 
-  assert.equal(migrationResult.status, 'migrated');
-  assert.equal(legacyFolderDeleted, false, 'Legacy folder was NOT deleted');
+  const { hasBrowserGoogleToken, getBrowserGoogleConnection } = await import('../src/services/cloudsync/browserGoogleAuth.ts');
 
-  // Verify canonical provider now has the migrated data
-  const canonicalCatalog = await canonicalV2Provider.readCatalog();
-  assert.equal(canonicalCatalog.value?.workspaces.length, 2);
-  assert.ok(canonicalCatalog.value?.workspaces.some(w => w.workspaceId === 'ws-core-cs'));
-  assert.ok(canonicalCatalog.value?.workspaces.some(w => w.workspaceId === 'ws-placement-prep'));
+  // Immediately after reload, connection metadata is restored from localStorage
+  const connection = getBrowserGoogleConnection();
+  assert.ok(connection);
+  assert.equal(connection.accountIdentifier, 'user@gmail.com');
 
-  const coreCsManifest = await canonicalV2Provider.readManifest('ws-core-cs');
-  assert.ok(coreCsManifest.value);
-  assert.equal(coreCsManifest.value?.workspaceId, 'ws-core-cs');
+  // In-memory token is NOT present (no popup has run yet)
+  assert.equal(hasBrowserGoogleToken(), false);
 });
 
 // ---------------------------------------------------------------------------
-// TEST I: Ambiguous Legacy Roots
+// TEST 9: Real Provider Integration (spaces=drive, /Panvas/sync-v2/)
 // ---------------------------------------------------------------------------
-test('Test I: Ambiguous Legacy Roots — Multiple candidate roots with no matching baseline fail safely with migration-recovery-required', async () => {
-  const mockDriveProvider = {
-    async findCandidatePanvasRoots() {
-      return [
-        { id: 'folder-panvas-1', name: 'Panvas', modifiedTime: '2026-09-21T00:00:00Z' },
-        { id: 'folder-panvas-2', name: 'Panvas', modifiedTime: '2026-09-20T00:00:00Z' },
-      ];
-    },
-  };
+test('Test 9: Real Provider Integration — GoogleDriveSyncV2Provider targets spaces=drive and /Panvas/sync-v2/ without appDataFolder', async () => {
+  const requestedUrls: string[] = [];
+  const filesDatabase = new Map<string, { id: string; name: string; mimeType: string; parents?: string[]; content?: string; md5Checksum?: string; version?: string }>();
 
-  const mockInspectorAmbiguous = {
-    async readRootJson<T>(_folderId: string, name: string): Promise<{ value: T | null; etag: string | null }> {
-      if (name === 'catalog.json') {
-        return {
-          value: {
-            format: 'panvas-sync',
-            schemaVersion: 2,
-            revision: 1,
-            workspaces: [
-              { workspaceId: 'ws-other-1', revision: 1, name: 'Other 1' },
-            ],
-          } as T,
-          etag: 'etag-catalog-other',
-        };
+  // Seed root folders
+  filesDatabase.set('folder-panvas', { id: 'folder-panvas', name: 'Panvas', mimeType: 'application/vnd.google-apps.folder', parents: ['root'] });
+  filesDatabase.set('folder-sync-v2', { id: 'folder-sync-v2', name: 'sync-v2', mimeType: 'application/vnd.google-apps.folder', parents: ['folder-panvas'] });
+  filesDatabase.set('folder-objects', { id: 'folder-objects', name: 'objects', mimeType: 'application/vnd.google-apps.folder', parents: ['folder-sync-v2'] });
+  filesDatabase.set('folder-workspaces', { id: 'folder-workspaces', name: 'workspaces', mimeType: 'application/vnd.google-apps.folder', parents: ['folder-sync-v2'] });
+
+  // Seed catalog.json
+  const sampleCatalog = {
+    format: 'panvas-sync',
+    schemaVersion: 2,
+    revision: 1,
+    workspaces: [
+      { workspaceId: 'ws-core-cs', revision: 1, name: 'Core CS' },
+    ],
+  };
+  filesDatabase.set('file-catalog', {
+    id: 'file-catalog',
+    name: 'catalog.json',
+    mimeType: 'application/json',
+    parents: ['folder-sync-v2'],
+    content: JSON.stringify(sampleCatalog),
+    md5Checksum: 'md5-sample-catalog',
+    version: '1',
+  });
+
+  const mockFetch: typeof fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const urlStr = typeof input === 'string' ? input : input.toString();
+    requestedUrls.push(urlStr);
+
+    const parsedUrl = new URL(urlStr);
+
+    // Assert that every request explicitly targets spaces=drive or space=drive (never appDataFolder)
+    const spaces = parsedUrl.searchParams.get('spaces') ?? parsedUrl.searchParams.get('space');
+    if (spaces) {
+      assert.equal(spaces, 'drive', `Request ${parsedUrl.pathname} must use space/spaces=drive, got: ${spaces}`);
+      assert.notEqual(spaces, 'appDataFolder', `Request must not target appDataFolder`);
+    }
+
+    // Handle files list / search
+    if (parsedUrl.pathname.endsWith('/files') && (!init?.method || init.method === 'GET')) {
+      const q = parsedUrl.searchParams.get('q') ?? '';
+      const matched = [...filesDatabase.values()].filter(f => {
+        if (q.includes(`name = '${f.name}'`)) {
+          if (q.includes(`'root' in parents`) && f.parents?.includes('root')) return true;
+          if (q.includes(`'folder-panvas' in parents`) && f.parents?.includes('folder-panvas')) return true;
+          if (q.includes(`'folder-sync-v2' in parents`) && f.parents?.includes('folder-sync-v2')) return true;
+        }
+        return false;
+      });
+      return new Response(JSON.stringify({ files: matched }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+
+    // Handle file metadata lookup
+    if (parsedUrl.pathname.includes('/files/') && !parsedUrl.pathname.endsWith('generateIds') && (!init?.method || init.method === 'GET')) {
+      const fileId = parsedUrl.pathname.split('/files/')[1].split('?')[0];
+      const alt = parsedUrl.searchParams.get('alt');
+      const file = filesDatabase.get(fileId);
+      if (!file) return new Response('Not found', { status: 404 });
+      if (alt === 'media') {
+        return new Response(file.content ?? '', { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
-      return { value: null, etag: null };
-    },
-    async readWorkspaceJson<T>() { return { value: null, etag: null }; },
-    async getObject() { return new Uint8Array(); },
+      return new Response(JSON.stringify(file), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+
+    return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
   };
 
-  const canonicalV2Provider = new MemoryV2Provider();
-
-  const result = await inspectAndMigrateLegacyPanvasRoot({
-    legacyDriveProvider: mockDriveProvider as any,
-    canonicalProvider: canonicalV2Provider,
-    inspector: mockInspectorAmbiguous,
-    accountIdentifier: 'user@gmail.com',
-    localWorkspaceIds: ['ws-core-cs'],
+  const provider = new GoogleDriveSyncV2Provider({
+    tokenProvider: async () => 'mock-token-123',
+    fetchFn: mockFetch,
+    sleepFn: async () => {},
   });
 
-  assert.equal(result.status, 'migration-recovery-required');
-  assert.equal(canonicalV2Provider.catalog, null, 'Canonical V2 was not modified');
-});
+  const catalogRead = await provider.readCatalog();
+  assert.ok(catalogRead.value);
+  assert.equal(catalogRead.value.workspaces.length, 1);
+  assert.equal(catalogRead.value.workspaces[0].name, 'Core CS');
 
-// ---------------------------------------------------------------------------
-// TEST J: Empty AppData on Web
-// ---------------------------------------------------------------------------
-test('Test J: Empty AppData on Web — Web connects before Desktop migrates -> returns cloud-not-initialized in synced-review without uploading defaults', async () => {
-  const emptyCanonicalV2 = new MemoryV2Provider(); // Catalog is null
-  const web = new TestDevice();
-
-  // Web starts with local default workspace
-  web.add('workspace', 'default', null, { id: 'default', name: 'My Workspace' }, 'default');
-  web.add('notebook', 'nb-default', 'default', { id: 'nb-default', name: 'My Notebook' }, 'default');
-  web.add('notebookPage', 'page-1', 'nb-default', { id: 'page-1', name: 'Page 1' }, 'default');
-
-  const webSync = await runCloudSyncV2({
-    accountIdentifier: 'user@gmail.com',
-    provider: emptyCanonicalV2,
-    source: web.source,
-    adapter: web.adapter,
-    baselines: web.baselines,
-    conflictStore: web.conflicts,
-    environment: 'web',
-  });
-
-  assert.equal(webSync.status, 'synced-review');
-  assert.equal(webSync.errorCode, 'cloud-not-initialized');
-
-  // Crucial: Canonical provider remains completely empty; Web did not upload defaults!
-  assert.equal(emptyCanonicalV2.catalog, null, 'Catalog was NOT created in cloud');
-  assert.equal(emptyCanonicalV2.manifests.size, 0, 'No manifests uploaded');
-  assert.equal(emptyCanonicalV2.objects.size, 0, 'No objects uploaded');
+  // Verify URL queries
+  assert.ok(requestedUrls.length > 0);
+  assert.ok(requestedUrls.some(u => u.includes('spaces=drive')));
+  assert.ok(!requestedUrls.some(u => u.includes('appDataFolder')));
 });

@@ -2,11 +2,15 @@ import type { ProviderConnectionInfo } from './types.ts';
 import { CloudOperationError } from './errors.ts';
 
 const GIS_SRC = 'https://accounts.google.com/gsi/client';
-const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.appdata email profile openid';
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file email profile openid';
 
 interface BrowserToken { accessToken: string; expiresAt: number; connection: ProviderConnectionInfo }
 let current: BrowserToken | null = null;
 let scriptPromise: Promise<void> | null = null;
+
+export function hasBrowserGoogleToken(): boolean {
+  return Boolean(current && current.expiresAt > Date.now());
+}
 
 function webClientId(): string {
   try {

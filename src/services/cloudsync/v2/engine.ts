@@ -942,7 +942,7 @@ export async function runCloudSyncV2(input: {
       const diagnostic = sanitizeCloudDiagnostic({ stage: 'convergence-check', reason: 'convergence-check-failed', operation: 'verify-convergence', retryable: false });
       return {
         ...result,
-        status: 'synced-review',
+        status: 'error',
         errorCode: 'sync',
         diagnostic,
       };

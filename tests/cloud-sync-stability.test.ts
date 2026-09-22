@@ -440,7 +440,7 @@ test('browser GIS initializes a token client, requests access, and reports missi
   };
   const response = await requestBrowserGoogleAccessToken('web-client.apps.googleusercontent.com', oauth2);
   assert.equal(config.client_id, 'web-client.apps.googleusercontent.com');
-  assert.equal(config.scope, 'https://www.googleapis.com/auth/drive.appdata email profile openid');
+  assert.equal(config.scope, 'https://www.googleapis.com/auth/drive.file email profile openid');
   assert.equal(requestCount, 1);
   assert.equal(response.access_token, 'memory-only-token');
   await assert.rejects(connectBrowserGoogle(), (error: Error) => error instanceof CloudOperationError && error.code === 'configuration');
@@ -448,7 +448,7 @@ test('browser GIS initializes a token client, requests access, and reports missi
 
 class DeviceManifestStateCtor implements DeviceManifestState { lastSeenRevision = 0 }
 
-test('browser sync security keeps secrets out and OAuth flows request least privilege with appdata', async () => {
+test('browser sync security keeps secrets out and OAuth flows request least privilege', async () => {
   const [auth, electronAuth, store, env, preload] = await Promise.all([
     fs.readFile(new URL('../src/services/cloudsync/browserGoogleAuth.ts', import.meta.url), 'utf8'),
     fs.readFile(new URL('../electron/ipc/google-auth-service.ts', import.meta.url), 'utf8'),

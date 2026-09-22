@@ -5,7 +5,6 @@ export class GoogleDriveSyncV2Provider implements SyncV2Provider {
   private readonly drive: GoogleDriveSyncProvider;
   constructor(options: GoogleDriveProviderOptions = {}) {
     this.drive = new GoogleDriveSyncProvider({ ...options, remoteNamespace: 'sync-v2' });
-    this.drive = new GoogleDriveSyncProvider({ storageSpace: 'appDataFolder', ...options, remoteNamespace: 'sync-v2' });
   }
 
   getDriveProvider(): GoogleDriveSyncProvider { return this.drive; }

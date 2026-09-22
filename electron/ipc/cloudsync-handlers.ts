@@ -24,7 +24,7 @@ function assertRootFile(name: unknown): asserts name is string {
 
 const driveAuthority = new SyncRunAuthority();
 let driveProvider = createDriveProvider(undefined, 'drive');
-let driveV2Provider = createDriveProvider('sync-v2', 'appDataFolder');
+let driveV2Provider = createDriveProvider('sync-v2', 'drive');
 
 function createDriveProvider(remoteNamespace?: string, storageSpace?: 'appDataFolder' | 'drive'): GoogleDriveSyncProvider {
   return new GoogleDriveSyncProvider({
@@ -39,7 +39,7 @@ function createDriveProvider(remoteNamespace?: string, storageSpace?: 'appDataFo
 function resetDriveProvider(): void {
   driveAuthority.invalidate();
   driveProvider = createDriveProvider(undefined, 'drive');
-  driveV2Provider = createDriveProvider('sync-v2', 'appDataFolder');
+  driveV2Provider = createDriveProvider('sync-v2', 'drive');
 }
 
 async function safeDriveCall<T>(stage: string, operation: () => Promise<T>) {

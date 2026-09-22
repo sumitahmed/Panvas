@@ -11,7 +11,7 @@ import { attachWorkspaceReplica, replicateMissingRemoteWorkspaces } from '@/serv
 import { accountMigrationWorkspaceIds, attachedWorkspaceIds, bindingsForAccount, loadWorkspaceBindings, moveWorkspaceBinding, reconcileWorkspaceBindings, replaceWorkspaceBindings, saveWorkspaceBinding, workspaceHasBinding, workspaceIsBoundToOtherAccount } from '@/services/cloudsync/workspaceBindings';
 import { CloudOperationError, logCloudDiagnostic, presentCloudError, publicCloudMessage } from '@/services/cloudsync/errors';
 import { validateRemoteManifest } from '@/services/cloudsync/manifest';
-import { preloadGis } from '@/services/cloudsync/browserGoogleAuth';
+import { hasBrowserGoogleToken, preloadGis } from '@/services/cloudsync/browserGoogleAuth';
 import { db, initializeDatabase } from '@/database/schema';
 import { CLOUD_SYNC_V2_ENABLED } from '@/config/features';
 import { runCloudSyncV2 } from '@/services/cloudsync/v2/engine';
@@ -303,7 +303,9 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
           workspaceStatusById: { ...state.workspaceStatusById, ...Object.fromEntries(localIds.map(id => [id, 'connected'])) },
         }));
         await get().loadReviewChanges();
-        if (isOnline() && get().autoSync) void get().triggerSync();
+        const isElectron = typeof window !== 'undefined' && Boolean(window.panvas);
+        const canBackgroundSync = isElectron || hasBrowserGoogleToken();
+        if (isOnline() && get().autoSync && canBackgroundSync) void get().triggerSync();
         return;
       }
       let bindings = reconcileWorkspaceBindings(info.accountIdentifier, localIds, undefined, Date.now(), info.email ? [info.email] : []);
@@ -327,7 +329,9 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
         },
         lastError: migrationWorkspaceIds.length > 0 ? publicCloudMessage('account-migration-required') : null,
       }));
-      if (isOnline() && get().autoSync) void get().triggerSync();
+      const isElectron = typeof window !== 'undefined' && Boolean(window.panvas);
+      const canBackgroundSync = isElectron || hasBrowserGoogleToken();
+      if (isOnline() && get().autoSync && canBackgroundSync) void get().triggerSync();
     } catch (error) { initialized = false; const shown = presentCloudError(error, 'initialize'); logCloudDiagnostic(shown.diagnostic); }
   },
 
