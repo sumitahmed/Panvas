@@ -15,6 +15,10 @@ process.env.VITE_PANVAS_GOOGLE_WEB_CLIENT_ID = googleWebClientId;
 const googleClientId = process.env.PANVAS_GOOGLE_CLIENT_ID || '';
 const googleClientSecret = process.env.PANVAS_GOOGLE_CLIENT_SECRET || process.env.PANVAS_GOOGLE_SECRET || '';
 
+if (process.env.VITE_PANVAS_SYNC_V2 === undefined) {
+  process.env.VITE_PANVAS_SYNC_V2 = 'true';
+}
+
 const excalidrawAssetsDir = path.resolve(__dirname, 'node_modules/@excalidraw/excalidraw/dist/excalidraw-assets');
 
 function localExcalidrawAssets() {
@@ -130,6 +134,7 @@ export default defineConfig(({ command, mode }) => {
       NODE_ENV: JSON.stringify(process.env.NODE_ENV || 'development'),
     },
     'import.meta.env.VITE_PANVAS_GOOGLE_WEB_CLIENT_ID': JSON.stringify(googleWebClientId),
+    'import.meta.env.VITE_PANVAS_SYNC_V2': JSON.stringify(process.env.VITE_PANVAS_SYNC_V2),
   },
   server: {
     port: 3000,

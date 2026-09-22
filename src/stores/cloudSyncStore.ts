@@ -141,13 +141,35 @@ function lastSuccess(connection: ProviderConnectionInfo, timestamp?: number): nu
   } catch { return timestamp ?? null; } // Optional presentation metadata must not fail a completed sync.
 }
 
+/** Safely retire obsolete V1 presentation and legacy root metadata from browser storage.
+ * Does not touch user workspaces, local IndexedDB, or remote Drive files. */
+export function retireLegacyV1SyncMetadata(): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && (key.startsWith('panvas.cloudSync.lastSuccess.v1.') || key.startsWith('panvas_cloud_root_'))) {
+        keysToRemove.push(key);
+      }
+    }
+    for (const key of keysToRemove) {
+      localStorage.removeItem(key);
+    }
+  } catch { /* optional presentation metadata */ }
+}
+
 /** Clear presentation-only sync metadata when the local replica is reset.
  * The verified provider connection remains intact; only the old run timestamp
  * is removed so a restart cannot display a pre-reset "Last synced" value. */
 function clearLastSuccess(connection: ProviderConnectionInfo): void {
   const localOwner = typeof window !== 'undefined' && window.panvas ? 'desktop' : useAuthStore.getState().user?.id ?? 'anonymous';
-  const key = `panvas.cloudSync.lastSuccess.${CLOUD_SYNC_V2_ENABLED ? 'v2' : 'v1'}.${encodeURIComponent(localOwner)}.${encodeURIComponent(connection.accountIdentifier)}`;
-  try { localStorage.removeItem(key); } catch { /* optional presentation metadata */ }
+  const v2Key = `panvas.cloudSync.lastSuccess.v2.${encodeURIComponent(localOwner)}.${encodeURIComponent(connection.accountIdentifier)}`;
+  const v1Key = `panvas.cloudSync.lastSuccess.v1.${encodeURIComponent(localOwner)}.${encodeURIComponent(connection.accountIdentifier)}`;
+  try {
+    localStorage.removeItem(v2Key);
+    localStorage.removeItem(v1Key);
+  } catch { /* optional presentation metadata */ }
 }
 
 async function localWorkspaceIds(): Promise<string[]> {
@@ -295,6 +317,7 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
       const localIds = await localWorkspaceIds();
       assertCurrent();
       if (CLOUD_SYNC_V2_ENABLED) {
+        retireLegacyV1SyncMetadata();
         set(state => ({
           bindings: [], migrationWorkspaceIds: [],
           connectionByProvider: { ...state.connectionByProvider, googledrive: info },
@@ -813,6 +836,7 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
         retryAttempts = 0;
         lastSuccess(connection, syncedAt);
         pendingV2ConflictResolutions.clear();
+        retireLegacyV1SyncMetadata();
         const profile = await getV2BaselineStore().loadProfile();
         const unresolved = await dexieSyncV2ConflictStore.listUnresolved?.(profile?.profileId);
         if (unresolved) {
@@ -1173,6 +1197,7 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
         lastSuccess(connection, syncedAt);
         set(state => ({ lastSyncedByProvider: { ...state.lastSyncedByProvider, googledrive: syncedAt }, progress: { stage: 'complete', completed: 1, total: 1, message: 'Up to date' } }));
       }
+      retireLegacyV1SyncMetadata();
       await refreshWorkspaceProjectionAfterSync();
     }
     return terminal;

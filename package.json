@@ -18,7 +18,7 @@
     "test:editor-regressions": "node --test tests/editor-regression-recovery.test.ts tests/handwriting-recognition.test.ts tests/notebook-scroll-render-regression.test.ts && node tests/editor-regression-browser.mjs",
     "test:notebook-scroll": "node --test tests/notebook-scroll-render-regression.test.ts",
     "pretest": "node --test tests/stage-c-performance.test.ts tests/eraser-scheduling.test.ts tests/handwriting-fidelity.test.ts && npm run test:package-a && npm run test:package-b && npm run test:package-c && npm run test:cloud-reliability",
-    "test:cloud-reliability": "node --test tests/google-drive-sync.test.ts tests/post-strix-security.test.ts tests/cloud-sync-store-reliability.test.ts tests/cloud-sync-reconnect.test.ts",
+    "test:cloud-reliability": "node --test tests/google-drive-sync.test.ts tests/post-strix-security.test.ts tests/cloud-sync-store-reliability.test.ts tests/cloud-sync-reconnect.test.ts tests/cloud-sync-v2-flag.test.ts",
     "prestart": "npm run build",
     "start": "electron .",
     "dev": "vite",
