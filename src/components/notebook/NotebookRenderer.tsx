@@ -987,7 +987,9 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       : !focusedPageId
         ? currentSectionPages[0]?.id
         : undefined;
-    if (!targetPageId) return;
+    // A scroll can advance the store and live owner before an older render's
+    // passive effect runs. That stale snapshot must not activate the old page.
+    if (!targetPageId || activePageId !== useWorkspaceStore.getState().activePageId) return;
     // Focus owns the shared engine and may only move once target data is
     // available. The section preload will update this effect when a cache gap
     // is filled; until then the existing focused page remains authoritative.
