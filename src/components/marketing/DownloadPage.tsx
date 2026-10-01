@@ -60,6 +60,11 @@ export function DownloadPage() {
                   Download Installer
                 </a>
               </div>
+              <p style={{ margin: '12px 0 0', fontSize: '0.85rem' }}>
+                <a href={PANVAS_RELEASE.windows.releaseNotesUrl} target="_blank" rel="noreferrer" style={{ textDecoration: 'underline' }}>
+                  Release notes ({PANVAS_RELEASE.windows.releaseTag})
+                </a>
+              </p>
 
               <div style={{ marginTop: '20px', paddingTop: '16px', borderTop: '1px solid var(--pp-border, #e5e1d8)' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
@@ -98,7 +103,6 @@ export function DownloadPage() {
                   {PANVAS_INSTALLER_SHA256 || 'Published in SHA256SUMS.txt'}
                 </code>
                 <p style={{ margin: '8px 0 0 0', fontSize: '0.8rem', color: 'var(--pp-text-muted, #666)' }}>
-                  The authoritative cryptographic hash for each release asset is published in <code>SHA256SUMS.txt</code> on the{' '}
                   The authoritative cryptographic hash for each release asset is published in{' '}
                   <a href={PANVAS_RELEASE.windows.checksumUrl} target="_blank" rel="noreferrer" style={{ textDecoration: 'underline' }}>
                     <code>SHA256SUMS.txt</code>

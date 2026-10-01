@@ -111,3 +111,20 @@ test('public Windows download metadata and CTAs use the current release', async 
   assert.match(download, /disabled=\{!PANVAS_INSTALLER_SHA256\}/);
   assert.match(download, /Published in SHA256SUMS\.txt/);
 });
+
+test('published Windows artifact metadata includes its hash, byte size and release notes', async () => {
+  const { PANVAS_RELEASE } = await import('../src/components/marketing/releaseMetadata.ts');
+  const windows = PANVAS_RELEASE.windows;
+  assert.match(windows.checksumSha256, /^[0-9a-f]{64}$/);
+  assert.match(windows.installerSize, /^[1-9][0-9,]* bytes$/);
+  const bytes = Number(windows.installerSize.replaceAll(',', '').replace(' bytes', ''));
+  assert.ok(Number.isSafeInteger(bytes) && bytes > 0);
+  assert.equal(windows.releaseDate, 'October 2026');
+  const [download, readme] = await Promise.all([
+    readFile('src/components/marketing/DownloadPage.tsx', 'utf8'),
+    readFile('README.md', 'utf8'),
+  ]);
+  assert.ok(download.includes('href={PANVAS_RELEASE.windows.releaseNotesUrl}'));
+  assert.ok(readme.includes(windows.downloadUrl));
+  assert.ok(readme.includes(windows.checksumSha256));
+});

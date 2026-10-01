@@ -7,7 +7,7 @@
 > **Local-first visual workspace for notes, handwriting, PDFs, and spatial thinking.**
 
 <p align="center">
-  <a href="https://github.com/sumitahmed/Panvas/releases/latest">
+  <a href="https://github.com/sumitahmed/Panvas/releases/download/v0.1.3/Panvas-0.1.3-Setup.exe">
     <img src="https://img.shields.io/badge/Download-Windows_x64-243c4a?style=flat&logo=windows" alt="Download for Windows" />
   </a>
   <a href="https://panvas.vercel.app/app">
@@ -65,11 +65,11 @@ Panvas bridges structured notebooks and infinite canvases into a single, distrac
 ## Download
 
 ### Windows (Desktop)
-- **Panvas v0.1.3 (64-bit)**: Download [`Panvas-0.1.3-Setup.exe`](https://github.com/sumitahmed/Panvas/releases/latest) from the [GitHub Releases](https://github.com/sumitahmed/Panvas/releases) portal.
+- **Panvas v0.1.3 (64-bit)**: Download [`Panvas-0.1.3-Setup.exe`](https://github.com/sumitahmed/Panvas/releases/download/v0.1.3/Panvas-0.1.3-Setup.exe) from the [GitHub Releases](https://github.com/sumitahmed/Panvas/releases) portal.
 - **SHA-256 Checksum Verification**: Verify the downloaded installer against the official checksum published in `SHA256SUMS.txt`:
   ```powershell
   Get-FileHash Panvas-0.1.3-Setup.exe -Algorithm SHA256
-  # Compare with SHA256SUMS.txt from the same release.
+  # SHA-256: 33e9e6e5575689c10483b955ac87d8f85e68204a36aa9abd0ad8706a5a156240
   ```
   *Note: The v0.1.3 installer is unsigned while the code signing pipeline is established. If Windows SmartScreen prompts on launch, click "More info" → "Run anyway".*
 
