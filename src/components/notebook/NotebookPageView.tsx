@@ -20,7 +20,7 @@ import {
 } from './stickyNotes';
 import type { NotebookPage, PagePropertySet } from '@/types/notebook';
 import type { NotebookEngine } from './engine/NotebookEngine';
-import { MAX_INACTIVE_PAGE_RENDER_ZOOM, resolveCanvasBackingScale, ViewportManager } from './engine/ViewportManager';
+import { getBrowserCanvasVisualScale, MAX_INACTIVE_PAGE_RENDER_ZOOM, resolveCanvasBackingScale, ViewportManager } from './engine/ViewportManager';
 import { ShapeManager } from './engine/ShapeManager';
 import { ImageManager } from './engine/ImageManager';
 import { DrawingEngine } from './engine/DrawingEngine';
@@ -323,7 +323,7 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
         const cssWidth = viewport.width * baseScale;
         const cssHeight = viewport.height * baseScale;
         const backing = resolveCanvasBackingScale(window.devicePixelRatio || 1,
-          Math.min(renderScale, MAX_INACTIVE_PAGE_RENDER_ZOOM), cssWidth, cssHeight);
+          Math.min(renderScale, MAX_INACTIVE_PAGE_RENDER_ZOOM), cssWidth, cssHeight, getBrowserCanvasVisualScale());
         const scaled = pdfPage.getViewport({ scale: baseScale * backing });
         const buffer = document.createElement('canvas');
         buffer.width = Math.floor(scaled.width);

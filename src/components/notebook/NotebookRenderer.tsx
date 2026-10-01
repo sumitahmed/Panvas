@@ -17,7 +17,7 @@ import { PresentationOverlay } from '@/components/workspace/PresentationOverlay'
 import { resolveNotebookNavigationDelta, shouldNotebookHandleNavigationKey } from './notebookNavigation';
 import { NotebookPageView } from './NotebookPageView';
 import { PageRenderer } from './PageRenderer';
-import { residentPageIds, dominantPageId } from './pageVisualWindow';
+import { residentPageIds, reuseResidentPageIds, dominantPageId } from './pageVisualWindow';
 import { NotebookContextMenu, type ContextMenuState } from './NotebookContextMenu';
 import { HandwritingConversionDialog } from './HandwritingConversionDialog';
 import type { Editor } from '@tiptap/react';
@@ -1348,10 +1348,10 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
 
   handleActivatePageRef.current = handleActivatePage;
 
-  const [visualWindow, setVisualWindow] = useState({ top: 0, height: 0 });
-  const residentIds = useMemo(() => residentPageIds(
-    layoutConfig.positions, visualWindow.top, visualWindow.height || containerSize.height / viewport.scale,
-  ), [layoutConfig.positions, visualWindow, containerSize.height, viewport.scale]);
+  const [residentIds, setResidentIds] = useState(() => residentPageIds(
+    layoutConfig.positions, 0, containerSize.height / viewport.scale,
+  ));
+  const residentIdsRef = useRef(residentIds);
 
   // Real-time visible page detection on vertical scroll (Passive Observational Update)
   useEffect(() => {
@@ -1359,6 +1359,14 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     if (!container) return;
 
     let scrollRafId: number | null = null;
+
+    const updateResidency = (top: number, height: number) => {
+      const previous = residentIdsRef.current;
+      const next = reuseResidentPageIds(previous, residentPageIds(layoutConfig.positions, top, height));
+      if (next === previous) return;
+      residentIdsRef.current = next;
+      setResidentIds(next);
+    };
 
     const observeScroll = () => {
       const scrollStartedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
@@ -1368,7 +1376,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       const scale = notebookEngine.viewport.getState().scale;
       const top = container.scrollTop / scale;
       const height = container.clientHeight / scale;
-      setVisualWindow(previous => previous.top === top && previous.height === height ? previous : { top, height });
+      updateResidency(top, height);
       const dominantId = dominantPageId(layoutConfig.positions, top + height / 2,
         currentActivePageIdRef.current || '', 24 / scale);
       const dominantPage = currentSectionPages.find(page => page.id === dominantId);
@@ -1418,7 +1426,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     };
     flushNavigationScrollRef.current = flushScroll;
 
-    setVisualWindow({ top: container.scrollTop / viewport.scale, height: container.clientHeight / viewport.scale });
+    updateResidency(container.scrollTop / viewport.scale, container.clientHeight / viewport.scale);
     container.addEventListener('scroll', onScroll, { passive: true });
     return () => {
       if (flushNavigationScrollRef.current === flushScroll) flushNavigationScrollRef.current = () => {};

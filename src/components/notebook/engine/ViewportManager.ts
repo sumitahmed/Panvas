@@ -27,10 +27,12 @@ export function resolveCanvasBackingScale(
   currentZoomScale: number,
   cssWidth: number,
   cssHeight: number,
+  browserVisualScale = 1,
 ): number {
   const dpr = Number.isFinite(devicePixelRatio) && devicePixelRatio > 0 ? devicePixelRatio : 1;
   const zoom = Number.isFinite(currentZoomScale) && currentZoomScale > 0 ? currentZoomScale : 1;
-  const desiredScale = dpr * zoom;
+  const visualScale = Number.isFinite(browserVisualScale) && browserVisualScale > 0 ? browserVisualScale : 1;
+  const desiredScale = dpr * zoom * visualScale;
   if (!(cssWidth > 0) || !(cssHeight > 0)) return desiredScale;
 
   const allowedByDimension = Math.min(
@@ -39,6 +41,17 @@ export function resolveCanvasBackingScale(
   );
   const allowedByPixels = Math.sqrt(MAX_ACTIVE_CANVAS_PIXELS / (cssWidth * cssHeight));
   return Math.min(desiredScale, allowedByDimension, allowedByPixels);
+}
+
+/** A phone's Desktop Site layout is visually shrunk before reaching screen pixels.
+ * Apply that scale only to raster detail; document and pointer coordinates stay logical. */
+export function getBrowserCanvasVisualScale(): number {
+  if (typeof window === 'undefined') return 1;
+  const touch = (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0)
+    || window.matchMedia?.('(pointer: coarse)').matches
+    || window.matchMedia?.('(any-pointer: coarse)').matches;
+  const scale = touch ? window.visualViewport?.scale : 1;
+  return typeof scale === 'number' && Number.isFinite(scale) && scale > 0 ? scale : 1;
 }
 
 export class ViewportManager {
@@ -84,7 +97,7 @@ export class ViewportManager {
   }
 
   getCanvasBackingScale(currentZoomScale: number, cssWidth: number, cssHeight: number): number {
-    return resolveCanvasBackingScale(this.dpr, currentZoomScale, cssWidth, cssHeight);
+    return resolveCanvasBackingScale(this.dpr, currentZoomScale, cssWidth, cssHeight, getBrowserCanvasVisualScale());
   }
 
   /** Update DPR (e.g., when window moves between monitors). */

@@ -333,6 +333,9 @@ export class InputManager {
   };
 
   private handlePointerMove = (e: PointerEvent): void => {
+    // Hand navigation needs the display-paced move stream. Keep raw/coalesced
+    // samples for ink, erasing, ruler and laser interactions below.
+    if (this.isPanning && e.type === 'pointerrawupdate') return;
     if (this.inkSamples && !this.ownsInkEvent(e)) return;
     if (this.eraserGesture && e.pointerId !== this.eraserGesture.pointerId) return;
     const activeProfile = this.gate0InkGesture ?? this.gate0EraserGesture;

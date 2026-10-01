@@ -1,5 +1,10 @@
 export interface PagePosition { id: string; x: number; y: number; width: number; height: number }
 
+/** Preserve React state identity when scrolling leaves the resident rows unchanged. */
+export function reuseResidentPageIds(previous: Set<string>, next: Set<string>): Set<string> {
+  return previous.size === next.size && [...next].every(id => previous.has(id)) ? previous : next;
+}
+
 /** Geometry is in document coordinates. Retain the visible rows and one row
  * on either side; focus never removes a visible page from this window. */
 export function residentPageIds(positions: PagePosition[], top: number, height: number): Set<string> {

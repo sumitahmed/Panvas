@@ -12,6 +12,7 @@ import '../../src/styles/index.css';
 
 async function mount() {
   const responsive = new URLSearchParams(location.search).has('responsive');
+  const performance = new URLSearchParams(location.search).has('performance');
   if (responsive) useUIStore.setState({ isSidebarOpen: false, isPropertiesPanelOpen: false });
   const store = useWorkspaceStore.getState;
   const workspace = await store().createWorkspace('Navigation lifecycle regression');
@@ -19,11 +20,22 @@ async function mount() {
   const notebook = await store().createNotebook(null, 'Navigation notebook');
   const section = store().notebookSections.find(item => item.notebookId === notebook.id)!;
   const pages = [store().notebookPages.find(item => item.sectionId === section.id)!];
-  for (let index = 1; index < 6; index++) {
+  for (let index = 1; index < (performance ? 24 : 6); index++) {
     pages.push(await notebookRepository.createPage(null, workspace.id, notebook.id, section.id, `Page ${index + 1}`));
   }
   for (const page of pages) {
-    await notebookRepository.saveDrawingData(workspace.id, notebook.id, page.id, createEmptyDrawingData());
+    const data = createEmptyDrawingData();
+    if (performance) {
+      data.objects = Array.from({ length: 80 }, (_, row) => ({
+        id: `${page.id}-stroke-${row}`, type: 'stroke' as const, tool: 'pen' as const,
+        color: '#2864b0', thickness: 2, opacity: 1, createdAt: row,
+        points: Array.from({ length: 40 }, (_, point) => ({
+          x: 30 + point * 12, y: 30 + row * 9 + Math.sin(point * .7) * 4,
+          pressure: .5, t: point * 8,
+        })),
+      }));
+    }
+    await notebookRepository.saveDrawingData(workspace.id, notebook.id, page.id, data);
   }
   await store().loadWorkspaceContents(workspace.id);
   store().setActivePage(pages[0].id);
