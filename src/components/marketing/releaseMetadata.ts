@@ -71,8 +71,8 @@ export const PANVAS_RELEASE = {
     releaseNotesUrl: 'https://github.com/sumitahmed/Panvas/releases/tag/v0.1.4',
     checksumUrl: 'https://github.com/sumitahmed/Panvas/releases/download/v0.1.4/SHA256SUMS.txt',
     // Final artifact values are web metadata; the tagged installer stays unchanged.
-    checksumSha256: '',
-    installerSize: 'See GitHub release',
+    checksumSha256: '5be42b1c2877d83ae801b8500c8876d180a0cdbba3b404bbb7714862afdd3c06',
+    installerSize: '265,344,903 bytes',
     checksumVerificationNote: 'Verify the installer against the official SHA-256 checksum published on the GitHub Releases page.',
   },
   web: {
