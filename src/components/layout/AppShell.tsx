@@ -12,6 +12,7 @@ import { useLayoutStore } from '@/stores/layoutStore';
 import { useWorkspaceStore } from '@/stores/workspaceStore';
 import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
 import { useMobileVisualViewport } from '@/hooks/useMobileVisualViewport';
+import { useHasTouchInput } from '@/hooks/useHasTouchInput';
 
 interface AppShellProps {
   children: React.ReactNode;
@@ -23,8 +24,9 @@ export function AppShell({ children }: AppShellProps) {
   const activePageId = useWorkspaceStore(state => state.activePageId);
   const activeCanvasId = useWorkspaceStore(state => state.activeCanvasId);
   const isMobileViewport = useIsMobileViewport();
+  const hasTouchInput = useHasTouchInput();
   const useLibraryDrawer = useIsMobileViewport(819);
-  useMobileVisualViewport(isMobileViewport);
+  useMobileVisualViewport(hasTouchInput || isMobileViewport);
   const [location] = useLocation();
   const hideAppChrome = notebookModeLevel > 0 || workspaceViewMode === 'present';
 
@@ -70,7 +72,7 @@ export function AppShell({ children }: AppShellProps) {
   }, [useLibraryDrawer, isSidebarOpen]);
 
   return (
-    <div className="panvas-app-shell h-screen w-full min-w-0 flex flex-col overflow-hidden bg-panvas-bg-primary">
+    <div data-touch-input={hasTouchInput} className="panvas-app-shell h-screen w-full min-w-0 flex flex-col overflow-hidden bg-panvas-bg-primary">
       {/* Top Bar */}
       <div className={hideAppChrome ? 'hidden' : ''}>
         <TopBar />

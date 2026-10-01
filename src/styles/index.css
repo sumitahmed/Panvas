@@ -1111,6 +1111,9 @@
   border-bottom: 1px solid rgb(var(--border-subtle));
 }
 .panvas-mobile-document-header button { min-height: 44px; }
+.panvas-app-shell[data-touch-input='true'] {
+  height: var(--panvas-visual-height, 100dvh);
+}
 .panvas-mobile-tool-dock {
   flex-shrink: 0; position: relative; z-index: 40;
   padding: 4px 4px max(4px, env(safe-area-inset-bottom));

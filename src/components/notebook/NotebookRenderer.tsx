@@ -30,6 +30,7 @@ import { getSafeHttpUrl, htmlToTipTapJson } from './tiptapExtensions';
 import { useToolState } from './useEngineState';
 import { attachTwoFingerViewportGesture } from './engine/touchViewportGesture';
 import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
+import { useHasTouchInput } from '@/hooks/useHasTouchInput';
 import { capturePageGeometryAnchor, derivePagePropertyOverrides, getNotebookPageDefaults, hasAuthoritativePageAppearance, resolveNotebookPageLayout, resolvePageDimensions, resolvePageGeometryScrollDelta, resolvePageProperties, resolvePageRenderProperties, type PageGeometryAnchor } from '@/lib/pageProperties';
 import type { NotebookPropertyBatchSnapshot, PagePropertySet } from '@/types/notebook';
 import { createStickyNote, STICKY_NOTE_MIN_HEIGHT, STICKY_NOTE_WIDTH } from './stickyNotes';
@@ -413,6 +414,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   // viewport-level bottom sheet that never reserves chrome width, so the
   // auto-close protection does not apply there.
   const isMobileViewport = useIsMobileViewport();
+  const hasTouchInput = useHasTouchInput();
   const isCompactWorkspace = useIsMobileViewport(1023);
   const PROPERTIES_DRAWER_AUTOCLOSE_WIDTH = 680;
   useEffect(() => {
@@ -2463,12 +2465,18 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
           interactive turned the whole top band into an invisible click sink over the top of
           page 1 and over anything scrolled beneath it. Each child re-enables pointer events
           on its own visible chrome. */}
-      {isMobileViewport && workspaceViewMode !== 'present' && <div className="panvas-mobile-document-header">
+      {isMobileViewport && workspaceViewMode !== 'present' && notebookModeLevel !== 2 && <div className="panvas-mobile-document-header">
         <button type="button" className="min-w-0 flex-1 truncate text-left text-xs font-medium" onClick={() => useUIStore.getState().toggleSidebar()} title="Browse notebook pages">{focusedPage?.title ?? 'Notebook'}</button>
-        <button type="button" onClick={() => handlePanelZoom((containerSize.width - 16) / paperDimensions.width)} className="px-2 text-xs" aria-label="Fit page width">Fit width</button>
+        <button type="button" onClick={() => handlePanelZoom((containerSize.width - 16) / paperDimensions.width)} className="shrink-0 whitespace-nowrap px-2 text-xs" aria-label="Fit page width">Fit width</button>
         <button type="button" className="panvas-icon-control focus-ring" onClick={() => useUIStore.getState().togglePropertiesPanel()} aria-label="Open page and view inspector" aria-expanded={isPropertiesPanelOpen}><PanelRight size={18} /></button>
         <NotebookPageUtilities engine={notebookEngine} workspaceId={workspace?.id} notebookId={notebook?.id} ownerId={focusedPage?.id} editable={workspaceViewMode === 'edit'} onPageDataPersisted={handlePageAudioPersisted} onVoiceDelete={handleDeleteVoiceNote} onVoiceRename={handleRenameVoiceNote} onChange={handleLayersChange} compact onExportPage={() => void handleExportPagePdf()} onExportNotebook={() => void handleExportNotebookPdf()} onPrintPage={() => void handlePrintPage()} onPrintNotebook={() => void handlePrintNotebook()} isExporting={isExportingPdf} />
+        <NotebookWorkspaceControls focusOnly embedded />
       </div>}
+      {isMobileViewport && workspaceViewMode !== 'present' && notebookModeLevel === 2 && (
+        <div className="panvas-layer-toolbar absolute right-2 top-2 z-40 pointer-events-auto">
+          <NotebookWorkspaceControls focusOnly />
+        </div>
+      )}
       {!isMobileViewport && workspaceViewMode !== 'present' && notebookModeLevel === 2 && (
         isToolbarCollapsed ? (
           <button
@@ -2514,11 +2522,13 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         </div>
       </div>}
 
-      {/* Native Scrolling Viewport */}
+      {/* Native Scrolling Viewport: one-finger margin scrolling stays enabled;
+          the notebook controller owns pinch even on an inactive page. */}
       <main 
         ref={containerRef}
         tabIndex={0}
         aria-label="Notebook pages"
+        style={hasTouchInput ? { touchAction: 'pan-x pan-y' } : undefined}
         className={`panvas-notebook-viewport notebook-viewport relative flex-1 min-w-0 min-h-0 overflow-auto bg-panvas-bg-secondary ${
           toolState.mode === 'hand' ? 'cursor-grab active:cursor-grabbing' : ''
         }`}

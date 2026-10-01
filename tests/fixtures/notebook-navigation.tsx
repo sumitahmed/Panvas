@@ -5,9 +5,14 @@ import type { NotebookEngine } from '../../src/components/notebook/engine/Notebo
 import { createEmptyDrawingData } from '../../src/components/notebook/engine/drawingTypes';
 import { notebookRepository } from '../../src/repositories/NotebookRepository';
 import { useWorkspaceStore } from '../../src/stores/workspaceStore';
+import { AppShell } from '../../src/components/layout/AppShell';
+import { useLayoutStore } from '../../src/stores/layoutStore';
+import { useUIStore } from '../../src/stores/uiStore';
 import '../../src/styles/index.css';
 
 async function mount() {
+  const responsive = new URLSearchParams(location.search).has('responsive');
+  if (responsive) useUIStore.setState({ isSidebarOpen: false, isPropertiesPanelOpen: false });
   const store = useWorkspaceStore.getState;
   const workspace = await store().createWorkspace('Navigation lifecycle regression');
   await store().setActiveWorkspace(workspace.id);
@@ -54,6 +59,7 @@ async function mount() {
     navigationIds: pages.map(page => page.id),
     navigationReady: () => pages.every(page => loaded.has(page.id)),
     navigationEngine: () => engine,
+    navigationMode: () => useLayoutStore.getState().notebookModeLevel,
     navigationSelect: (index: number) => store().setActivePage(pages[index].id),
     navigationUnmount: () => root.unmount(),
     navigationRemember: () => {
@@ -80,6 +86,7 @@ async function mount() {
       pointerEvents: [...pointerEvents],
     }),
   });
-  root.render(<div style={{ height: '100vh' }}><NotebookRenderer onEngineReady={instrument} /></div>);
+  const renderer = <NotebookRenderer onEngineReady={instrument} />;
+  root.render(responsive ? <AppShell>{renderer}</AppShell> : <div style={{ height: '100vh' }}>{renderer}</div>);
 }
 void mount();
