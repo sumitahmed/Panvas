@@ -6,6 +6,8 @@
 // browser. This shared controller restores the expected two-finger viewport
 // contract inside those surfaces without changing their data models.
 
+import type { NavigationGestureLifecycle } from './NavigationGestureLifecycle.ts';
+
 export interface ViewportTouchPoint {
   x: number;
   y: number;
@@ -34,6 +36,9 @@ export interface TwoFingerViewportGestureOptions {
   maxScale?: number;
   /** Unscaled layout offsets (centering/padding) must not scale with content. */
   getContentOffset?: (scale: number) => ViewportTouchPoint;
+  navigationGestures?: NavigationGestureLifecycle;
+  /** Cancel synchronously on tool changes without rebinding pointer listeners. */
+  subscribeCancellation?: (cancel: () => void) => () => void;
 }
 
 function midpoint(first: ViewportTouchPoint, second: ViewportTouchPoint): ViewportTouchPoint {
@@ -88,12 +93,15 @@ export function attachTwoFingerViewportGesture({
   minScale = 0.25,
   maxScale = 4,
   getContentOffset = () => ({ x: 0, y: 0 }),
+  navigationGestures,
+  subscribeCancellation,
 }: TwoFingerViewportGestureOptions): () => void {
   const pointers = new Map<number, ViewportTouchPoint>();
   let anchor: GestureAnchor | null = null;
   let pendingPosition: Pick<TwoFingerViewportResult, 'scrollLeft' | 'scrollTop'> | null = null;
   let frame: number | null = null;
   let suppressUntilAllLifted = false;
+  let releaseNavigation: (() => void) | null = null;
 
   const twoPointers = (): [ViewportTouchPoint, ViewportTouchPoint] | null => {
     const points = [...pointers.values()];
@@ -129,8 +137,11 @@ export function attachTwoFingerViewportGesture({
       documentX: (target.scrollLeft + center.x - bounds.left - offset.x) / scale,
       documentY: (target.scrollTop + center.y - bounds.top - offset.y) / scale,
     };
-    cancelActivePointerInteraction();
+    // Hold the promoted owner BEFORE canceling the canvas owner, so idle/page
+    // handoff can never run between one-finger and two-finger navigation.
+    releaseNavigation ??= navigationGestures?.begin() ?? null;
     suppressUntilAllLifted = true;
+    cancelActivePointerInteraction();
     for (const id of pointers.keys()) {
       try { target.setPointerCapture(id); } catch { /* Synthetic events have no native capture. */ }
     }
@@ -164,6 +175,9 @@ export function attachTwoFingerViewportGesture({
     event.preventDefault();
     event.stopPropagation();
     if (!anchor) begin();
+    else {
+      try { target.setPointerCapture(event.pointerId); } catch { /* Synthetic pointer. */ }
+    }
   };
 
   const onPointerMove = (event: PointerEvent) => {
@@ -175,6 +189,42 @@ export function attachTwoFingerViewportGesture({
     update();
   };
 
+  const reset = (applyFinalPosition = false) => {
+    if (frame !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(frame);
+    frame = null;
+    if (applyFinalPosition) applyPendingPosition();
+    pendingPosition = null;
+    const capturedIds = [...pointers.keys()];
+    pointers.clear();
+    anchor = null;
+    suppressUntilAllLifted = false;
+    const release = releaseNavigation;
+    releaseNavigation = null;
+    for (const id of capturedIds) {
+      try {
+        if (target.hasPointerCapture(id)) target.releasePointerCapture(id);
+      } catch { /* Capture already lost. */ }
+    }
+    release?.();
+  };
+
+  const cancel = () => reset();
+  const onVisibilityChange = () => {
+    if (document.visibilityState === 'hidden') cancel();
+  };
+  const onLostPointerCapture = (event: PointerEvent) => {
+    // Canvas capture loss during promotion bubbles here; the viewport owner
+    // remains authoritative. Only loss of our own capture cancels navigation.
+    if (!pointers.has(event.pointerId)) return;
+    if (suppressUntilAllLifted) {
+      if (event.target === target) cancel();
+    } else {
+      // An independently owned one-finger pan may lose capture and finish
+      // outside this viewport. Do not treat its stale ID as a second finger.
+      pointers.delete(event.pointerId);
+    }
+  };
+
   const finishPointer = (event: PointerEvent) => {
     if (!isTouch(event) || !pointers.has(event.pointerId)) return;
     const wasGesture = suppressUntilAllLifted;
@@ -183,20 +233,40 @@ export function attachTwoFingerViewportGesture({
       event.preventDefault();
       event.stopPropagation();
     }
+    if (event.type === 'pointercancel') {
+      cancel();
+      return;
+    }
     if (pointers.size < 2) anchor = null;
-    if (pointers.size === 0) suppressUntilAllLifted = false;
+    // Keep ownership while the remaining finger is still suppressed, even
+    // though no more two-finger movement is possible.
+    if (pointers.size === 0) reset(true);
   };
 
   target.addEventListener('pointerdown', onPointerDown, { capture: true });
   target.addEventListener('pointermove', onPointerMove, { capture: true });
   target.addEventListener('pointerup', finishPointer, { capture: true });
   target.addEventListener('pointercancel', finishPointer, { capture: true });
+  target.addEventListener('lostpointercapture', onLostPointerCapture, { capture: true });
+  window.addEventListener('blur', cancel);
+  window.addEventListener('pointerup', finishPointer, { capture: true });
+  window.addEventListener('pointercancel', finishPointer, { capture: true });
+  window.addEventListener('lostpointercapture', onLostPointerCapture, { capture: true });
+  document.addEventListener('visibilitychange', onVisibilityChange);
+  const unsubscribeCancellation = subscribeCancellation?.(cancel);
 
   return () => {
     target.removeEventListener('pointerdown', onPointerDown, { capture: true });
     target.removeEventListener('pointermove', onPointerMove, { capture: true });
     target.removeEventListener('pointerup', finishPointer, { capture: true });
     target.removeEventListener('pointercancel', finishPointer, { capture: true });
-    if (frame !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(frame);
+    target.removeEventListener('lostpointercapture', onLostPointerCapture, { capture: true });
+    window.removeEventListener('blur', cancel);
+    window.removeEventListener('pointerup', finishPointer, { capture: true });
+    window.removeEventListener('pointercancel', finishPointer, { capture: true });
+    window.removeEventListener('lostpointercapture', onLostPointerCapture, { capture: true });
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+    unsubscribeCancellation?.();
+    cancel();
   };
 }

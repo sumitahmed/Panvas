@@ -288,15 +288,16 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     }
   }, [notebookEngine, workspaceViewMode]);
 
-  // True for the lifetime of a viewport pan gesture. Transferring page focus runs
-  // NotebookPageView's mount-effect cleanup — notebookEngine.unmount() ->
-  // InputManager.detach() — so it must never happen while a pan is in flight. Panning scrolls
-  // by definition, and scrolling is exactly what triggers a focus transfer, so these two have
-  // to be sequenced rather than left to race.
-  const panGestureActiveRef = useRef(false);
-  // Focus transfer requested by the scroll observer while a pan was in flight; applied when
-  // the gesture ends.
+  // Every manual pan owner shares this synchronous lifecycle. Focus handoff
+  // unmounts/detaches the live canvas, so ALL activation requests must defer.
+  const navigationGestures = notebookEngine.input.navigationGestures;
   const pendingFocusPageIdRef = useRef<string | null>(null);
+  const flushNavigationScrollRef = useRef<() => void>(() => {});
+  // Clear before child layout cleanup detaches the focused canvas on teardown.
+  useLayoutEffect(() => () => {
+    pendingFocusPageIdRef.current = null;
+    flushNavigationScrollRef.current = () => {};
+  }, []);
   const pageGeometryTransitionRef = useRef<{ pageId: string; anchor: PageGeometryAnchor } | null>(null);
   const pageGeometryReleaseRafRef = useRef<number | null>(null);
   const [pageGeometryTransitionRevision, setPageGeometryTransitionRevision] = useState(0);
@@ -305,6 +306,14 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   // latest version — a captured stale copy would flush the wrong outgoing page — so they go
   // through this ref, which is reassigned on every render right after the callback is created.
   const handleActivatePageRef = useRef<(targetPageId: string) => void>(() => {});
+  useEffect(() => navigationGestures.onIdle(() => {
+    // The final pointermove can precede the observer's rAF. Resolve that final
+    // position before flushing, avoiding a stale-page handoff followed by another.
+    flushNavigationScrollRef.current();
+    const targetPageId = pendingFocusPageIdRef.current;
+    pendingFocusPageIdRef.current = null;
+    if (targetPageId) handleActivatePageRef.current(targetPageId);
+  }), [navigationGestures]);
 
   // The scroll viewport is only rendered when a page is active (see the guard just before the
   // JSX), so this boolean — not the page id — is what listener-binding effects depend on.
@@ -740,6 +749,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     // behind the cursor and stutter on scaled displays.
     let activePointerId: number | null = null;
     let activePanSource: 'hand' | 'middle' | null = null;
+    let releaseNavigation: (() => void) | null = null;
     let startClientX = 0;
     let startClientY = 0;
     let startScrollLeft = 0;
@@ -766,7 +776,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       container.dataset.panActive = 'true';
       container.dataset.panSource = activePanSource;
       container.dataset.panPointer = String(e.pointerId);
-      panGestureActiveRef.current = true;
+      releaseNavigation = navigationGestures.begin();
       startClientX = e.clientX;
       startClientY = e.clientY;
       startScrollLeft = container.scrollLeft;
@@ -789,7 +799,6 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       container.dataset.panActive = 'false';
       delete container.dataset.panSource;
       delete container.dataset.panPointer;
-      panGestureActiveRef.current = false;
       if (releaseCapture) {
         try {
           if (container.hasPointerCapture(finishedPointerId)) {
@@ -799,11 +808,9 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
           // Ignore DOMException if capture is already lost
         }
       }
-      const pendingFocusPageId = pendingFocusPageIdRef.current;
-      if (pendingFocusPageId) {
-        pendingFocusPageIdRef.current = null;
-        handleActivatePageRef.current(pendingFocusPageId);
-      }
+      const release = releaseNavigation;
+      releaseNavigation = null;
+      release?.();
     };
 
     const onPointerMove = (e: PointerEvent) => {
@@ -854,7 +861,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     // dead the moment it crossed a page boundary. The gesture state lives in this closure, so
     // the effect must only re-run when the engine identity changes, or when the viewport
     // element itself appears or disappears.
-  }, [notebookEngine, hasActivePage]);
+  }, [notebookEngine, hasActivePage, navigationGestures]);
 
   // The page canvas opts out of browser gestures so single-finger ink and
   // selection stay exact. Put a two-finger viewport controller on the actual
@@ -863,14 +870,21 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
+    let mode = notebookEngine.tools.getState().mode;
     return attachTwoFingerViewportGesture({
       target: container,
       getScale: () => notebookEngine.viewport.getState().scale,
       setScale: scale => notebookEngine.viewport.setZoom(scale),
       cancelActivePointerInteraction: () => notebookEngine.input.cancelActivePointerInteraction(),
+      navigationGestures,
+      subscribeCancellation: cancel => notebookEngine.tools.subscribe(state => {
+        if (state.mode === mode) return;
+        mode = state.mode;
+        cancel();
+      }),
       getContentOffset: scale => ({ x: Math.max((container.clientWidth - layoutConfig.totalWidth * scale) / 2, isMobileViewport ? 8 : 32), y: 0 }),
     });
-  }, [notebookEngine, hasActivePage, layoutConfig.totalWidth, isMobileViewport]);
+  }, [notebookEngine, hasActivePage, layoutConfig.totalWidth, isMobileViewport, navigationGestures]);
 
 
   // Central persistence writer for drawing data. Every notebook save goes
@@ -973,7 +987,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       : !focusedPageId
         ? currentSectionPages[0]?.id
         : undefined;
-    if (!targetPageId || focusedPageId === targetPageId) return;
+    if (!targetPageId) return;
     // Focus owns the shared engine and may only move once target data is
     // available. The section preload will update this effect when a cache gap
     // is filled; until then the existing focused page remains authoritative.
@@ -1154,15 +1168,13 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         requestGeneration,
         focusedPageLoadGenerationRef.current,
       )) return;
-      notebookEngine.setDrawingData(cachedData, requestedPageId);
-    loadedSceneRevisionRef.current = notebookEngine.getDrawingOwnership().revision;
+      handleActivatePageRef.current(requestedPageId);
     } else {
       notebookRepository.loadDrawingData(workspace.id, notebook.id, requestedPageId).then(loaded => {
         if (cancelled) return;
         const raw = (loaded || createEmptyDrawingData()) as DrawingData;
         const pageMetadata = notebookPages.find(item => item.id === requestedPageId);
         const d = { ...raw, properties: resolvePageProperties(notebook, pageMetadata, raw.properties) };
-        const effectiveData = sectionDataCacheRef.current[requestedPageId] ?? d;
         updateSectionDataCache(prev => prev[requestedPageId] ? prev : { ...prev, [requestedPageId]: d });
         if (!mayApplyPageLoadToEngine(
           requestedPageId,
@@ -1170,8 +1182,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
           requestGeneration,
           focusedPageLoadGenerationRef.current,
         )) return;
-        notebookEngine.setDrawingData(effectiveData, requestedPageId);
-    loadedSceneRevisionRef.current = notebookEngine.getDrawingOwnership().revision;
+        handleActivatePageRef.current(requestedPageId);
       });
     }
     return () => { cancelled = true; };
@@ -1254,8 +1265,16 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
 
   // Handle immediate page activation on pointerdown or click without jumping the view
   const handleActivatePage = useCallback((targetPageId: string) => {
+    // Central protection covers scroll observation, active-page synchronization,
+    // direct navigation, and late cache/load arrivals. Queue even the current
+    // page: returning to A must replace an earlier pending request for B.
+    if (navigationGestures.active) {
+      pendingFocusPageIdRef.current = targetPageId;
+      return;
+    }
+    pendingFocusPageIdRef.current = null;
     const activationStartedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
-    if (targetPageId === focusedPageIdRef.current) return;
+    if (targetPageId === focusedPageIdRef.current && notebookEngine.getDrawingOwnership().pageId === targetPageId) return;
 
     const incomingData = sectionDataCacheRef.current[targetPageId];
     if (!incomingData) {
@@ -1321,7 +1340,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     setFocusedPageId(targetPageId);
     setActivePage(targetPageId);
     if (activationStartedAt) gate0Profiler.event('page-focus-transfer', performance.now() - activationStartedAt, { targetPageId });
-  }, [flushOwnedPageDrawing, notebookEngine, setActivePage]);
+  }, [flushOwnedPageDrawing, notebookEngine, setActivePage, navigationGestures]);
 
   handleActivatePageRef.current = handleActivatePage;
 
@@ -1337,64 +1356,68 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
 
     let scrollRafId: number | null = null;
 
-    const onScroll = () => {
-      if (scrollRafId !== null) return;
+    const observeScroll = () => {
+      const scrollStartedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
+      let geometryReads = 0;
+      if (!container) return;
 
-      scrollRafId = requestAnimationFrame(() => {
-        const scrollStartedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
-        let geometryReads = 0;
-        scrollRafId = null;
-        if (!container) return;
+      const scale = notebookEngine.viewport.getState().scale;
+      const top = container.scrollTop / scale;
+      const height = container.clientHeight / scale;
+      setVisualWindow(previous => previous.top === top && previous.height === height ? previous : { top, height });
+      const dominantId = dominantPageId(layoutConfig.positions, top + height / 2,
+        currentActivePageIdRef.current || '', 24 / scale);
+      const dominantPage = currentSectionPages.find(page => page.id === dominantId);
 
-        const scale = notebookEngine.viewport.getState().scale;
-        const top = container.scrollTop / scale;
-        const height = container.clientHeight / scale;
-        setVisualWindow(previous => previous.top === top && previous.height === height ? previous : { top, height });
-        const dominantId = dominantPageId(layoutConfig.positions, top + height / 2,
-          currentActivePageIdRef.current || '', 24 / scale);
-        const dominantPage = currentSectionPages.find(page => page.id === dominantId);
+      if (isNavigatingRef.current || pageGeometryTransitionRef.current) return;
 
-        if (isNavigatingRef.current || pageGeometryTransitionRef.current) return;
-
-        if (dominantPage && dominantPage.id !== currentActivePageIdRef.current) {
-          if (dominantPage.type === 'pdf') {
-            // Never allow passive scroll over a PDF preview in NotebookRenderer to hijack activePageId!
-            return;
-          }
-          currentActivePageIdRef.current = dominantPage.id;
-          // Suppresses the scroll-to-page layout effect below, which is only meant to react
-          // to sidebar/navigator navigation, not to the user's own scrolling.
-          lastNavigatedPageIdRef.current = dominantPage.id;
-          setActivePage(dominantPage.id);
-
-          // Focus has to follow. `focusedPageId` decides which page owns the live engine
-          // canvas and the interactive FloatingTextEditor nodes; every other page renders a
-          // `pointer-events-none` StaticTextPreview over a `pointer-events-none` canvas, so
-          // it has no interactive text DOM at all. This observer used to update only
-          // `activePageId` — the page indicator — and leave focus behind on whichever page
-          // was last *clicked*, which made text (and drawing) inert on the page actually on
-          // screen until a throwaway click re-activated it. The two values are no longer
-          // independent: the dominant page is the single source of truth and focus is derived
-          // from it.
-          // it has no interactive text DOM at all.
-          if (panGestureActiveRef.current) {
-            // Deferred rather than dropped: transferring focus mid-pan would unmount the
-            // engine under the live gesture. Applied by endGesture in the pan effect.
-            pendingFocusPageIdRef.current = dominantPage.id;
-          } else {
-            handleActivatePageRef.current(dominantPage.id);
-          }
+      if (dominantPage && dominantPage.id !== currentActivePageIdRef.current) {
+        if (dominantPage.type === 'pdf') {
+          // Never allow passive scroll over a PDF preview in NotebookRenderer to hijack activePageId!
+          return;
         }
-        if (scrollStartedAt) gate0Profiler.event('notebook-scroll-handler', performance.now() - scrollStartedAt, {
-          pages: currentSectionPages.length,
-          geometryReads,
-        });
+        currentActivePageIdRef.current = dominantPage.id;
+        // Suppresses the scroll-to-page layout effect below, which is only meant to react
+        // to sidebar/navigator navigation, not to the user's own scrolling.
+        lastNavigatedPageIdRef.current = dominantPage.id;
+        setActivePage(dominantPage.id);
+
+        // Focus has to follow. `focusedPageId` decides which page owns the live engine
+        // canvas and the interactive FloatingTextEditor nodes; every other page renders a
+        // `pointer-events-none` StaticTextPreview over a `pointer-events-none` canvas, so
+        // it has no interactive text DOM at all. This observer used to update only
+        // `activePageId` — the page indicator — and leave focus behind on whichever page
+        // was last *clicked*, which made text (and drawing) inert on the page actually on
+        // screen until a throwaway click re-activated it. The two values are no longer
+        // independent: the dominant page is the single source of truth and focus is derived
+        // from it.
+        // it has no interactive text DOM at all.
+        handleActivatePageRef.current(dominantPage.id);
+      }
+      if (scrollStartedAt) gate0Profiler.event('notebook-scroll-handler', performance.now() - scrollStartedAt, {
+        pages: currentSectionPages.length,
+        geometryReads,
       });
     };
+
+    const onScroll = () => {
+      if (scrollRafId !== null) return;
+      scrollRafId = requestAnimationFrame(() => {
+        scrollRafId = null;
+        observeScroll();
+      });
+    };
+    const flushScroll = () => {
+      if (scrollRafId !== null) cancelAnimationFrame(scrollRafId);
+      scrollRafId = null;
+      observeScroll();
+    };
+    flushNavigationScrollRef.current = flushScroll;
 
     setVisualWindow({ top: container.scrollTop / viewport.scale, height: container.clientHeight / viewport.scale });
     container.addEventListener('scroll', onScroll, { passive: true });
     return () => {
+      if (flushNavigationScrollRef.current === flushScroll) flushNavigationScrollRef.current = () => {};
       container.removeEventListener('scroll', onScroll);
       if (scrollRafId !== null) {
         cancelAnimationFrame(scrollRafId);

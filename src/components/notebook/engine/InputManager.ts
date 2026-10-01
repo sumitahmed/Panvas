@@ -27,6 +27,7 @@ import { gate0Profiler, type Gate0Record } from '../../../dev/gate0Profiler.ts';
 import { EraserGesture } from './EraserGesture.ts';
 import { InkSamples } from './inkSamples.ts';
 import { startHandwritingTrace, finishHandwritingTrace, type HandwritingTrace } from '../../../dev/handwritingTrace.ts';
+import { NavigationGestureLifecycle } from './NavigationGestureLifecycle.ts';
 
 export type DrawingChangeListener = () => void;
 export type DrawingGestureListener = (active: boolean) => void;
@@ -45,6 +46,7 @@ const SELECTION_CURSORS = new Set([
 ]);
 
 export class InputManager {
+  readonly navigationGestures = new NavigationGestureLifecycle();
   private toolManager: ToolManager;
   private viewport: ViewportManager;
   private drawingEngine: DrawingEngine;
@@ -190,12 +192,14 @@ export class InputManager {
         if (!state.rulerEnabled) this.rulerDragMode = null;
         this.drawingEngine.redraw();
       }
+      if (this.isPanning && !this.isPanningOverride && state.mode !== 'hand') this.finishPanning();
     });
     canvas.addEventListener('pointerdown', this.handlePointerDown);
     canvas.addEventListener('pointermove', this.handlePointerMove);
     canvas.addEventListener('pointerup', this.handlePointerUp);
     canvas.addEventListener('pointercancel', this.handlePointerUp);
     canvas.addEventListener('lostpointercapture', this.handleEraserCaptureLost);
+    canvas.addEventListener('lostpointercapture', this.handlePanCaptureLost);
     if (typeof window !== 'undefined' && 'onpointerrawupdate' in window) {
       canvas.addEventListener('pointerrawupdate', this.handlePointerMove as EventListener);
     }
@@ -210,16 +214,25 @@ export class InputManager {
 
   /** Detach event listeners. Call on unmount. */
   detach(): void {
+    // Release ownership only after detach has finished: idle may synchronously
+    // activate another page and re-enter engine/input cleanup.
+    const releaseNavigation = this.releasePanNavigation;
+    this.releasePanNavigation = null;
+    this.finishPanning();
     this.flushPendingErasing();
     this.setDrawingGestureActive(false);
     this.unsubscribeToolState?.();
     this.unsubscribeToolState = null;
-    if (!this.canvas) return;
+    if (!this.canvas) {
+      releaseNavigation?.();
+      return;
+    }
     this.canvas.removeEventListener('pointerdown', this.handlePointerDown);
     this.canvas.removeEventListener('pointermove', this.handlePointerMove);
     this.canvas.removeEventListener('pointerup', this.handlePointerUp);
     this.canvas.removeEventListener('pointercancel', this.handlePointerUp);
     this.canvas.removeEventListener('lostpointercapture', this.handleEraserCaptureLost);
+    this.canvas.removeEventListener('lostpointercapture', this.handlePanCaptureLost);
     if (typeof window !== 'undefined' && 'onpointerrawupdate' in window) {
       this.canvas.removeEventListener('pointerrawupdate', this.handlePointerMove as EventListener);
     }
@@ -242,6 +255,7 @@ export class InputManager {
     this.lassoPoints = [];
     this.laserManager.clear();
     this.canvas = null;
+    releaseNavigation?.();
   }
 
   private clearSelectionCursor(): void {
@@ -253,6 +267,7 @@ export class InputManager {
   // ---- Event Handlers (bound as arrow functions for stable references) ----
 
   private handlePointerDown = (e: PointerEvent): void => {
+    if (this.isPanning) return;
     if (this.inkSamples) return;
     if (this.eraserGesture) return;
     const toolState = this.toolManager.getState();
@@ -408,6 +423,10 @@ export class InputManager {
   };
 
   private handlePointerUp = (e: PointerEvent): void => {
+    if (this.isPanning) {
+      if (e.pointerId === this.panPointerId) this.finishPanning();
+      return;
+    }
     if (this.inkSamples && !this.ownsInkEvent(e)) return;
     if (this.eraserGesture && e.pointerId !== this.eraserGesture.pointerId) return;
     if (this.eraserGesture) {
@@ -425,19 +444,6 @@ export class InputManager {
       this.finishLaser(e);
       return;
     }
-    if (this.isPanningOverride) {
-      this.isPanningOverride = false;
-      this.finishPanning(e);
-      if (this.canvas) {
-        try {
-          this.canvas.releasePointerCapture(e.pointerId);
-        } catch (err) {
-          // Ignore DOMException if capture is already lost
-        }
-      }
-      return;
-    }
-
     if (this.canvas) {
       try {
         this.canvas.releasePointerCapture(e.pointerId);
@@ -452,8 +458,6 @@ export class InputManager {
       this.finishShape();
     } else if (this.strokeModeAtStart === 'select' && this.isDrawing) {
       this.finishSelection(e);
-    } else if (this.strokeModeAtStart === 'hand' && this.isPanning) {
-      this.finishPanning(e);
     }
   };
 
@@ -463,6 +467,10 @@ export class InputManager {
 
   private handleEraserCaptureLost = (e: PointerEvent): void => {
     if (this.eraserGesture?.pointerId === e.pointerId) this.flushPendingErasing('lost-capture');
+  };
+
+  private handlePanCaptureLost = (e: PointerEvent): void => {
+    if (e.pointerId === this.panPointerId) this.finishPanning();
   };
 
   private cancelTransientInteraction = (): void => {
@@ -486,9 +494,6 @@ export class InputManager {
     this.selectionDragMode = 'none';
     this.lassoPoints = [];
     this.rulerDragMode = null;
-    this.isPanningOverride = false;
-    this.isPanning = false;
-    this.panScrollTarget = null;
     this.laserPointerActive = false;
     this.laserManager.clear();
     if (!wasErasing) this.drawingEngine.redraw();
@@ -499,6 +504,7 @@ export class InputManager {
         instrument: cancelledContext.tool as 'pen' | 'pencil',
       });
     }
+    this.finishPanning();
   };
 
   // ---- Transient Ruler Interaction ----
@@ -669,6 +675,8 @@ export class InputManager {
   //   * Touch, because `touch-action: none` (set in attach) suppresses native scrolling
   //     on this canvas, while the viewport controller leaves touch to native scrolling.
   private isPanning = false;
+  private panPointerId: number | null = null;
+  private releasePanNavigation: (() => void) | null = null;
   private panStartX = 0;
   private panStartY = 0;
   private panStartScrollLeft = 0;
@@ -685,6 +693,8 @@ export class InputManager {
 
   private startPanning(e: PointerEvent): void {
     if (!this.canvas) return;
+    this.releasePanNavigation = this.navigationGestures.begin();
+    this.panPointerId = e.pointerId;
     try {
       this.canvas.setPointerCapture(e.pointerId);
     } catch (err) {
@@ -707,7 +717,7 @@ export class InputManager {
   }
 
   private continuePanning(e: PointerEvent): void {
-    if (!this.isPanning) return;
+    if (!this.isPanning || e.pointerId !== this.panPointerId) return;
 
     // Absolute target from the gesture anchor. The previous implementation rebased the
     // anchor on every move, so any motion the scroller clamped away or rounded off was
@@ -724,10 +734,20 @@ export class InputManager {
     }
   }
 
-  private finishPanning(_e: PointerEvent): void {
+  private finishPanning(): void {
+    if (!this.isPanning && !this.releasePanNavigation) return;
+    const pointerId = this.panPointerId;
+    const releaseNavigation = this.releasePanNavigation;
+    this.releasePanNavigation = null;
+    this.panPointerId = null;
     this.isPanning = false;
+    this.isPanningOverride = false;
     this.strokeModeAtStart = null;
     this.panScrollTarget = null;
+    if (pointerId !== null) {
+      try { this.canvas?.releasePointerCapture(pointerId); } catch { /* Capture already lost. */ }
+    }
+    releaseNavigation?.();
   }
 
   // ---- Drawing ----
