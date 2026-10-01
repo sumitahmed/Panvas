@@ -2,7 +2,7 @@ import React, { useMemo } from 'react';
 import { generateHTML } from '@tiptap/core';
 import type { TextObject } from './engine/drawingTypes';
 import { notebookTipTapExtensions } from './tiptapExtensions';
-import { textObjectStyle } from './textTypography';
+import { isHandwritingTextObject, textObjectStyle } from './textTypography';
 import { stickyPaperStyle, getStickyNoteColor, getStickyNoteOpacity, getStickyNoteShape, getShapeBorderRadius, hexToRgba, isStickyNote } from './stickyNotes';
 import { gate0Profiler } from '@/dev/gate0Profiler';
 
@@ -53,6 +53,7 @@ export const StaticTextPreview: React.FC<{ object: TextObject; scale: number; zI
   }, [object.content]);
 
   const isSticky = isStickyNote(object);
+  const handwritingText = isHandwritingTextObject(object) && !isSticky;
   const stickyColor = getStickyNoteColor(object);
   const stickyOpacity = getStickyNoteOpacity(object);
   const stickyShape = getStickyNoteShape(object);
@@ -100,7 +101,7 @@ export const StaticTextPreview: React.FC<{ object: TextObject; scale: number; zI
       )}
       <div
         dangerouslySetInnerHTML={{ __html: html }} 
-        className={`tiptap ProseMirror outline-none prose prose-neutral max-w-none prose-sm ${isSticky ? 'p-0' : 'p-1'}`} 
+        className={`tiptap ProseMirror outline-none ${handwritingText ? 'panvas-h2t-text' : `prose prose-neutral max-w-none prose-sm ${isSticky ? 'p-0' : 'p-1'}`}`}
         style={{ wordBreak: 'break-word', whiteSpace: 'pre-wrap', overflowWrap: 'break-word', ...(isSticky ? { height: '100%', overflow: 'hidden', padding: stickyShape === 'star' ? '34% 24% 20%' : ['circle', 'oval'].includes(stickyShape) ? '20% 18%' : '14px 16px' } : {}) }}
       />
     </div>

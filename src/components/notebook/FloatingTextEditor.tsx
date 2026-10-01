@@ -1,6 +1,6 @@
 import { StaticTextPreview } from './StaticTextPreview';
 import { stickyPaperStyle } from './stickyNotes';
-import { textObjectStyle } from './textTypography';
+import { isHandwritingTextObject, textObjectStyle } from './textTypography';
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { EditorContent, useEditor, type Editor } from '@tiptap/react';
 import Placeholder from '@tiptap/extension-placeholder';
@@ -69,6 +69,7 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
   }, []);
   const isSelected = engine.selection.getSelectedElements().some(el => el.id === object.id);
   const stickyNote = isStickyNote(object);
+  const handwritingText = isHandwritingTextObject(object) && !stickyNote;
   const [stickyStylePanel, setStickyStylePanel] = useState<'color' | 'shape' | null>(null);
   const textWidth = Math.max(stickyNote ? 140 : 160, object.width ?? 0);
   const textMinHeight = stickyNote ? 100 : 72;
@@ -818,7 +819,7 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
       >
         <EditorContent
           editor={editor}
-          className={`outline-none prose prose-neutral max-w-none prose-sm ${stickyNote ? 'p-0' : 'p-1'}`}
+          className={`outline-none ${handwritingText ? 'panvas-h2t-text' : `prose prose-neutral max-w-none prose-sm ${stickyNote ? 'p-0' : 'p-1'}`}`}
           style={{ wordBreak: 'break-word', whiteSpace: 'pre-wrap', overflowWrap: 'break-word', ...(stickyNote ? { height: '100%', overflow: 'auto', padding: stickyShape === 'star' ? '34% 24% 20%' : ['circle', 'oval'].includes(stickyShape) ? '20% 18%' : '14px 16px' } : {}) }}
         />
 

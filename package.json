@@ -16,6 +16,7 @@
     "test:f1-b": "node --test tests/hardening-f1b.test.ts",
     "test:f2": "node --test tests/hardening-f2.test.ts",
     "test:editor-regressions": "node --test tests/editor-regression-recovery.test.ts tests/handwriting-recognition.test.ts tests/notebook-scroll-render-regression.test.ts && node tests/editor-regression-browser.mjs",
+    "test:handwriting-placement": "node --test tests/handwriting-placement.test.ts && node tests/handwriting-placement-browser.mjs && node tests/handwriting-placement-browser.mjs --electron",
     "test:notebook-navigation": "node --test tests/navigation-gesture-lifecycle.test.ts && node tests/notebook-navigation-browser.mjs",
     "test:notebook-responsive": "node --test tests/mobile-presentation.test.ts && node tests/notebook-responsive-browser.mjs",
     "test:notebook-performance": "node --test tests/notebook-performance.test.ts && node tests/notebook-performance-browser.mjs",

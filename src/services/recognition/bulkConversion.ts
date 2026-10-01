@@ -251,7 +251,7 @@ export function formatHandwritingReviewText(lines: readonly Pick<ReviewedHandwri
   )).join('');
 }
 
-/** Resolves every reviewed line against existing and earlier generated lines. */
+/** Places reviewed H2T lines at their source geometry, including close or indented lines. */
 export function createBulkHandwritingLinePlacements(
   lines: readonly ReviewedHandwritingLine[],
   preferences: HandwritingToolPreferences,
@@ -267,7 +267,7 @@ export function createBulkHandwritingLinePlacements(
     const placement = resolveHandwritingLinePlacement(initial, [
       ...existingLinesForLayer(line),
       ...generated,
-    ]);
+    ], { preserveSource: true });
     generated.push({
       x: placement.x,
       y: placement.y,

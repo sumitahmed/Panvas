@@ -145,6 +145,8 @@ interface MeasuredLine {
   width: number;
   ascent: number;
   descent: number;
+  fontAscent: number;
+  fontDescent: number;
 }
 
 function measureLine(text: string, fontFamily: string, fontSize: number): MeasuredLine {
@@ -156,14 +158,17 @@ function measureLine(text: string, fontFamily: string, fontSize: number): Measur
       const metrics = context.measureText(text || 'Mg');
       return {
         width: metrics.width,
-        ascent: metrics.actualBoundingBoxAscent || fontSize * 0.8,
-        descent: metrics.actualBoundingBoxDescent || fontSize * 0.2,
+        ascent: Number.isFinite(metrics.actualBoundingBoxAscent) ? metrics.actualBoundingBoxAscent : fontSize * 0.8,
+        descent: Number.isFinite(metrics.actualBoundingBoxDescent) ? metrics.actualBoundingBoxDescent : fontSize * 0.2,
+        fontAscent: Number.isFinite(metrics.fontBoundingBoxAscent) ? metrics.fontBoundingBoxAscent : fontSize * 0.8,
+        fontDescent: Number.isFinite(metrics.fontBoundingBoxDescent) ? metrics.fontBoundingBoxDescent : fontSize * 0.2,
       };
     }
   }
   // SSR/tests do not expose a canvas. Runtime placement always takes the
   // measured branch above; this deterministic fallback keeps pure logic usable.
-  return { width: text.length * fontSize * 0.56, ascent: fontSize * 0.8, descent: fontSize * 0.2 };
+  return { width: text.length * fontSize * 0.56, ascent: fontSize * 0.8, descent: fontSize * 0.2,
+    fontAscent: fontSize * 0.8, fontDescent: fontSize * 0.2 };
 }
 
 function resolveAutoFontSize(text: string, fontFamily: string, sourceHeight: number): number {
@@ -183,7 +188,8 @@ function resolveAutoFontSize(text: string, fontFamily: string, sourceHeight: num
 /**
  * Derives a text box from page-coordinate ink geometry. Font metrics come from
  * the browser canvas at runtime, so zoom and device pixel ratio never enter the
- * calculation and the first text baseline stays close to the source ink.
+ * calculation. Generated H2T has zero padding/margins and an explicit line
+ * height: its baseline is font ascent plus half the line box's leading.
  */
 export function createBeautifiedTextPlacement(
   text: string,
@@ -199,14 +205,16 @@ export function createBeautifiedTextPlacement(
   const metrics = lines.map(line => measureLine(line || ' ', preferences.fontFamily, fontSize));
   const lineHeight = Math.ceil(fontSize * 1.2);
   const baseline = bounds.y + bounds.height * 0.82;
-  const firstAscent = metrics[0]?.ascent ?? fontSize * 0.8;
+  const first = metrics[0];
+  const renderedBaselineOffset = first.fontAscent + (lineHeight - first.fontAscent - first.fontDescent) / 2;
   const measuredWidth = Math.max(...metrics.map(metric => metric.width), 0);
   return {
     bounds,
     baseline,
     x: bounds.x,
-    // FloatingTextEditor contributes 4px content padding.
-    y: Math.max(0, baseline - firstAscent - 4),
+    // Keep source-baseline metadata for line grouping; visible placement is
+    // anchored to source top using measured glyph and CSS line-box metrics.
+    y: bounds.y + first.ascent - renderedBaselineOffset,
     width: Math.max(160, Math.ceil(bounds.width), Math.ceil(measuredWidth + 12)),
     height: Math.max(72, Math.ceil(lines.length * lineHeight + 8)),
     fontSize,
@@ -222,7 +230,9 @@ export function createBeautifiedTextPlacement(
 export function resolveHandwritingLinePlacement(
   placement: BeautifiedTextPlacement,
   existingLines: readonly ExistingHandwritingLinePlacement[],
+  options: { preserveSource?: boolean } = {},
 ): BeautifiedTextPlacement {
+  if (options.preserveSource) return placement;
   const resolved = { ...placement, bounds: { ...placement.bounds } };
   const alignedLine = existingLines
     .filter(line => {

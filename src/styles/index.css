@@ -639,6 +639,17 @@
 }
 
 /* TipTap Editor Styles */
+/* Generated H2T uses the same measured line box in its live and static views.
+   Ordinary manually-created text retains the existing prose typography. */
+.panvas-h2t-text,
+.panvas-h2t-text .ProseMirror,
+.panvas-h2t-text p {
+  padding: 0;
+  margin: 0;
+  font-size: inherit;
+  line-height: inherit;
+}
+
 .ProseMirror strong {
   /* Tailwind Typography assigns `.prose strong` its own foreground color.
      TipTap's bold mark must inherit the surrounding textStyle color instead. */

@@ -19,8 +19,30 @@ export function withTextFont(content: any, fontFamily: string): any {
   return next;
 }
 
-export function textObjectStyle(object: TextObject): { fontFamily: string } {
-  return { fontFamily: object.fontFamily || DEFAULT_TEXT_FONT };
+export function isHandwritingTextObject(object: TextObject): boolean {
+  return object.metadata?.generatedFrom === 'handwriting-recognition';
+}
+
+function firstTextFont(content: any): string | undefined {
+  if (!content || typeof content !== 'object') return undefined;
+  const family = content.marks?.find((mark: any) => mark.type === 'textStyle')?.attrs?.fontFamily;
+  if (typeof family === 'string') return family;
+  for (const child of content.content ?? []) {
+    const found = firstTextFont(child);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+export function textObjectStyle(object: TextObject): { fontFamily: string; fontSize?: number; lineHeight?: string } {
+  if (!isHandwritingTextObject(object)) return { fontFamily: object.fontFamily || DEFAULT_TEXT_FONT };
+  const fontSize = object.metadata?.handwritingFontSize;
+  const lineHeight = object.metadata?.handwritingLineHeight;
+  return {
+    fontFamily: object.fontFamily || firstTextFont(object.content) || DEFAULT_TEXT_FONT,
+    ...(Number.isFinite(fontSize) && fontSize > 0 ? { fontSize } : {}),
+    ...(Number.isFinite(lineHeight) && lineHeight > 0 ? { lineHeight: `${lineHeight}px` } : {}),
+  };
 }
 
 /** Object selection changes the entire object; a live range changes only that range. */
