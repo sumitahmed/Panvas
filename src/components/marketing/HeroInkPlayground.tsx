@@ -88,7 +88,7 @@ export function HeroInkPlayground({children,onOpenWorkspace}:{children:React.Rea
         <span className="pl-continue-kicker">YOUR NEXT PAGE</span>
         <Popover.Title className="pl-continue-title">Continue in Panvas</Popover.Title>
         <Popover.Description className="pl-continue-description">Open the full workspace for notebooks, page settings and more. This page is a temporary ink sample.</Popover.Description>
-        <a href={PANVAS_RELEASE.project.githubReleasesUrl} target="_blank" rel="noreferrer" className="pl-continue-download"><Download size={15}/>Download for Windows</a>
+        <a href={PANVAS_RELEASE.windows.downloadUrl} target="_blank" rel="noreferrer" className="pl-continue-download"><Download size={15}/>Download for Windows</a>
         <button type="button" className="pl-continue-browser" onClick={()=>{setOpen(false);onOpenWorkspace();}}>Open in browser <ArrowRight size={15}/></button>
         <small>Windows pre-release · Browser development build</small>
       </Popover.Popup>

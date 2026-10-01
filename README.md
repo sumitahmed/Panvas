@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v0.1.2-blue.svg" alt="Version 0.1.2" />
+  <img src="https://img.shields.io/badge/version-v0.1.3-blue.svg" alt="Version 0.1.3" />
   <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" />
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Web-lightgrey.svg" alt="Platforms" />
   <img src="https://img.shields.io/badge/storage-Local--First-orange.svg" alt="Local First" />
@@ -65,13 +65,13 @@ Panvas bridges structured notebooks and infinite canvases into a single, distrac
 ## Download
 
 ### Windows (Desktop)
-- **Panvas v0.1.2 (64-bit)**: Download [`Panvas-0.1.2-Setup.exe`](https://github.com/sumitahmed/Panvas/releases/latest) from the [GitHub Releases](https://github.com/sumitahmed/Panvas/releases) portal.
+- **Panvas v0.1.3 (64-bit)**: Download [`Panvas-0.1.3-Setup.exe`](https://github.com/sumitahmed/Panvas/releases/latest) from the [GitHub Releases](https://github.com/sumitahmed/Panvas/releases) portal.
 - **SHA-256 Checksum Verification**: Verify the downloaded installer against the official checksum published in `SHA256SUMS.txt`:
   ```powershell
-  Get-FileHash Panvas-0.1.2-Setup.exe -Algorithm SHA256
-  # Verified SHA-256: 1bd99a9b292d308dfd420b4a1abccfe34dc08cdc50b75f9ad806f612b9121d3c
+  Get-FileHash Panvas-0.1.3-Setup.exe -Algorithm SHA256
+  # Compare with SHA256SUMS.txt from the same release.
   ```
-  *Note: The v0.1.2 installer is unsigned while the code signing pipeline is established. If Windows SmartScreen prompts on launch, click "More info" → "Run anyway".*
+  *Note: The v0.1.3 installer is unsigned while the code signing pipeline is established. If Windows SmartScreen prompts on launch, click "More info" → "Run anyway".*
 
 ### Web
 - **Browser App**: Launch [panvas.vercel.app/app](https://panvas.vercel.app/app) to use Panvas directly in Chromium, Firefox, or Safari (stored in origin-scoped IndexedDB).

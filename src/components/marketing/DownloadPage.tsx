@@ -10,6 +10,7 @@ export function DownloadPage() {
   const [copied, setCopied] = useState(false);
 
   const handleCopyChecksum = () => {
+    if (!PANVAS_INSTALLER_SHA256) return;
     void navigator.clipboard.writeText(PANVAS_INSTALLER_SHA256);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
@@ -20,7 +21,7 @@ export function DownloadPage() {
       label="Release / Download"
       title="Download Panvas for Windows."
       intro="Experience a local-first digital research workspace. Your data lives on your disk in human-readable files."
-      aside={<>VERSION 0.1.2<br />Windows x64 NSIS<br />Release Build</>}
+      aside={<>VERSION {PANVAS_RELEASE.windows.version}<br />Windows x64 NSIS<br />Release Build</>}
     >
       <PublicDocument>
         <section>
@@ -68,6 +69,7 @@ export function DownloadPage() {
                   <button
                     type="button"
                     onClick={handleCopyChecksum}
+                    disabled={!PANVAS_INSTALLER_SHA256}
                     style={{
                       display: 'inline-flex',
                       alignItems: 'center',
@@ -93,7 +95,7 @@ export function DownloadPage() {
                   wordBreak: 'break-all',
                   fontFamily: 'monospace'
                 }}>
-                  {PANVAS_INSTALLER_SHA256}
+                  {PANVAS_INSTALLER_SHA256 || 'Published in SHA256SUMS.txt'}
                 </code>
                 <p style={{ margin: '8px 0 0 0', fontSize: '0.8rem', color: 'var(--pp-text-muted, #666)' }}>
                   The authoritative cryptographic hash for each release asset is published in <code>SHA256SUMS.txt</code> on the{' '}
@@ -141,7 +143,7 @@ export function DownloadPage() {
             }}>
               <ShieldAlert size={20} style={{ flexShrink: 0, marginTop: '2px' }} aria-hidden="true" />
               <div style={{ fontSize: '0.9rem', lineHeight: 1.5 }}>
-                <strong>Unsigned Binary Advisory:</strong> Panvas v0.1.2 is currently unsigned while the official Authenticode certificate pipeline is being established. Windows SmartScreen may display a warning stating <em>"Windows protected your PC"</em>.
+                <strong>Unsigned Binary Advisory:</strong> Panvas v{PANVAS_RELEASE.windows.version} is currently unsigned while the official Authenticode certificate pipeline is being established. Windows SmartScreen may display a warning stating <em>"Windows protected your PC"</em>.
               </div>
             </div>
             <p>
@@ -150,7 +152,7 @@ export function DownloadPage() {
             <ol>
               <li>Click <strong>"More info"</strong> on the Windows SmartScreen dialog.</li>
               <li>Click <strong>"Run anyway"</strong> to proceed with installation.</li>
-              <li>To verify binary integrity beforehand, run <code>Get-FileHash Panvas-0.1.2-Setup.exe -Algorithm SHA256</code> in PowerShell and compare the hash with the verified checksum published above.</li>
+              <li>To verify binary integrity beforehand, run <code>Get-FileHash {PANVAS_RELEASE.windows.installerFileName} -Algorithm SHA256</code> in PowerShell and compare the hash with <code>SHA256SUMS.txt</code> from the same release.</li>
             </ol>
           </div>
         </section>

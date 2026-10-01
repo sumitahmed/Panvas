@@ -10,6 +10,7 @@ import { useCloudSyncStore } from '@/stores/cloudSyncStore';
 import { CLOUD_SYNC_ENABLED } from '@/config/features';
 import { getCloudSyncPresentation } from '@/services/cloudsync/presentation';
 import { getBrowserStorageDurabilityState, subscribeBrowserStorageDurability } from '@/services/storage/browserStorageDurability';
+import { PANVAS_RELEASE } from '@/components/marketing/releaseMetadata';
 
 export function StatusBar() {
   const { saveStatus } = useCanvasStore();
@@ -61,7 +62,7 @@ export function StatusBar() {
           </span>
         )}
         <span role="status" aria-label="Connectivity" className="text-panvas-text-tertiary">{cloudPresentation.connectivityLabel}</span>
-        <span className="opacity-50">v0.1.2</span>
+        <span className="opacity-50">v{PANVAS_RELEASE.project.version}</span>
       </div>
     </div>
   );

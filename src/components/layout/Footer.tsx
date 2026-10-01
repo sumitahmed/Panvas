@@ -2,6 +2,7 @@ import React from 'react';
 import { Link } from 'wouter';
 import { Github, Globe, Mail } from 'lucide-react';
 import { PANVAS_LOGO_SRC } from '@/lib/brand';
+import { PANVAS_RELEASE } from '@/components/marketing/releaseMetadata';
 
 // Reusable notebook texture
 function FooterTexture({ gridOpacity = 0.015, dotOpacity = 0.012 }: { gridOpacity?: number; dotOpacity?: number }) {
@@ -54,7 +55,7 @@ export function Footer() {
               </span>
             </Link>
             <span className="text-[11px] font-medium text-[#737373] bg-white/4 border border-white/6 w-fit px-2 py-0.5 rounded mb-4">
-              v0.1.2
+              v{PANVAS_RELEASE.project.version}
             </span>
             <p className="text-sm text-[#737373] leading-relaxed mb-1 max-w-xs">
               A Visual Research Workspace

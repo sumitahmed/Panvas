@@ -60,7 +60,7 @@ test('Windows release metadata preserves Panvas user data and excludes developme
   const winTargets = build?.win?.target ?? [];
 
   assert.equal(manifest.name, 'panvas');
-  assert.equal(manifest.version, '0.1.2');
+  assert.equal(manifest.version, '0.1.3');
   assert.equal(build?.appId, 'com.panvas.app');
   assert.equal(build?.productName, 'Panvas');
   assert.equal(build?.win?.artifactName, '${productName}-${version}-Setup.${ext}');
@@ -85,4 +85,29 @@ test('incomplete legacy cloud sync is quarantined and cannot delete local data o
   assert.match(engine, /local data preserved/i);
   assert.doesNotMatch(engine, /await db\.(workspaces|folders|canvasFiles)\.delete\(item\.entityId\)/);
   assert.doesNotMatch(engine, /supabase\.from\('[^']+'\)\.delete\(\)/);
+});
+
+test('public Windows download metadata and CTAs use the current release', async () => {
+  const { PANVAS_RELEASE } = await import('../src/components/marketing/releaseMetadata.ts');
+  const manifest = JSON.parse(await readFile('package.json', 'utf8'));
+  const lock = JSON.parse(await readFile('package-lock.json', 'utf8'));
+  const windows = PANVAS_RELEASE.windows;
+  assert.equal(lock.version, manifest.version);
+  assert.equal(lock.packages[''].version, manifest.version);
+  assert.equal(PANVAS_RELEASE.project.version, manifest.version);
+  assert.equal(windows.version, manifest.version);
+  assert.equal(windows.releaseTag, `v${manifest.version}`);
+  assert.equal(windows.installerFileName, `Panvas-${manifest.version}-Setup.exe`);
+  const releases = `${PANVAS_RELEASE.project.githubRepoUrl}/releases`;
+  assert.equal(windows.downloadUrl, `${releases}/download/${windows.releaseTag}/${windows.installerFileName}`);
+  assert.equal(windows.releaseNotesUrl, `${releases}/tag/${windows.releaseTag}`);
+  assert.equal(windows.checksumUrl, `${releases}/download/${windows.releaseTag}/SHA256SUMS.txt`);
+  for (const name of ['LandingPage', 'HeroInkPlayground', 'DownloadPage']) {
+    const source = await readFile(`src/components/marketing/${name}.tsx`, 'utf8');
+    assert.ok(source.includes('href={PANVAS_RELEASE.windows.downloadUrl}'), `${name} downloads the installer directly`);
+    assert.doesNotMatch(source, /0\.1\.2/, `${name} contains no stale release label`);
+  }
+  const download = await readFile('src/components/marketing/DownloadPage.tsx', 'utf8');
+  assert.match(download, /disabled=\{!PANVAS_INSTALLER_SHA256\}/);
+  assert.match(download, /Published in SHA256SUMS\.txt/);
 });

@@ -6,10 +6,11 @@ import React from 'react';
 import { ExternalLink, Github, FileText, Shield } from 'lucide-react';
 import { useAuthStore } from '@/stores/authStore';
 import { PANVAS_LOGO_SRC } from '@/lib/brand';
+import { PANVAS_RELEASE } from '@/components/marketing/releaseMetadata';
 
 export function AboutSection() {
   const { user } = useAuthStore();
-  const version = '0.1.2';
+  const version = PANVAS_RELEASE.project.version;
   const build = '12345'; // Ideally injected via env
   const mode = user ? 'Cloud Mode' : 'Local Mode';
 
