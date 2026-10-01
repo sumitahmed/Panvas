@@ -4,6 +4,7 @@ import { canvasRepository } from '@/repositories/CanvasRepository';
 import { notebookRepository } from '@/repositories/NotebookRepository';
 import { renderPdfAnnotations } from './renderPdfAnnotations';
 import type { PdfPageState } from '@/types/notebook';
+import { currentPresentationTheme } from '@/lib/themePresentation';
 
 export interface AnnotatedPdfExportInput {
   userId: string | null;
@@ -24,6 +25,7 @@ export interface AnnotatedPdfExportResult {
 }
 
 export async function exportAnnotatedPdf(input: AnnotatedPdfExportInput): Promise<AnnotatedPdfExportResult> {
+  const theme = currentPresentationTheme();
   const stored = await canvasRepository.getPdf(input.userId, input.pdfDataId);
   if (!stored) throw new Error('The original PDF bytes are unavailable. Re-import the source document before exporting.');
 
@@ -33,7 +35,7 @@ export async function exportAnnotatedPdf(input: AnnotatedPdfExportInput): Promis
     notebookRepository.loadDrawingData(input.workspaceId, input.notebookId, `${input.pageId}_pdf_${index + 1}`)
       .then(value => value as DrawingData | null),
   ));
-  const rendered = await renderPdfAnnotations(originalBytes, drawings, input.pageState, async fileId => { const image = await canvasRepository.getImage(fileId); return image ? { mimeType: image.mimeType, data: image.data } : undefined; });
+  const rendered = await renderPdfAnnotations(originalBytes, drawings, input.pageState, async fileId => { const image = await canvasRepository.getImage(fileId); return image ? { mimeType: image.mimeType, data: image.data } : undefined; }, theme);
   const baseName = input.fileName.replace(/\.pdf$/i, '') || 'document';
   return { ...rendered, fileName: `${baseName}-annotated.pdf` };
 }

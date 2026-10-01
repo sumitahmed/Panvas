@@ -308,18 +308,18 @@ test('13. White and Ink resolve to different appearance tokens', async () => {
   const inkBg = inkBgMatch[1].trim();
 
   assert.notEqual(whiteBg, inkBg, 'White and Ink backgrounds must be distinctly different');
-  assert.equal(whiteBg, '255 255 255', 'White must use neutral white (255 255 255)');
-  assert.equal(inkBg, '247 244 235', 'Ink must use warm off-white paper (247 244 235)');
+  assert.equal(whiteBg, '251 250 247', 'Light uses warm ivory chrome');
+  assert.equal(inkBg, '216 213 200', 'Ink uses distinct warm-gray tablet chrome');
 });
 
-test('14. Ink uses the intended warm application colors', async () => {
+test('14. Ink uses warm-gray application colors with charcoal text', async () => {
   const css = await read('../src/styles/index.css');
   const inkBlock = css.match(/\.theme-ink\s*\{([^}]+)\}/)?.[1] || '';
 
-  assert.match(inkBlock, /--bg-primary:\s*247 244 235/, 'Ink bg-primary must be warm paper #F7F4EB');
-  assert.match(inkBlock, /--bg-secondary:\s*239 235 223/, 'Ink bg-secondary must be warm tone');
-  assert.match(inkBlock, /--text-primary:\s*60 50 40/, 'Ink text-primary must be sepia/espresso ink');
-  assert.match(inkBlock, /--border-subtle:\s*215 205 186/, 'Ink border-subtle must be warm subtle');
+  assert.match(inkBlock, /--bg-primary:\s*216 213 200/, 'Ink chrome stays warm gray');
+  assert.match(inkBlock, /--bg-secondary:\s*193 190 177/, 'The writing surface has stronger separation');
+  assert.match(inkBlock, /--text-primary:\s*43 41 36/, 'Ink foreground stays readable charcoal');
+  assert.match(inkBlock, /--border-subtle:\s*183 178 159/, 'Borders stay warm and restrained');
 });
 
 test('15. Ink has slightly reduced UI saturation compared to White where intended', async () => {

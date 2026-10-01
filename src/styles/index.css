@@ -8,20 +8,20 @@
 
 @layer base {
   :root {
-    /* LIGHT — clean paper and quiet chrome. */
-    --bg-primary: 255 254 251;
-    --bg-secondary: 248 247 243;
-    --bg-tertiary: 239 238 232;
+    /* LIGHT — ivory chrome, clear panels and restrained ink accents. */
+    --bg-primary: 251 250 247;
+    --bg-secondary: 242 240 235;
+    --bg-tertiary: 233 230 222;
     --bg-elevated: 255 255 253;
-    --bg-hover: 239 237 231;
-    --bg-active: 228 226 218;
-    --border-subtle: 225 222 213;
-    --border-default: 211 207 197;
-    --border-strong: 166 161 150;
-    --text-primary: 35 36 38;
-    --text-secondary: 82 83 86;
-    --text-tertiary: 119 119 121;
-    --text-accent: 40 41 43;
+    --bg-hover: 238 235 228;
+    --bg-active: 228 223 213;
+    --border-subtle: 226 221 211;
+    --border-default: 208 201 187;
+    --border-strong: 165 155 136;
+    --text-primary: 39 42 40;
+    --text-secondary: 83 87 82;
+    --text-tertiary: 104 108 101;
+    --text-accent: 39 42 40;
     --accent-violet: 93 78 176;
     --accent-violet-light: 121 105 211;
     --accent-blue: 45 111 183;
@@ -30,28 +30,6 @@
     --accent-rose: 193 67 83;
     --glass-bg: 255 255 253;
     --glass-border: 218 214 205;
-    /* LIGHT — clean paper and crisp neutral chrome. */
-    --bg-primary: 255 255 255;
-    --bg-secondary: 248 249 250;
-    --bg-tertiary: 241 243 245;
-    --bg-elevated: 255 255 255;
-    --bg-hover: 241 243 245;
-    --bg-active: 233 236 239;
-    --border-subtle: 229 232 235;
-    --border-default: 213 217 222;
-    --border-strong: 156 163 175;
-    --text-primary: 17 24 39;
-    --text-secondary: 75 85 99;
-    --text-tertiary: 107 114 128;
-    --text-accent: 17 24 39;
-    --accent-violet: 124 58 237;
-    --accent-violet-light: 139 92 246;
-    --accent-blue: 37 99 235;
-    --accent-emerald: 16 185 129;
-    --accent-amber: 217 119 6;
-    --accent-rose: 225 29 72;
-    --glass-bg: 255 255 255;
-    --glass-border: 229 232 235;
     --code-comment: #5b6472;
     --code-keyword: #5b21b6;
     --code-string: #047857;
@@ -71,6 +49,8 @@
     --control-height-md: 2.5rem;
     --shadow-surface: 0 1px 2px rgb(35 32 25 / 0.06), 0 8px 20px rgb(35 32 25 / 0.06);
     --shadow-floating: 0 14px 34px rgb(27 25 20 / 0.16), 0 2px 5px rgb(27 25 20 / 0.09);
+    --shadow-paper: 0 1px 2px rgb(36 35 29 / 0.12), 0 12px 26px rgb(36 35 29 / 0.16);
+    --content-filter: none;
     --motion-fast: 120ms;
     --motion-standard: 180ms;
     --focus-outline: rgb(var(--accent-violet) / 0.65);
@@ -87,16 +67,16 @@
   }
 
   .dark {
-    /* DARK — charcoal surfaces rather than pure black. */
-    --bg-primary: 24 25 27;
-    --bg-secondary: 30 31 34;
-    --bg-tertiary: 41 42 46;
-    --bg-elevated: 36 37 40;
-    --bg-hover: 48 49 54;
-    --bg-active: 61 62 67;
-    --border-subtle: 57 58 63;
-    --border-default: 72 73 79;
-    --border-strong: 121 122 129;
+    /* DARK — layered graphite with warm, legible foregrounds. */
+    --bg-primary: 25 28 29;
+    --bg-secondary: 32 36 37;
+    --bg-tertiary: 41 46 47;
+    --bg-elevated: 46 51 52;
+    --bg-hover: 54 60 61;
+    --bg-active: 66 73 73;
+    --border-subtle: 55 63 63;
+    --border-default: 77 85 83;
+    --border-strong: 117 126 119;
     --text-primary: 244 243 239;
     --text-secondary: 194 193 188;
     --text-tertiary: 150 149 145;
@@ -121,32 +101,37 @@
     --code-operator: #cbd5e1;
     --shadow-surface: 0 1px 2px rgb(0 0 0 / 0.2), 0 8px 20px rgb(0 0 0 / 0.14);
     --shadow-floating: 0 16px 38px rgb(0 0 0 / 0.34), 0 2px 6px rgb(0 0 0 / 0.24);
+    --shadow-paper: 0 1px 0 rgb(255 255 255 / 0.06), 0 14px 30px rgb(0 0 0 / 0.38);
+    --toolbar-bg: 43 47 49;
+    --toolbar-border: 77 83 86;
+    --toolbar-hover: 55 61 64;
+    --toolbar-active: 62 71 79;
+    --toolbar-shadow: inset 0 1px 0 rgb(255 255 255 / 0.04), 0 6px 18px rgb(0 0 0 / 0.2), 0 1px 3px rgb(0 0 0 / 0.16);
   }
 
   .theme-ink {
-    /* INK THEME (Warm paper) */
-    --bg-primary: 247 244 235;
-    --bg-secondary: 239 235 223;
-    --bg-tertiary: 232 227 211;
-    --bg-elevated: 255 253 245;
-    --bg-hover: 232 227 211;
-    --bg-active: 223 217 199;
-    --border-subtle: 215 205 186;
-    --border-default: 189 176 151;
-    --border-strong: 132 116 91;
-    --text-primary: 60 50 40;
-    --text-secondary: 90 78 66;
-    --text-tertiary: 120 108 92;
-    --text-accent: 60 50 40;
-    --accent-violet: 98 72 156;
-    --accent-violet-light: 119 92 178;
-    --accent-blue: 64 104 168;
-    --accent-emerald: 58 131 92;
-    --accent-amber: 178 117 34;
-    --accent-rose: 172 65 86;
-    --glass-bg: 247 244 235;
-    --glass-border: 60 50 40;
-    --glass-border: 215 205 186;
+    /* INK — graphite and cream-yellow neutrals in chrome, independent of paper. */
+    --bg-primary: 216 213 200;
+    --bg-secondary: 193 190 177;
+    --bg-tertiary: 179 176 162;
+    --bg-elevated: 241 237 222;
+    --bg-hover: 205 201 184;
+    --bg-active: 187 183 165;
+    --border-subtle: 183 178 159;
+    --border-default: 155 148 127;
+    --border-strong: 117 110 92;
+    --text-primary: 43 41 36;
+    --text-secondary: 77 71 65;
+    --text-tertiary: 101 95 83;
+    --text-accent: 43 41 36;
+    --accent-violet: 105 96 126;
+    --accent-violet-light: 129 117 149;
+    --accent-blue: 75 104 118;
+    --accent-emerald: 79 111 83;
+    --accent-amber: 137 113 50;
+    --accent-rose: 143 89 86;
+    --glass-bg: 241 237 222;
+    --glass-border: 155 148 127;
     --code-comment: #6b6259;
     --code-keyword: #6d3da1;
     --code-string: #2f7652;
@@ -157,8 +142,11 @@
     --code-type: #356f68;
     --code-property: #356d91;
     --code-operator: #4e514f;
-    --shadow-surface: 0 1px 2px rgb(60 50 40 / 0.08), 0 8px 20px rgb(60 50 40 / 0.08);
-    --shadow-floating: 0 14px 34px rgb(60 50 40 / 0.2), 0 2px 5px rgb(60 50 40 / 0.12);
+    --shadow-surface: 0 1px 0 rgb(43 41 36 / 0.12), 0 2px 5px rgb(43 41 36 / 0.07);
+    --shadow-floating: 0 1px 0 rgb(43 41 36 / 0.14), 0 5px 14px rgb(43 41 36 / 0.15);
+    --shadow-paper: 0 0 0 1px rgb(43 41 36 / 0.15), 0 7px 16px rgb(43 41 36 / 0.2);
+    --focus-outline: rgb(var(--text-primary) / 0.65);
+    --content-filter: saturate(0.5);
   }
 
   /* ============================================
@@ -235,7 +223,7 @@
   /* Glass panel */
   .glass-panel {
     @apply bg-panvas-glass-bg backdrop-blur-xl border border-panvas-glass-border;
-    box-shadow: 0 12px 30px rgb(33 30 24 / 0.10);
+    box-shadow: var(--shadow-floating);
   }
 
   /* Sidebar item */
@@ -1006,14 +994,14 @@
 .panvas-toolbar-surface {
   border: 1px solid rgb(var(--border-default));
   background: rgb(var(--bg-elevated) / 0.92);
-  box-shadow: 0 12px 28px rgb(30 27 22 / 0.16), 0 1px 2px rgb(30 27 22 / 0.08);
+  box-shadow: var(--shadow-floating);
 }
 
 .panvas-workspace-controls,
 .panvas-page-utilities {
   border: 1px solid rgb(var(--border-default));
   background: rgb(var(--bg-elevated) / 0.92);
-  box-shadow: 0 8px 20px rgb(29 26 21 / 0.14), 0 1px 2px rgb(29 26 21 / 0.08);
+  box-shadow: var(--shadow-surface);
 }
 
 .panvas-local-mode-prompt {
@@ -1046,7 +1034,73 @@
 .panvas-properties-panel {
   background: rgb(var(--bg-primary) / 0.96);
   border-color: rgb(var(--border-default));
-  box-shadow: -12px 0 28px rgb(27 25 20 / 0.08);
+  box-shadow: var(--shadow-surface);
+}
+
+/* The main toolbar and its quick presets share one dark surface language. */
+.dark .panvas-toolbar-surface {
+  border-color: rgb(var(--toolbar-border));
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.025), transparent), rgb(var(--toolbar-bg));
+  box-shadow: var(--toolbar-shadow);
+}
+.dark .panvas-tool-control {
+  color: rgb(var(--text-primary) / 0.86);
+}
+.dark .panvas-tool-control:hover,
+.dark .panvas-toolbar-surface .panvas-preset-control:hover {
+  background: rgb(var(--toolbar-hover));
+  color: rgb(var(--text-primary));
+}
+.dark .panvas-tool-control[aria-pressed="true"],
+.dark .panvas-toolbar-surface .panvas-preset-control[aria-pressed="true"] {
+  background: rgb(var(--toolbar-active));
+  color: rgb(var(--accent-blue));
+}
+.dark .panvas-toolbar-divider {
+  background: rgb(var(--toolbar-border));
+}
+.dark .panvas-toolbar-surface .panvas-toolbar-swatch {
+  border-color: rgb(var(--text-secondary) / 0.6);
+  --tw-ring-offset-color: rgb(var(--toolbar-bg));
+}
+
+/* Filter only authored content; paper surfaces and paper-color swatches retain
+   their exact selected color. Individual layers keep their existing geometry. */
+.panvas-colored-content,
+[data-text-object-id],
+[data-stable-page-visual] > *,
+[data-live-page-visual] > * {
+  filter: var(--content-filter);
+}
+
+.panvas-notebook-viewport div[id^="page-"][data-page-id] {
+  box-shadow: var(--shadow-paper);
+}
+.panvas-notebook-viewport div[data-rendered-page-id][data-page-id] {
+  box-shadow: none;
+}
+
+.theme-ink .panvas-library,
+.theme-ink .panvas-notebook-viewport {
+  background: rgb(var(--bg-secondary));
+}
+.theme-ink :is(.panvas-topbar, .panvas-sidebar, .panvas-properties-panel) {
+  background: rgb(var(--bg-primary));
+}
+.theme-ink :is(.panvas-toolbar-surface, .panvas-workspace-controls, .panvas-page-utilities, .panvas-floating-surface, .panvas-menu, .glass-panel) {
+  background: rgb(var(--bg-elevated));
+  backdrop-filter: none;
+}
+.theme-ink :is(.panvas-toolbar-surface, .panvas-menu, .panvas-overlay, .panvas-floating-surface) svg[style*="color"],
+.theme-ink :is(.panvas-toolbar-surface, .panvas-floating-surface) input[type="color"],
+.theme-ink .panvas-ink-palette {
+  filter: saturate(0.5);
+}
+
+/* Black/graphite tool symbols use a legible dark-theme foreground. The quick
+   color swatches continue to show the configured ink, which is never changed. */
+.dark .panvas-tool-glyph:is([style*="color: rgb(0, 0, 0)"], [style*="color: rgb(51, 51, 51)"]) {
+  stroke: rgb(var(--text-primary) / 0.9);
 }
 
 .panvas-properties-panel > div:first-child {

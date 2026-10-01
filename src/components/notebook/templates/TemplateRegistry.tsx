@@ -6,6 +6,16 @@
 
 import React from 'react';
 import type { PageTemplate } from '../engine/drawingTypes';
+import { marginRuling, MARGIN_RULE_ACCENT, type MarginRulingStyle } from './marginRuling';
+
+function renderMarginRuling(width: number, height: number, color: string, style: MarginRulingStyle) {
+  const ruling = marginRuling(width, height, style);
+  return <g opacity={0.85}>
+    {ruling.horizontal.map(y => <line key={y} x1={0} y1={y} x2={width} y2={y} stroke={color} strokeWidth={1} />)}
+    {ruling.margins.map((x, index) => <line key={x} x1={x} y1={ruling.top} x2={x} y2={ruling.bottom}
+      stroke={style === 'Double margin ruled' && index === 0 ? MARGIN_RULE_ACCENT : color} strokeWidth={1} />)}
+  </g>;
+}
 
 export type TemplateCategory = 'Basic' | 'Grid' | 'Study' | 'Planning' | 'Special';
 
@@ -85,6 +95,23 @@ export const TEMPLATE_REGISTRY: Record<PageTemplate, TemplateDefinition> = {
       }
       return <g opacity={0.85}>{lines}</g>;
     },
+  },
+
+  'Large ruled with margin': {
+    id: 'Large ruled with margin',
+    name: 'Large Ruled with Margin',
+    category: 'Basic',
+    description: 'Wide writing bands (~150px) with a single left margin',
+    supportsLineColor: true,
+    renderSVG: (width, height, color) => renderMarginRuling(width, height, color, 'Large ruled with margin'),
+  },
+  'Double margin ruled': {
+    id: 'Double margin ruled',
+    name: 'Double Margin Ruled',
+    category: 'Basic',
+    description: 'Notebook ruling (~32px) with a double left margin',
+    supportsLineColor: true,
+    renderSVG: (width, height, color) => renderMarginRuling(width, height, color, 'Double margin ruled'),
   },
 
   // ========================================================
@@ -559,7 +586,7 @@ export const TEMPLATE_CATEGORIES: { id: TemplateCategory; title: string; templat
   {
     id: 'Basic',
     title: 'Basic Paper',
-    templates: ['Blank', 'Ruled', 'Narrow ruled', 'Wide ruled'],
+    templates: ['Blank', 'Ruled', 'Narrow ruled', 'Wide ruled', 'Large ruled with margin', 'Double margin ruled'],
   },
   {
     id: 'Grid',

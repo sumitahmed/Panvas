@@ -22,7 +22,7 @@ export function AppearanceSection() {
               active={theme === 'light'}
               icon={<Sun size={18} />}
               onClick={() => setTheme('light')}
-              preview={<div className="h-full w-full bg-[#FFFFFF]" />}
+              preview={<div className="h-full w-full bg-[#FBFAF7]" />}
             />
 
             <ThemeCard
@@ -30,20 +30,20 @@ export function AppearanceSection() {
               active={theme === 'ink'}
               icon={<PenTool size={18} />}
               onClick={() => setTheme('ink')}
-              preview={<div className="h-full w-full bg-[#F7F4EB]" />}
+              preview={<div className="h-full w-full bg-[#D8D5C8]" />}
             />
             <ThemeCard
               name="Dark"
               active={theme === 'dark'}
               icon={<Moon size={18} />}
               onClick={() => setTheme('dark')}
-              preview={<div className="h-full w-full bg-[#0D0D0D]" />}
+              preview={<div className="h-full w-full bg-[#191C1D]" />}
             />
 
 
           </div>
           <p className="text-xs text-panvas-text-tertiary">
-            Ink pairs warm paper surfaces with the original quiet chrome. Your document colors stay as you made them.
+            Ink pairs warm-gray tablet surfaces with softer colors. Paper color stays independent, and switching to Light or Dark restores full color.
           </p>
         </div>
       </div>

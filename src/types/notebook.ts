@@ -1,6 +1,7 @@
 export type PageTemplateId =
   | 'Blank'
   | 'Ruled' | 'Narrow ruled' | 'Wide ruled'
+  | 'Large ruled with margin' | 'Double margin ruled'
   | 'Small grid' | 'Large grid' | 'Dotted' | 'Engineering'
   | 'Cornell' | 'Lecture Notes' | 'Assignment' | 'Checklist'
   | 'To-do' | 'Daily planner' | 'Weekly planner' | 'Monthly planner'

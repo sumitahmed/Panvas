@@ -807,7 +807,7 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
                     {active && <>
                       <canvas
                         ref={canvasRef}
-                        className={`panvas-layer-canvas-decoration absolute inset-0 h-full w-full touch-none ${toolState.mode === 'hand' ? 'cursor-grab active:cursor-grabbing' : toolState.mode === 'text' ? 'cursor-text' : toolState.mode === 'select' ? 'cursor-default' : 'cursor-crosshair'}`}
+                        className={`panvas-colored-content panvas-layer-canvas-decoration absolute inset-0 h-full w-full touch-none ${toolState.mode === 'hand' ? 'cursor-grab active:cursor-grabbing' : toolState.mode === 'text' ? 'cursor-text' : toolState.mode === 'select' ? 'cursor-default' : 'cursor-crosshair'}`}
                       />
                       {textObjects.filter(object => notebookEngine.layers.isVisible(object.layerId)).map(obj => (
                         <FloatingTextEditor
@@ -872,7 +872,7 @@ function PdfStaticAnnotationLayer({ drawing, geometry, rotation, scale }: {
   ]);
 
   return <div className="pointer-events-none absolute inset-0" aria-hidden="true">
-    <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
+    <canvas ref={canvasRef} className="panvas-colored-content absolute inset-0 h-full w-full" />
     {textObjects.filter(object => visibleLayers.size === 0 || visibleLayers.has(object.layerId ?? 'layer-default')).map(object => (
       <FloatingTextEditor
         key={object.id}

@@ -116,7 +116,7 @@ function ToolGlyph({ tool, color, size = 16 }: { tool: string; color?: string; s
   const style = color
     ? { color, filter: color.toLowerCase() === '#ffffff' ? 'drop-shadow(0 0 1px rgba(35, 31, 24, .8))' : undefined }
     : undefined;
-  const props = { size, style, strokeWidth: 1.8 };
+  const props = { size, style, strokeWidth: 1.8, className: 'panvas-tool-glyph' };
   switch (tool) {
     case 'pen': return <PenTool {...props} />;
     case 'pencil': return <Pencil {...props} />;
@@ -1398,7 +1398,7 @@ function DrawingToolPopup({ toolName, settings, onUpdate, onClose, onOpenGesture
               type="range" min="0.5" max="20" step="0.1"
               value={settings.thickness}
               onChange={e => onUpdate('thickness', parseFloat(e.target.value))}
-              className="w-full h-1.5 rounded-full bg-panvas-border-default appearance-none cursor-pointer accent-blue-500"
+              className="w-full h-1.5 rounded-full bg-panvas-border-default appearance-none cursor-pointer accent-panvas-accent-blue"
             />
           </div>
 
@@ -1412,7 +1412,7 @@ function DrawingToolPopup({ toolName, settings, onUpdate, onClose, onOpenGesture
                   type="button"
                   aria-pressed={settings.strokePattern === pattern}
                   onClick={() => onUpdate('strokePattern', pattern)}
-                  className={`rounded-md border px-2 py-1.5 text-2xs capitalize transition-colors ${settings.strokePattern === pattern ? 'border-blue-500/50 bg-blue-500/10 text-blue-500' : 'border-panvas-border-subtle bg-panvas-bg-secondary text-panvas-text-secondary hover:bg-panvas-bg-hover'}`}
+                  className={`rounded-md border px-2 py-1.5 text-2xs capitalize transition-colors ${settings.strokePattern === pattern ? 'border-panvas-accent-blue/50 bg-panvas-accent-blue/10 text-panvas-accent-blue' : 'border-panvas-border-subtle bg-panvas-bg-secondary text-panvas-text-secondary hover:bg-panvas-bg-hover'}`}
                 >{pattern}</button>
               ))}
             </div>
@@ -1428,7 +1428,7 @@ function DrawingToolPopup({ toolName, settings, onUpdate, onClose, onOpenGesture
               type="range" min="5" max="100" step="1"
               value={settings.opacity}
               onChange={e => onUpdate('opacity', parseInt(e.target.value))}
-              className="w-full h-1.5 rounded-full bg-panvas-border-default appearance-none cursor-pointer accent-blue-500"
+              className="w-full h-1.5 rounded-full bg-panvas-border-default appearance-none cursor-pointer accent-panvas-accent-blue"
             />
           </div>
 
@@ -1442,7 +1442,7 @@ function DrawingToolPopup({ toolName, settings, onUpdate, onClose, onOpenGesture
               type="range" min="0" max="100" step="1"
               value={settings.stabilization}
               onChange={e => onUpdate('stabilization', parseInt(e.target.value))}
-              className="w-full h-1.5 rounded-full bg-panvas-border-default appearance-none cursor-pointer accent-blue-500"
+              className="w-full h-1.5 rounded-full bg-panvas-border-default appearance-none cursor-pointer accent-panvas-accent-blue"
             />
           </div>
 
@@ -1478,12 +1478,12 @@ function DrawingToolPopup({ toolName, settings, onUpdate, onClose, onOpenGesture
               onClick={() => onUpdate('pressureSensitivity', !settings.pressureSensitivity)}
               className={`w-full flex items-center justify-between rounded-lg px-3 py-2 text-xs transition-colors border ${
                 settings.pressureSensitivity
-                  ? 'bg-blue-500/10 text-blue-500 border-blue-500/30'
+                  ? 'bg-panvas-accent-blue/10 text-panvas-accent-blue border-panvas-accent-blue/30'
                   : 'bg-panvas-bg-secondary text-panvas-text-secondary border-panvas-border-subtle'
               }`}
             >
               <span>{settings.pressureSensitivity ? 'Enabled' : 'Disabled'}</span>
-              <div className={`w-8 h-4 rounded-full transition-colors ${settings.pressureSensitivity ? 'bg-blue-500' : 'bg-panvas-border-strong'}`}>
+              <div className={`w-8 h-4 rounded-full transition-colors ${settings.pressureSensitivity ? 'bg-panvas-accent-blue' : 'bg-panvas-border-strong'}`}>
                 <div className={`h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform mt-[1px] ${settings.pressureSensitivity ? 'translate-x-[17px]' : 'translate-x-[1px]'}`} />
               </div>
             </button>
@@ -1529,7 +1529,7 @@ function DrawingToolPopup({ toolName, settings, onUpdate, onClose, onOpenGesture
                   onClick={() => onScribbleToEraseChange(!scribbleToErase)}
                   className={`w-full rounded-lg border px-3 py-2 text-left transition-colors ${
                     scribbleToErase
-                      ? 'border-blue-500/30 bg-blue-500/10 text-blue-500'
+                      ? 'border-panvas-accent-blue/30 bg-panvas-accent-blue/10 text-panvas-accent-blue'
                       : 'border-panvas-border-subtle bg-panvas-bg-secondary text-panvas-text-secondary'
                   }`}
                 >
@@ -1547,7 +1547,7 @@ function DrawingToolPopup({ toolName, settings, onUpdate, onClose, onOpenGesture
                   onClick={() => onCircleToSelectChange(!circleToSelect)}
                   className={`mt-2 w-full rounded-lg border px-3 py-2 text-left transition-colors ${
                     circleToSelect
-                      ? 'border-blue-500/30 bg-blue-500/10 text-blue-500'
+                      ? 'border-panvas-accent-blue/30 bg-panvas-accent-blue/10 text-panvas-accent-blue'
                       : 'border-panvas-border-subtle bg-panvas-bg-secondary text-panvas-text-secondary'
                   }`}
                 >
@@ -1569,7 +1569,7 @@ function DrawingToolPopup({ toolName, settings, onUpdate, onClose, onOpenGesture
                   toolName === 'pen' || toolName === 'pencil' ? 'mt-2 ' : ''
                 }${
                   straightLineRecognition
-                    ? 'border-blue-500/30 bg-blue-500/10 text-blue-500'
+                    ? 'border-panvas-accent-blue/30 bg-panvas-accent-blue/10 text-panvas-accent-blue'
                     : 'border-panvas-border-subtle bg-panvas-bg-secondary text-panvas-text-secondary'
                 }`}
               >
@@ -1588,7 +1588,7 @@ function DrawingToolPopup({ toolName, settings, onUpdate, onClose, onOpenGesture
                   onClick={() => onSnapRecognizedLinesChange(!snapRecognizedLines)}
                   className={`mt-2 w-full rounded-lg border px-3 py-2 text-left transition-colors ${
                     snapRecognizedLines
-                      ? 'border-blue-500/30 bg-blue-500/10 text-blue-500'
+                      ? 'border-panvas-accent-blue/30 bg-panvas-accent-blue/10 text-panvas-accent-blue'
                       : 'border-panvas-border-subtle bg-panvas-bg-secondary text-panvas-text-secondary'
                   }`}
                 >
@@ -1609,7 +1609,7 @@ function DrawingToolPopup({ toolName, settings, onUpdate, onClose, onOpenGesture
                   onClick={() => onRoughShapeRecognitionChange(!roughShapeRecognition)}
                   className={`mt-2 w-full rounded-lg border px-3 py-2 text-left transition-colors ${
                     roughShapeRecognition
-                      ? 'border-blue-500/30 bg-blue-500/10 text-blue-500'
+                      ? 'border-panvas-accent-blue/30 bg-panvas-accent-blue/10 text-panvas-accent-blue'
                       : 'border-panvas-border-subtle bg-panvas-bg-secondary text-panvas-text-secondary'
                   }`}
                 >
@@ -1628,7 +1628,7 @@ function DrawingToolPopup({ toolName, settings, onUpdate, onClose, onOpenGesture
                     onClick={() => onSnapRecognizedShapesChange(!snapRecognizedShapes)}
                     className={`mt-2 w-full rounded-lg border px-3 py-2 text-left transition-colors ${
                       snapRecognizedShapes
-                        ? 'border-blue-500/30 bg-blue-500/10 text-blue-500'
+                        ? 'border-panvas-accent-blue/30 bg-panvas-accent-blue/10 text-panvas-accent-blue'
                         : 'border-panvas-border-subtle bg-panvas-bg-secondary text-panvas-text-secondary'
                     }`}
                   >
@@ -1665,10 +1665,10 @@ function ColorPaletteControl({ label, color, onColor }: {
           type="color"
           value={color}
           onChange={event => onColor(event.target.value)}
-          className="h-6 w-6 cursor-pointer rounded border-0 p-0"
+          className="panvas-ink-palette h-6 w-6 cursor-pointer rounded border-0 p-0"
         />
       </div>
-      <div className="grid grid-cols-4 gap-1.5">
+      <div className="panvas-ink-palette grid grid-cols-4 gap-1.5">
         {DEFAULT_COLORS.map(preset => (
           <button
             key={preset}
@@ -1676,7 +1676,7 @@ function ColorPaletteControl({ label, color, onColor }: {
             onClick={() => onColor(preset)}
             className={`h-7 w-7 rounded-full border-2 transition-transform hover:scale-110 focus-ring ${
               color.toLowerCase() === preset.toLowerCase()
-                ? 'scale-110 border-blue-500 ring-2 ring-blue-500/30'
+                ? 'scale-110 border-panvas-accent-blue ring-2 ring-panvas-accent-blue/30'
                 : 'border-panvas-border-strong hover:border-panvas-text-primary'
             }`}
             style={{ backgroundColor: preset }}
@@ -1821,7 +1821,7 @@ function EraserPopup({ settings, onUpdate, onClose }: {
             type="range" min="2" max="50" step="0.5"
             value={settings.thickness}
             onChange={e => onUpdate('thickness', parseFloat(e.target.value))}
-            className="w-full h-1.5 rounded-full bg-panvas-border-default appearance-none cursor-pointer accent-blue-500"
+            className="w-full h-1.5 rounded-full bg-panvas-border-default appearance-none cursor-pointer accent-panvas-accent-blue"
           />
         </div>
         <div className="rounded-lg bg-panvas-bg-secondary border border-panvas-border-subtle p-3 flex items-center justify-center">
@@ -1873,9 +1873,9 @@ function ShapePopup({ lineStyle, onLineStyle, activeShape, color, thickness, opa
         </div>}
         <div className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-3 text-xs">
           <span className="text-panvas-text-secondary">Stroke</span>
-          <div className="flex items-center gap-2"><input type="color" value={color} onChange={event => onColor(event.target.value)} className="h-7 w-9 rounded border-0 bg-transparent" /><input aria-label="Shape stroke width" type="range" min="1" max="16" step="1" value={thickness} onChange={event => onThickness(Number(event.target.value))} className="min-w-0 flex-1 accent-blue-500" /></div>
+          <div className="flex items-center gap-2"><input type="color" value={color} onChange={event => onColor(event.target.value)} className="h-7 w-9 rounded border-0 bg-transparent" /><input aria-label="Shape stroke width" type="range" min="1" max="16" step="1" value={thickness} onChange={event => onThickness(Number(event.target.value))} className="min-w-0 flex-1 accent-panvas-accent-blue" /></div>
           <span className="text-panvas-text-secondary">Opacity</span>
-          <input aria-label="Shape opacity" type="range" min="10" max="100" step="5" value={Math.round(opacity * 100)} onChange={event => onOpacity(Number(event.target.value) / 100)} className="w-full accent-blue-500" />
+          <input aria-label="Shape opacity" type="range" min="10" max="100" step="5" value={Math.round(opacity * 100)} onChange={event => onOpacity(Number(event.target.value) / 100)} className="w-full accent-panvas-accent-blue" />
           <span className="text-panvas-text-secondary">Fill</span>
           <button type="button" onClick={() => onFill(!fillEnabled)} className={`rounded-md px-2 py-1.5 text-xs focus-ring ${fillEnabled ? 'bg-panvas-accent-blue/15 text-panvas-accent-blue' : 'bg-panvas-bg-secondary text-panvas-text-secondary'}`}>{fillEnabled ? 'Filled' : 'Outline'}</button>
           <span className="text-panvas-text-secondary">Rotate</span>
@@ -2008,7 +2008,7 @@ function WritingPresetStrip({
 }) {
   return (
     <div
-      className="panvas-floating-surface flex h-10 shrink-0 items-center gap-1 px-2 max-[599px]:h-9 max-[599px]:gap-0.5 max-[599px]:px-1.5"
+      className="panvas-floating-surface panvas-toolbar-surface flex h-10 shrink-0 items-center gap-1 px-2 max-[599px]:h-9 max-[599px]:gap-0.5 max-[599px]:px-1.5"
       aria-label={`${ACTIVE_TOOL_LABELS[tool]} quick presets`}
     >
       <WritingPresetControls
@@ -2050,7 +2050,7 @@ function WritingPresetControls({
             type="button"
             onMouseDown={event => event.preventDefault()}
             onClick={() => onColor(color)}
-            className={`h-4 w-4 rounded-full border border-panvas-border-strong transition-transform hover:scale-110 focus-ring ${settings.color.toLowerCase() === color.toLowerCase() ? 'ring-2 ring-panvas-accent-blue ring-offset-1 ring-offset-panvas-bg-primary' : ''}`}
+            className={`panvas-toolbar-swatch h-4 w-4 rounded-full border border-panvas-border-strong transition-transform hover:scale-110 focus-ring ${settings.color.toLowerCase() === color.toLowerCase() ? 'ring-2 ring-panvas-accent-blue ring-offset-1 ring-offset-panvas-bg-primary' : ''}`}
             style={{ backgroundColor: color }}
             title={`${label} color ${color}`}
             aria-label={`${label} color ${color}`}
@@ -2060,7 +2060,7 @@ function WritingPresetControls({
           type="button"
           onMouseDown={event => event.preventDefault()}
           onClick={onPalette}
-          className="flex h-7 w-7 items-center justify-center rounded-md text-panvas-text-secondary hover:bg-panvas-bg-hover hover:text-panvas-text-primary focus-ring"
+          className="panvas-preset-control flex h-7 w-7 items-center justify-center rounded-md text-panvas-text-secondary hover:bg-panvas-bg-hover hover:text-panvas-text-primary focus-ring"
           title={`Open ${label} palette`}
           aria-label={`Open ${label} palette`}
         >
@@ -2074,7 +2074,8 @@ function WritingPresetControls({
             type="button"
             onMouseDown={event => event.preventDefault()}
             onClick={() => onThickness(thickness)}
-            className={`flex h-7 w-6 items-center justify-center rounded-md text-panvas-text-secondary transition-colors hover:bg-panvas-bg-hover focus-ring ${Math.abs(settings.thickness - thickness) < 0.01 ? 'bg-panvas-bg-hover text-panvas-text-primary' : ''}`}
+            aria-pressed={Math.abs(settings.thickness - thickness) < 0.01}
+            className={`panvas-preset-control flex h-7 w-6 items-center justify-center rounded-md text-panvas-text-secondary transition-colors hover:bg-panvas-bg-hover focus-ring ${Math.abs(settings.thickness - thickness) < 0.01 ? 'bg-panvas-bg-hover text-panvas-text-primary' : ''}`}
             title={`${label} thickness ${thickness}`}
             aria-label={`${label} thickness ${thickness}`}
           >
@@ -2095,7 +2096,7 @@ function ToolButton({ icon, active, onClick, tooltip, hasPopup }: { icon: React.
       title={tooltip}
       aria-label={tooltip}
       aria-pressed={active}
-      className={`relative flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl p-2 transition-all duration-150 focus-ring max-[599px]:h-9 max-[599px]:w-9 max-[599px]:rounded-lg max-[599px]:p-1.5 ${
+      className={`panvas-tool-control relative flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl p-2 transition-all duration-150 focus-ring max-[599px]:h-9 max-[599px]:w-9 max-[599px]:rounded-lg max-[599px]:p-1.5 ${
         active 
           ? 'bg-panvas-accent-blue/10 text-panvas-accent-blue font-bold shadow-sm ring-1 ring-panvas-accent-blue/50'
           : 'text-panvas-text-secondary hover:bg-panvas-bg-hover hover:text-panvas-text-primary active:scale-95'
@@ -2112,12 +2113,12 @@ function ToolButton({ icon, active, onClick, tooltip, hasPopup }: { icon: React.
 }
 
 function Divider() {
-  return <div className="w-[1px] h-5 bg-panvas-border-subtle mx-1 flex-shrink-0 max-[599px]:h-4 max-[599px]:mx-0.5" />;
+  return <div className="panvas-toolbar-divider w-[1px] h-5 bg-panvas-border-subtle mx-1 flex-shrink-0 max-[599px]:h-4 max-[599px]:mx-0.5" />;
 }
 
 function NibPreview({ family, color, thickness = 3, pattern = 'solid', opacity = 1, pressure = true }: { family?: InkFamily; color: string; thickness?: number; pattern?: StrokePattern; opacity?: number; pressure?: boolean }) {
   const points = Array.from({ length: 65 }, (_, i) => ({ x: 5 + i * 190 / 64, y: 20 - 10 * Math.sin(i / 64 * Math.PI * 3), pressure: pressure ? 0.2 + 0.65 * Math.sin(i / 64 * Math.PI) : 0.5, t: i }));
-  return <svg className="h-8 w-full" viewBox="0 0 200 40" aria-hidden="true">
+  return <svg className="panvas-colored-content h-8 w-full" viewBox="0 0 200 40" aria-hidden="true">
     {family ? <path d={inkPolygonsPath(buildInkFamilyGeometry({ id: 'preview', type: 'stroke', createdAt: 0, tool: 'pen', points, color, thickness, opacity, inkFamily: family, pattern }))} fill={color} opacity={opacity} /> : <path d="M5 20Q35 0 65 20T130 20T195 20" fill="none" stroke={color} strokeWidth={thickness} strokeLinecap="round" />}
   </svg>;
 }

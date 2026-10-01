@@ -30,6 +30,20 @@ const page: NotebookPage = {
   createdAt: 1, updatedAt: 1, order: 0, userId: null,
 };
 
+for (const template of ['Double margin ruled', 'Large ruled with margin'] as const) {
+  test(`${template} uses the same canonical style for current-page saves and notebook defaults`, async () => {
+    const ipc = await readFile(new URL('../electron/ipc/domain-handlers.ts', import.meta.url), 'utf8');
+    const accepted = new Set([...ipc.match(/const PAGE_TEMPLATES = new Set\(\[([\s\S]*?)\]\)/)![1].matchAll(/'([^']+)'/g)].map(match => match[1]));
+    assert.ok(accepted.has(template), `${template} must pass Electron page-property validation`);
+    const properties: PagePropertySet = { ...DEFAULT_PAGE_PROPERTY_SET, template, paperColor: '#E8F5E9', ruleLineColor: '#64748b', margins: 'No Margin', orientation: 'landscape', pageSize: 'A5' };
+    const overrides = JSON.parse(JSON.stringify(derivePagePropertyOverrides(properties, notebook)));
+    assert.deepEqual(resolvePageProperties(notebook, { ...page, pagePropertyOverrides: overrides }), properties);
+    assert.deepEqual(resolvePageProperties({ ...notebook, defaultPageProperties: JSON.parse(JSON.stringify(properties)) }, { ...page, pagePropertyOverrides: {} }), properties);
+    assert.match(ipc, /channel === 'notebook:applyPageDefaults'\) requirePagePropertyPatch/);
+    assert.match(ipc, /key === 'defaultPageProperties' \|\| key === 'pagePropertyOverrides'\) requirePagePropertyPatch/);
+  });
+}
+
 test('legacy pages retain persisted drawing properties until metadata inheritance is established', () => {
   const resolved = resolvePageProperties(notebook, page, {
     ...DEFAULT_PAGE_PROPERTY_SET,

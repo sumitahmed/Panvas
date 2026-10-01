@@ -8,6 +8,8 @@ import type { PdfPageState } from '@/types/notebook';
 import { normalizePdfPageState } from './pdfPageOperations.ts';
 import { pdfSurroundingGeometry } from '../../components/notebook/engine/pdfCoordinates.ts';
 import { resolvePageNoteSpace } from '../../lib/pageProperties.ts';
+import { currentPresentationTheme, presentationData, presentationImage } from '../../lib/themePresentation.ts';
+import type { PanvasTheme } from '../../lib/theme.ts';
 
 export interface PdfAnnotationRenderResult {
   bytes: Uint8Array;
@@ -24,6 +26,7 @@ export async function renderPdfAnnotations(
   drawingsByPage: ReadonlyArray<DrawingData | null>,
   pageState?: PdfPageState,
   loadImage?: (fileId: string) => Promise<NotebookExportImage | undefined>,
+  theme: PanvasTheme = currentPresentationTheme(),
 ): Promise<PdfAnnotationRenderResult> {
   const document = await PDFDocument.load(originalBytes, { ignoreEncryption: false });
   const normalizedState = normalizePdfPageState(pageState, document.getPageCount());
@@ -40,7 +43,7 @@ export async function renderPdfAnnotations(
 
   for (let pageIndex = 0; pageIndex < document.getPageCount(); pageIndex += 1) {
     const sourcePageNumber = normalizedState.pageOrder[pageIndex];
-    const drawing = drawingsByPage[sourcePageNumber - 1];
+    const drawing = presentationData(drawingsByPage[sourcePageNumber - 1], theme);
     const objects = drawing ? visibleObjects(drawing) : [];
     const pdfPage = document.getPage(pageIndex);
     // Enlarge only the exported sheet. Translate existing PDF streams upward
@@ -89,7 +92,8 @@ export async function renderPdfAnnotations(
         try {
           let image = imageCache.get(object.fileId);
           if (!image) {
-            const asset = await loadImage?.(object.fileId); if (!asset) throw new Error('asset unavailable');
+            const originalAsset = await loadImage?.(object.fileId); if (!originalAsset) throw new Error('asset unavailable');
+            const asset = await presentationImage(originalAsset, theme);
             image = /png/i.test(asset.mimeType) ? await document.embedPng(asset.data) : /jpe?g/i.test(asset.mimeType) ? await document.embedJpg(asset.data) : undefined;
             if (!image) throw new Error('unsupported image format'); imageCache.set(object.fileId, image);
           }

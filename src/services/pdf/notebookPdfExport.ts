@@ -18,6 +18,9 @@ import { DEFAULT_PAGE_LAYER_ID, createDefaultPageLayer } from '../../components/
 import type { NotebookCover, NotebookPage, NotebookSection } from '../../types/notebook.ts';
 import { resolveNotebookCover } from '../../lib/notebookCover.ts';
 import { resolvePageNoteSpace } from '../../lib/pageProperties.ts';
+import { currentPresentationTheme, presentationColor, presentationData, presentationImage } from '../../lib/themePresentation.ts';
+import type { PanvasTheme } from '../../lib/theme.ts';
+import { marginRuling, MARGIN_RULE_ACCENT } from '../../components/notebook/templates/marginRuling.ts';
 
 export interface NotebookExportImage {
   mimeType: string;
@@ -73,6 +76,8 @@ export interface NotebookPdfExportResult {
 }
 
 export interface NotebookPdfExportInput {
+  /** Current visual presentation; application chrome is not part of the sheet. */
+  theme?: PanvasTheme;
   pages?: NotebookPdfPageInput[];
   sections?: NotebookPdfSectionInput[];
   /** Present only for whole-notebook export. Page and section exports omit it. */
@@ -315,7 +320,7 @@ function addWarning(result: NotebookPdfExportResult, warning: NotebookPdfWarning
   result.warnings.push(warning);
 }
 
-function drawTemplate(page: PDFPage, properties: PageProperties, g: NotebookPageGeometry, result: NotebookPdfExportResult, pageId: string) {
+function drawTemplate(page: PDFPage, properties: PageProperties, g: NotebookPageGeometry, result: NotebookPdfExportResult, pageId: string, theme: PanvasTheme) {
   const ink = color(properties.ruleLineColor, '#e0e0e0');
   const line = (x1: number, y1: number, x2: number, y2: number, thickness = 0.7) => {
     const a = point(g, x1, y1); const b = point(g, x2, y2);
@@ -329,6 +334,20 @@ function drawTemplate(page: PDFPage, properties: PageProperties, g: NotebookPage
     case 'Ruled': ruled(60, 28); break;
     case 'Narrow ruled': ruled(50, 20); break;
     case 'Wide ruled': ruled(64, 36); break;
+    case 'Large ruled with margin':
+    case 'Double margin ruled': {
+      const ruling = marginRuling(g.logicalWidth, g.logicalHeight, properties.template);
+      const marginLine = (x1: number, y1: number, x2: number, y2: number, paint = ink) => page.drawLine({
+        start: point(g, x1, y1), end: point(g, x2, y2), thickness: g.scaleX, color: paint, opacity: 0.85,
+      });
+      ruling.horizontal.forEach(y => marginLine(0, y, g.logicalWidth, y));
+      ruling.margins.forEach((x, index) => {
+        const paint = properties.template === 'Double margin ruled' && index === 0
+          ? color(presentationColor(MARGIN_RULE_ACCENT, theme)) : ink;
+        marginLine(x, ruling.top, x, ruling.bottom, paint);
+      });
+      break;
+    }
     case 'Small grid':
     case 'Large grid':
     case 'Engineering': {
@@ -463,6 +482,7 @@ export function drawTextObject(page: PDFPage, object: TextObject, g: NotebookPag
 }
 
 export async function exportNotebookPdf(input: NotebookPdfExportInput): Promise<NotebookPdfExportResult> {
+  const theme = input.theme ?? currentPresentationTheme();
   const result: NotebookPdfExportResult = { success: false, bytes: null, pageCount: 0, exportedObjects: 0, approximatedObjects: 0, unsupportedObjects: 0, warnings: [], sectionDividers: [], notebookCover: null };
   try {
     const sections = (input.sections ?? []).filter(section => section.pages.length > 0);
@@ -481,13 +501,15 @@ export async function exportNotebookPdf(input: NotebookPdfExportInput): Promise<
       section.pages.forEach((source, index) => entries.push({ source, section: index === 0 ? section : undefined }));
     }
     standalonePages.forEach(source => entries.push({ source }));
-    for (const { source, section } of entries) {
+    for (const entry of entries) {
+      const source = presentationData(entry.source, theme);
+      const section = entry.section;
       if (section) drawSectionDivider(pdf, section, source.properties, fonts, result);
       const g = resolveNotebookPageGeometry(source.properties);
       if (!g) throw new Error(`Page “${source.title}” uses Custom size, but the current page schema stores no custom dimensions.`);
       const page = pdf.addPage([g.pdfWidth, g.pdfHeight]);
       page.drawRectangle({ x: 0, y: 0, width: g.pdfWidth, height: g.pdfHeight, color: color(source.properties.paperColor, '#ffffff') });
-      drawTemplate(page, source.properties, g, result, source.id);
+      drawTemplate(page, source.properties, g, result, source.id, theme);
       const hasNoteSpace = g.sourceX > 0 || g.sourceY > 0 || g.sourceWidth < g.logicalWidth || g.sourceHeight < g.logicalHeight;
       if (hasNoteSpace) page.drawRectangle({ x: g.sourceX * g.scaleX, y: g.pdfHeight - (g.sourceY + g.sourceHeight) * g.scaleY, width: g.sourceWidth * g.scaleX, height: g.sourceHeight * g.scaleY, borderColor: color(source.properties.ruleLineColor, '#c8c3b8'), borderWidth: 0.35, opacity: 0.45 });
       page.pushOperators(pushGraphicsState(), concatTransformationMatrix(1, 0, 0, 1, g.sourceX * g.scaleX, -g.sourceY * g.scaleY));
@@ -497,10 +519,11 @@ export async function exportNotebookPdf(input: NotebookPdfExportInput): Promise<
         else if (object.type === 'text') drawTextObject(page, object, g, fonts, result, source.id);
         else if (object.type === 'image') {
           try {
-            const asset = await input.loadImage?.(object.fileId);
-            if (!asset) throw new Error('asset missing');
             let embedded = imageCache.get(object.fileId);
             if (!embedded) {
+              const originalAsset = await input.loadImage?.(object.fileId);
+              if (!originalAsset) throw new Error('asset missing');
+              const asset = await presentationImage(originalAsset, theme);
               const bytes = asset.data instanceof Uint8Array ? asset.data : new Uint8Array(asset.data);
               if (/png/i.test(asset.mimeType)) embedded = await pdf.embedPng(bytes);
               else if (/jpe?g/i.test(asset.mimeType)) embedded = await pdf.embedJpg(bytes);

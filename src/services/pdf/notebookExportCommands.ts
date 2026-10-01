@@ -4,6 +4,7 @@ import { useUIStore } from '@/stores/uiStore';
 import { useAuthStore } from '@/stores/authStore';
 import { workspaceRepository } from '@/repositories/WorkspaceRepository';
 import { resolvePageProperties } from '@/lib/pageProperties';
+import { currentPresentationTheme } from '@/lib/themePresentation';
 import { createEmptyDrawingData, type DrawingData } from '@/components/notebook/engine/drawingTypes';
 import { exportNotebookPdf, orderNotebookPages, type NotebookPdfExportResult, type NotebookPdfPageInput, type NotebookPdfSectionInput } from './notebookPdfExport';
 import { deliverPreparedPdf, downloadPdfResult, preparePdfPrintDelivery } from './pdfDelivery';
@@ -33,6 +34,7 @@ async function loadCanonicalExportCatalog(): Promise<NotebookExportCatalog> {
 }
 
 async function generatePage(target: PageExportTarget, options: NotebookPdfCommandOptions = {}) {
+  const theme = currentPresentationTheme();
   const catalog = await loadCanonicalExportCatalog();
   const { page, notebook, workspaceId } = resolvePageExportTarget(catalog, target);
   if (page.type === 'pdf') throw new Error('Imported PDF pages use the annotated PDF export action.');
@@ -41,6 +43,7 @@ async function generatePage(target: PageExportTarget, options: NotebookPdfComman
     ?? createEmptyDrawingData();
   const properties = resolvePageProperties(notebook, page, drawing.properties);
   const result = await exportNotebookPdf({
+    theme,
     pages: [{ id: page.id, title: page.title, properties, drawing: { ...drawing, properties } }],
     loadImage: fileId => canvasRepository.getImage(fileId),
   });
@@ -48,6 +51,7 @@ async function generatePage(target: PageExportTarget, options: NotebookPdfComman
 }
 
 async function generateNotebook(target: NotebookExportTarget, options: NotebookPdfCommandOptions = {}) {
+  const theme = currentPresentationTheme();
   const catalog = await loadCanonicalExportCatalog();
   const { notebook, workspaceId } = resolveNotebookExportTarget(catalog, target);
   const sections = catalog.notebookSections.filter(section => section.notebookId === notebook.id);
@@ -74,6 +78,7 @@ async function generateNotebook(target: NotebookExportTarget, options: NotebookP
       pages: inputsBySection.get(section.id) ?? [],
     }));
   const result = await exportNotebookPdf({
+    theme,
     sections: sectionInputs,
     cover: { notebookName: notebook.name, cover: notebook.cover },
     loadImage: fileId => canvasRepository.getImage(fileId),
@@ -89,6 +94,7 @@ async function generateNotebook(target: NotebookExportTarget, options: NotebookP
 }
 
 async function generateSection(target: SectionExportTarget, options: NotebookPdfCommandOptions = {}) {
+  const theme = currentPresentationTheme();
   const catalog = await loadCanonicalExportCatalog();
   const { section, notebook, workspaceId } = resolveSectionExportTarget(catalog, target);
   const ordered = orderNotebookPages(
@@ -105,6 +111,7 @@ async function generateSection(target: SectionExportTarget, options: NotebookPdf
     pages.push({ id: page.id, title: page.title, properties, drawing: { ...drawing, properties } });
   }
   const result = await exportNotebookPdf({
+    theme,
     sections: [{ id: section.id, name: section.name, notebookName: notebook.name, pages }],
     loadImage: fileId => canvasRepository.getImage(fileId),
   });

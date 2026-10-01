@@ -31,7 +31,8 @@ const MAX_BACKUP_BYTES = 100 * 1024 * 1024;
 // bound; binaries get their own, larger limit.
 const MAX_BINARY_BYTES = 200 * 1024 * 1024;
 const PAGE_TEMPLATES = new Set([
-  'Blank', 'Ruled', 'Narrow ruled', 'Wide ruled', 'Small grid', 'Large grid', 'Dotted', 'Engineering',
+  'Blank', 'Ruled', 'Narrow ruled', 'Wide ruled', 'Large ruled with margin', 'Double margin ruled',
+  'Small grid', 'Large grid', 'Dotted', 'Engineering',
   'Cornell', 'Lecture Notes', 'Assignment', 'Checklist', 'To-do', 'Daily planner', 'Weekly planner',
   'Monthly planner', 'Journal', 'Music', 'Calendar',
 ]);

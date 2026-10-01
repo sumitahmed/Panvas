@@ -56,6 +56,6 @@ export function TemplatePreview({ template, properties, backgroundColor }: { tem
   const definition = TEMPLATE_REGISTRY[template] || TEMPLATE_REGISTRY.Blank;
   const previewBackground = backgroundColor || (properties.paperColor && properties.paperColor !== 'default' ? properties.paperColor : undefined);
   return <svg aria-hidden="true" data-template-preview={template} className="block h-full w-full" viewBox={`0 0 ${size.width} ${size.height}`} preserveAspectRatio="xMidYMid meet" style={{ backgroundColor: previewBackground, shapeRendering: 'geometricPrecision' }}>
-    {boostPreviewNode(definition.renderSVG(size.width, size.height, persistedLineColor, false, templateResourceScope))}
+    <g className="panvas-colored-content">{boostPreviewNode(definition.renderSVG(size.width, size.height, persistedLineColor, false, templateResourceScope))}</g>
   </svg>;
 }

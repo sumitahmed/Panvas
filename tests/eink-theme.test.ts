@@ -90,13 +90,27 @@ test('bootstrap and UI store apply the canonical theme before the app renders', 
   assert.ok(bootstrap.indexOf('applyThemeClasses(theme)') < bootstrap.indexOf('ReactDOM.createRoot'));
 });
 
-test('the restored Ink token block and block chrome have no E-Ink redesign', async () => {
+test('Ink has distinct warm-gray tablet surfaces and a presentation-only content filter', async () => {
   const css = await read('../src/styles/index.css');
   assert.match(css, /^  \.theme-ink \{/m);
-  assert.match(css, /--bg-primary: 247 244 235/);
+  assert.match(css, /--bg-primary: 216 213 200/);
+  assert.match(css, /--content-filter: saturate\(0\.5\)/);
+  const ink = css.match(/\.theme-ink\s*\{([^}]+)\}/)![1];
+  for (const token of ['bg-primary', 'bg-secondary', 'bg-tertiary', 'bg-elevated', 'bg-hover', 'bg-active', 'border-subtle', 'border-default', 'border-strong', 'text-primary', 'text-secondary', 'text-tertiary']) {
+    const channels = ink.match(new RegExp(`--${token}: (\\d+) (\\d+) (\\d+);`))!.slice(1).map(Number);
+    assert.ok(channels[0] > channels[1] && channels[1] > channels[2], `${token} has a warm yellow-neutral undertone`);
+  }
+  assert.doesNotMatch(css, /(?:sepia|hue-rotate)\(/);
   assert.doesNotMatch(css, /theme-eink/);
   const blocks = await read('../src/styles/blocks.css');
   assert.doesNotMatch(blocks, /theme-eink/);
+});
+
+test('imported PDF previews retain source colors while authored annotation layers use theme presentation', async () => {
+  const preview = await read('../src/components/notebook/NotebookPageView.tsx');
+  assert.match(preview, /filter: page\.type === 'pdf' \? 'none' : undefined/);
+  const workspace = await read('../src/components/pdf/PdfWorkspace.tsx');
+  assert.match(workspace, /className=.*panvas-colored-content panvas-layer-canvas-decoration/);
 });
 
 test('electron title-bar overlay accepts only the three public themes', async () => {

@@ -72,7 +72,7 @@ function TemplateFieldInput({ field, template, scale, value, color, editable, on
       onPointerDown={event => event.stopPropagation()}
       onClick={event => event.stopPropagation()}
       onChange={event => { setDraft(event.target.value); onChange(event.target.value); }}
-      className="absolute z-30 border-0 border-b border-current bg-transparent px-0 outline-none placeholder:opacity-60 focus:border-panvas-accent-blue"
+      className="panvas-colored-content absolute z-30 border-0 border-b border-current bg-transparent px-0 outline-none placeholder:opacity-60 focus:border-panvas-accent-blue"
       style={{ left: field.x * scale, top: field.y * scale, width: field.width * scale, height: 22 * scale, fontSize: (field.fontSize ?? 10) * scale, fontWeight: field.weight ?? 600, color }}
     />
   );
@@ -123,7 +123,7 @@ export const PageRenderer: React.FC<PageRendererProps> = ({ id, width, height, p
     >
       {/* Background Template SVG Layer */}
       <svg 
-        className="absolute inset-0 pointer-events-none select-none"
+        className="panvas-colored-content absolute inset-0 pointer-events-none select-none"
         width="100%"
         height="100%"
         viewBox={`0 0 ${geometry.width} ${geometry.height}`}

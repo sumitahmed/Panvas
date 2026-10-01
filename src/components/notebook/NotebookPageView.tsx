@@ -395,7 +395,8 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
           <StaticTextPreview key={obj.id} object={obj} scale={1} zIndex={textZIndex(obj.layerId)} offset={{ x: pageGeometry.source.left, y: pageGeometry.source.top }} />
         ))}
 
-        <canvas ref={canvasRef} data-committed-page-id={page.id} className="absolute inset-0 z-10 w-full h-full pointer-events-none" />
+        <canvas ref={canvasRef} data-committed-page-id={page.id} className="absolute inset-0 z-10 w-full h-full pointer-events-none"
+          style={{ filter: page.type === 'pdf' ? 'none' : undefined }} />
         </div>
         {!data && <div role="status" className="absolute inset-0 flex items-center justify-center text-xs opacity-60">Loading page?</div>}
 

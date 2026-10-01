@@ -391,7 +391,7 @@ export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelPr
                       className="flex h-7 items-center gap-1.5 rounded-md border border-panvas-border-default bg-panvas-bg-secondary px-1.5 text-panvas-text-secondary transition-colors hover:bg-panvas-bg-hover hover:text-panvas-text-primary focus-ring"
                       title="Choose line color"
                     >
-                      <span className="h-4 w-4 rounded-full border border-panvas-border-strong shadow-sm" style={{ backgroundColor: selectedLineColor }} />
+                      <span className="panvas-ink-palette h-4 w-4 rounded-full border border-panvas-border-strong shadow-sm" style={{ backgroundColor: selectedLineColor }} />
                       <ChevronDown size={12} className={`transition-transform ${isLineColorOpen ? 'rotate-180' : ''}`} aria-hidden="true" />
                     </button>
                   </div>
@@ -401,7 +401,7 @@ export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelPr
                     <span className="text-[11px] font-medium text-panvas-text-primary">Line color</span>
                     <span className="text-[10px] text-panvas-text-tertiary">Applies instantly</span>
                   </div>
-                  <div className="grid grid-cols-4 gap-2" role="radiogroup" aria-label="Preset line colors">
+                  <div className="panvas-ink-palette grid grid-cols-4 gap-2" role="radiogroup" aria-label="Preset line colors">
                     {lineColorSwatches.map(swatch => <button
                       key={swatch.color}
                       type="button"
@@ -422,7 +422,7 @@ export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelPr
                       aria-label="Custom line color"
                       value={selectedLineColor}
                       onChange={event => handleUpdate({ ruleLineColor: event.target.value })}
-                      className="h-6 w-8 cursor-pointer rounded border-0 bg-transparent p-0"
+                      className="panvas-ink-palette h-6 w-8 cursor-pointer rounded border-0 bg-transparent p-0"
                     />
                   </label>
                 </div>}
