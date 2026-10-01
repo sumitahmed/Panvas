@@ -233,6 +233,25 @@ export class LocalSyncPayloadSource implements SyncPayloadSource {
     return entities;
   }
 
+  async scanWorkspaceSnapshot(workspaceId: string): Promise<{ owned: ScannedSyncEntity[]; all: ScannedSyncEntity[] }> {
+    this.checkCacheOwner();
+    if (typeof window !== 'undefined' && window.panvas) {
+      const owned = await this.scanWorkspace(workspaceId);
+      return { owned, all: owned };
+    }
+    const owner = this.cacheUserId;
+    const snapshot = await (this.browserSnapshot ?? this.snapshotReader());
+    const all = await this.scanBrowserWorkspace(workspaceId, true, snapshot);
+    // The narrower graph still applies its original ownership/ancestry filters.
+    // Only exact payload bytes from this same snapshot are shared.
+    const owned = await this.scanBrowserWorkspace(workspaceId, false, snapshot, new Map(all.map(entity => [`${entity.entityType}:${entity.entityId}`, entity])));
+    this.checkCacheOwner();
+    if (owner !== this.cacheUserId) return { owned: [], all: [] };
+    for (const [key, entity] of this.scanned) if (entity.workspaceId === workspaceId) this.scanned.delete(key);
+    for (const entity of all) this.scanned.set(`${entity.entityType}:${entity.entityId}`, entity);
+    return { owned, all };
+  }
+
   async getRecoveryWorkspaceRoot(workspaceId: string): Promise<ScannedSyncEntity | null> {
     this.checkCacheOwner();
     if (typeof window === 'undefined' || !window.panvas?.workspace.getRecoveryWorkspaceRoot) return null;
@@ -355,8 +374,8 @@ export class LocalSyncPayloadSource implements SyncPayloadSource {
     return result;
   }
 
-  private async scanBrowserWorkspace(workspaceId: string, includeUnowned: boolean): Promise<ScannedSyncEntity[]> {
-    const snapshot = await (this.browserSnapshot ?? this.snapshotReader());
+  private async scanBrowserWorkspace(workspaceId: string, includeUnowned: boolean, captured?: BrowserSyncSnapshot, reusable?: ReadonlyMap<string, ScannedSyncEntity>): Promise<ScannedSyncEntity[]> {
+    const snapshot = captured ?? await (this.browserSnapshot ?? this.snapshotReader());
     const eligible = <T extends { userId?: string | null }>(items: T[]): T[] => items.filter(item => belongsToCurrentBrowserUser(item) || includeUnowned);
     const owned = eligible;
     const workspaces = owned(snapshot.workspaces);
@@ -371,7 +390,10 @@ export class LocalSyncPayloadSource implements SyncPayloadSource {
     const blocks = owned(snapshot.blocks);
     const pdfs = owned(snapshot.pdfs);
     const media = owned(snapshot.media);
-    const makeEntity = (entityType: SyncEntityKind, entityId: string, rowWorkspaceId: string, parentId: string | null, value: unknown, deletedAt?: number | null) => this.entity(entityType, entityId, rowWorkspaceId, parentId, value, deletedAt, includeUnowned);
+    const makeEntity = (entityType: SyncEntityKind, entityId: string, rowWorkspaceId: string, parentId: string | null, value: unknown, deletedAt?: number | null) => {
+      const existing = reusable?.get(`${entityType}:${entityId}`);
+      return existing ? { ...existing, ownership: 'current' as const } : this.entity(entityType, entityId, rowWorkspaceId, parentId, value, deletedAt, includeUnowned);
+    };
     const workspace = workspaces.find(item => item.id === workspaceId);
     if (!workspace) return [];
     const folders = allFolders.filter(item => item.workspaceId === workspaceId);
@@ -398,8 +420,8 @@ export class LocalSyncPayloadSource implements SyncPayloadSource {
     for (const item of scenes.filter(item => canvasIds.has(item.canvasFileId))) result.push(makeEntity('canvasScene', item.canvasFileId, workspaceId, item.canvasFileId, item));
     for (const item of blocks.filter(item => canvasIds.has(item.canvasFileId))) result.push(makeEntity('customBlock', item.id, workspaceId, item.canvasFileId, item));
     const ownerIds = new Set([...pageIds, ...canvasIds, ...drawingIds]);
-    for (const item of pdfs.filter(item => ownerIds.has(item.canvasFileId))) result.push({ entityType: 'asset', entityId: item.id, workspaceId, parentId: item.canvasFileId, bytes: encodeAssetEnvelope({ id: item.id, ownerId: item.canvasFileId, fileName: item.fileName, mimeType: 'application/pdf', assetKind: 'pdf', createdAt: item.createdAt, userId: null }, new Uint8Array(item.data)), tombstone: false, deletedAt: null, ownership: recoveryOwnership(normalizeUserId(item.userId), includeUnowned) });
-    for (const item of media.filter(item => ownerIds.has(item.canvasFileId))) result.push({ entityType: 'asset', entityId: item.id, workspaceId, parentId: item.canvasFileId, bytes: encodeAssetEnvelope({ id: item.id, ownerId: item.canvasFileId, fileName: item.fileName, mimeType: item.mimeType, assetKind: /^audio\//i.test(item.mimeType) ? 'audio' : 'image', createdAt: item.createdAt, userId: null }, new Uint8Array(item.data)), tombstone: false, deletedAt: null, ownership: recoveryOwnership(normalizeUserId(item.userId), includeUnowned) });
+    for (const item of pdfs.filter(item => ownerIds.has(item.canvasFileId))) result.push(reusable?.has(`asset:${item.id}`) ? { ...reusable.get(`asset:${item.id}`)!, ownership: 'current' } : { entityType: 'asset', entityId: item.id, workspaceId, parentId: item.canvasFileId, bytes: encodeAssetEnvelope({ id: item.id, ownerId: item.canvasFileId, fileName: item.fileName, mimeType: 'application/pdf', assetKind: 'pdf', createdAt: item.createdAt, userId: null }, new Uint8Array(item.data)), tombstone: false, deletedAt: null, ownership: recoveryOwnership(normalizeUserId(item.userId), includeUnowned) });
+    for (const item of media.filter(item => ownerIds.has(item.canvasFileId))) result.push(reusable?.has(`asset:${item.id}`) ? { ...reusable.get(`asset:${item.id}`)!, ownership: 'current' } : { entityType: 'asset', entityId: item.id, workspaceId, parentId: item.canvasFileId, bytes: encodeAssetEnvelope({ id: item.id, ownerId: item.canvasFileId, fileName: item.fileName, mimeType: item.mimeType, assetKind: /^audio\//i.test(item.mimeType) ? 'audio' : 'image', createdAt: item.createdAt, userId: null }, new Uint8Array(item.data)), tombstone: false, deletedAt: null, ownership: recoveryOwnership(normalizeUserId(item.userId), includeUnowned) });
     return result;
   }
 

@@ -14,13 +14,14 @@ export const syncV2LocalSource: SyncV2LocalSource = {
   canRepairMissingRemoteObjects: () => typeof window !== 'undefined' && Boolean(window.panvas),
   listWorkspaceIds: () => payloadSource.listWorkspaceIds(),
   scanWorkspace: workspaceId => payloadSource.scanWorkspace(workspaceId),
+  scanWorkspaceSnapshot: workspaceId => payloadSource.scanWorkspaceSnapshot(workspaceId),
   scanWorkspaceIncludingUnowned: workspaceId => payloadSource.scanWorkspaceIncludingUnowned!(workspaceId),
   scanFreshWorkspace: workspaceId => new LocalSyncPayloadSource().scanWorkspaceIncludingUnowned!(workspaceId),
   getRecoveryWorkspaceRoot: workspaceId => payloadSource.getRecoveryWorkspaceRoot(workspaceId),
 };
 
 export const syncV2LocalAdapter: SyncV2LocalAdapter = {
-  async applyWorkspace({ workspaceId, expected, downloads, allowStaleOwnershipRepair = false, assertCurrent = () => {} }) {
+  async applyWorkspace({ workspaceId, expected, expectedHashes, downloads, allowStaleOwnershipRepair = false, assertCurrent = () => {} }) {
     try {
       assertCurrent();
       // Validate outside the write transaction. Chromium can return an empty
@@ -31,7 +32,7 @@ export const syncV2LocalAdapter: SyncV2LocalAdapter = {
         const current = byKey.get(`${item.entityType}:${item.entityId}`);
         let unchanged = Boolean(current && current.tombstone === item.tombstone && item.tombstone);
         if (current && item.bytes && current.bytes && !item.tombstone && !current.tombstone) {
-          const [currentHash, expectedHash] = await Promise.all([sha256Bytes(current.bytes), sha256Bytes(item.bytes)]);
+          const [currentHash, expectedHash] = await Promise.all([sha256Bytes(current.bytes), expectedHashes?.get(`${item.entityType}:${item.entityId}`) ?? sha256Bytes(item.bytes)]);
           unchanged = currentHash === expectedHash;
           if (!unchanged && allowStaleOwnershipRepair
             && (current.ownership === 'unowned-recovery' || current.ownership === 'foreign-recovery')

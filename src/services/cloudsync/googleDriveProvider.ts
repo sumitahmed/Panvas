@@ -86,6 +86,7 @@ export class GoogleDriveSyncProvider implements CloudSyncProvider {
   private rootPromise: Promise<string> | null = null;
   private folderPromises = new Map<string, Promise<string>>();
   private creationIds = new Map<string, Promise<string>>();
+  private objectUploads = new Map<string, Promise<ObjectPutResult>>();
 
   constructor(options: GoogleDriveProviderOptions = {}) {
     this.tokenProvider = options.tokenProvider ?? (async () => {
@@ -303,15 +304,36 @@ export class GoogleDriveSyncProvider implements CloudSyncProvider {
   }
 
   async putObjectIfAbsent(workspaceId: string, upload: ObjectUpload): Promise<ObjectPutResult> {
+    this.assertCurrent();
+    let pending = this.objectUploads.get(upload.hash);
+    if (!pending) {
+      pending = this.putObject(workspaceId, upload).finally(() => {
+        if (this.objectUploads.get(upload.hash) === pending) this.objectUploads.delete(upload.hash);
+      });
+      this.objectUploads.set(upload.hash, pending);
+    }
+    return pending;
+  }
+
+  private async putObject(workspaceId: string, upload: ObjectUpload): Promise<ObjectPutResult> {
     const electronDrive = this.electronDrive();
     if (electronDrive) return this.unwrapElectronDrive(electronDrive.putObjectIfAbsent(workspaceId, upload));
     await this.ensureAppRoot();
-    // Upload callers use the shared object index as their idempotency check.
-    // Manifest validation re-checks stale entries before a repair reaches this
-    // path, so avoid an extra Drive search for every object upload.
-    await this.ensureObjectIndex();
-    const existing = this.objectFiles.get(upload.hash);
-    if (existing) { this.objectFiles.set(upload.hash, existing); return 'present'; }
+    // V2 retains positive file IDs, never a durable absence proof. Another
+    // device may have uploaded this hash since our last index/search.
+    if (this.remoteNamespace === 'sync-v2') {
+      let existing = await this.resolveObjectFile(upload.hash);
+      if (existing && Number(existing.size) !== upload.bytes.byteLength) {
+        const matching = await this.findFile(upload.hash, this.objectsFolderId!, true, upload.bytes.byteLength);
+        if (matching) { existing = matching; this.objectFiles.set(upload.hash, matching); }
+      }
+      if (existing && Number(existing.size) === upload.bytes.byteLength) return 'present';
+      if (existing) throw new CloudOperationError('sync', { stage: 'object-upload', reason: 'existing-object-size-mismatch', operation: 'verify-object', retryable: false });
+    } else {
+      await this.ensureObjectIndex();
+      const existing = this.objectFiles.get(upload.hash);
+      if (existing) return 'present';
+    }
     if (upload.bytes.byteLength >= LARGE_OBJECT_BYTES) await this.uploadLargeObject(workspaceId, upload);
     else {
       const token = await this.getValidToken();
@@ -432,18 +454,19 @@ export class GoogleDriveSyncProvider implements CloudSyncProvider {
   }
 
   private async resolveObjectFile(hash: string, validateCached = true): Promise<DriveFile | null> {
-    await this.ensureObjectIndex();
+    // Incremental V2 sync needs exact hashes, not every historical Drive object.
+    if (this.remoteNamespace !== 'sync-v2') await this.ensureObjectIndex();
     const cached = this.objectFiles.get(hash);
     if (cached) {
       if (!validateCached) return cached;
       const current = await this.getFileMetadata(cached.id);
-      if (current) {
+      if (current && (this.remoteNamespace !== 'sync-v2' || (current.name === hash && Number(current.size) > 0))) {
         this.objectFiles.set(hash, current);
         return current;
       }
       this.objectFiles.delete(hash);
     }
-    const file = await this.findFile(hash, this.objectsFolderId!);
+    const file = await this.findFile(hash, this.objectsFolderId!, true);
     if (file) this.objectFiles.set(hash, file);
     return file;
   }
@@ -492,7 +515,7 @@ export class GoogleDriveSyncProvider implements CloudSyncProvider {
     const query = `name = '${escapeQuery(name)}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false and ${parent}`;
     const search = await this.request(`Folder search for "${name}"`, `${this.apiBaseUrl}/files?q=${encodeURIComponent(query)}&spaces=${this.storageSpace}&fields=files(id,name)`, { headers: { Authorization: `Bearer ${token}` } });
     if (!search.ok) await this.handleHttpError(search, `Folder search for "${name}"`);
-    const found = (await search.json()).files?.[0]; if (found) return found.id;
+    const found = ((await search.json()).files ?? []).sort((a: DriveFile, b: DriveFile) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)[0]; if (found) return found.id;
     const id = await this.creationId(name, parentFolderId);
     const metadata: Record<string, unknown> = { id, name, mimeType: 'application/vnd.google-apps.folder' };
     if (parentFolderId !== 'root') metadata.parents = [parentFolderId];
@@ -511,10 +534,24 @@ export class GoogleDriveSyncProvider implements CloudSyncProvider {
       return file;
   }
 
-  private async findFile(name: string, parentFolderId: string): Promise<DriveFile | null> {
+  private async findFile(name: string, parentFolderId: string, object = false, expectedSize?: number): Promise<DriveFile | null> {
     const token = await this.getValidToken(); const query = `name = '${escapeQuery(name)}' and trashed = false and '${escapeQuery(parentFolderId)}' in parents`;
-    const response = await this.request(`File search for "${name}"`, `${this.apiBaseUrl}/files?q=${encodeURIComponent(query)}&spaces=${this.storageSpace}&fields=files(id,name,size,md5Checksum,version,modifiedTime,mimeType)`, { headers: { Authorization: `Bearer ${token}` } });
-    if (!response.ok) await this.handleHttpError(response, `File search for "${name}"`); return (await response.json()).files?.[0] ?? null;
+    const files: DriveFile[] = [];
+    let pageToken: string | undefined;
+    do {
+      const params = new URLSearchParams({ q: query, spaces: this.storageSpace, pageSize: '1000', fields: 'nextPageToken,files(id,name,size,md5Checksum,version,modifiedTime,mimeType)' });
+      if (pageToken) params.set('pageToken', pageToken);
+      const response = await this.request(`File search for "${name}"`, `${this.apiBaseUrl}/files?${params}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!response.ok) await this.handleHttpError(response, `File search for "${name}"`);
+      const page = await response.json() as { files?: DriveFile[]; nextPageToken?: string };
+      files.push(...(page.files ?? [])); pageToken = page.nextPageToken;
+    } while (pageToken);
+    // Equal hash/name is immutable content. Keep every competing copy, but
+    // choose a complete candidate deterministically rather than Map last-wins.
+    return files.filter(file => expectedSize === undefined || Number(file.size) === expectedSize).sort((a, b) => {
+      if (object && (Number(a.size) > 0) !== (Number(b.size) > 0)) return Number(a.size) > 0 ? -1 : 1;
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    })[0] ?? null;
   }
 
   private async createFileMultipart(input: { name: string; parentFolderId: string; mimeType: string; content: Uint8Array; token: string }): Promise<DriveFile> {
@@ -583,6 +620,7 @@ export class GoogleDriveSyncProvider implements CloudSyncProvider {
     this.workspaceFolders.clear();
     this.folderPromises.clear();
     this.creationIds.clear();
+    this.objectUploads.clear();
     this.manifestFiles.clear();
     this.missingManifests.clear();
     this.objectFiles.clear();

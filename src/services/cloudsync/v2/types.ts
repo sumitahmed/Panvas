@@ -148,6 +148,8 @@ export interface SyncV2LocalSource {
   canRepairMissingRemoteObjects?(): boolean;
   listWorkspaceIds(): Promise<string[]>;
   scanWorkspace(workspaceId: string): Promise<ScannedSyncEntity[]>;
+  /** Both ownership projections from one captured local snapshot. */
+  scanWorkspaceSnapshot?(workspaceId: string): Promise<{ owned: ScannedSyncEntity[]; all: ScannedSyncEntity[] }>;
   scanWorkspaceIncludingUnowned?(workspaceId: string): Promise<ScannedSyncEntity[]>;
   /** Bypasses the cycle snapshot for edit detection and post-apply baselines. */
   scanFreshWorkspace?(workspaceId: string): Promise<ScannedSyncEntity[]>;
@@ -161,5 +163,5 @@ export interface SyncV2LocalSource {
 
 export interface SyncV2LocalAdapter {
   applyRecord(input: { workspaceId: string; record: SyncV2Record; bytes: Uint8Array | null; allowStaleOwnershipRepair?: boolean }): Promise<void>;
-  applyWorkspace?(input: { workspaceId: string; expected: ScannedSyncEntity[]; downloads: Array<{ record: SyncV2Record; bytes: Uint8Array | null }>; allowStaleOwnershipRepair?: boolean; assertCurrent?: () => void }): Promise<void>;
+  applyWorkspace?(input: { workspaceId: string; expected: ScannedSyncEntity[]; expectedHashes?: ReadonlyMap<string, string | null>; downloads: Array<{ record: SyncV2Record; bytes: Uint8Array | null }>; allowStaleOwnershipRepair?: boolean; assertCurrent?: () => void }): Promise<void>;
 }

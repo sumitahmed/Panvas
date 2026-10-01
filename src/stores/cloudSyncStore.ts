@@ -79,6 +79,14 @@ let initialized = false;
 let autoSyncTimer: ReturnType<typeof setTimeout> | null = null;
 const v2SyncRunner = new SinglePendingRunner();
 const syncAuthority = new SyncRunAuthority();
+let v2ProviderSession: { connection: ProviderConnectionInfo; userId: string | null; provider: GoogleDriveSyncV2Provider } | null = null;
+function providerForAccount(connection: ProviderConnectionInfo, userId: string | null, assertCurrent: () => void): GoogleDriveSyncV2Provider {
+  if (!v2ProviderSession || v2ProviderSession.connection !== connection || v2ProviderSession.userId !== userId) {
+    v2ProviderSession?.provider.getDriveProvider().clearCaches();
+    v2ProviderSession = { connection, userId, provider: new GoogleDriveSyncV2Provider({ assertCurrent }) };
+  }
+  return v2ProviderSession.provider;
+}
 let v2BaselineStore: LocalStorageSyncV2BaselineStore | null = null;
 const pendingV2ConflictResolutions = new Map<string, SyncV2ConflictChoice>();
 let deviceResetInProgress = false;
@@ -109,6 +117,8 @@ let retryAttempts = 0;
 function isOnline(): boolean { return typeof navigator === 'undefined' || navigator.onLine !== false; }
 function clearRetry(): void { if (retryTimer) clearTimeout(retryTimer); retryTimer = null; }
 function invalidateSync(): void {
+  v2ProviderSession?.provider.getDriveProvider().clearCaches();
+  v2ProviderSession = null;
   syncAuthority.invalidate(); v2SyncRunner.cancelPending(); clearRetry(); retryAttempts = 0;
   if (autoSyncTimer) clearTimeout(autoSyncTimer);
   autoSyncTimer = null;
@@ -757,7 +767,7 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
       const isElectron = typeof window !== 'undefined' && Boolean(window.panvas);
       const v2 = await runCloudSyncV2({
         accountIdentifier: connection.accountIdentifier,
-        provider: new GoogleDriveSyncV2Provider({ assertCurrent }),
+        provider: providerForAccount(connection, userId, assertCurrent),
         source: syncV2LocalSource,
         adapter: syncV2LocalAdapter,
         baselines: getV2BaselineStore(),

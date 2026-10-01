@@ -8,6 +8,7 @@ import { logCloudDiagnostic, presentCloudError } from '@/services/cloudsync/erro
 import { CLOUD_SYNC_V2_ENABLED } from '@/config/features';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import type { SyncV2ConflictChoice } from '@/services/cloudsync/v2/types';
+import { formatLastSynced } from './cloudSyncTimestamp';
 
 /** Official Google Drive brand icon using canonical Google brand vectors and colors */
 export function GoogleDriveIcon({ size = 20, className = '' }: { size?: number; className?: string }) {
@@ -37,16 +38,6 @@ const STATUS_LABELS: Record<CloudSyncStatus, string> = {
   'rate-limited': 'Google Drive is busy — retry later',
   error: "Couldn't sync right now",
 };
-
-function formatLastSynced(timestamp: number | null): string {
-  if (!timestamp) return 'Never';
-  const elapsedSec = Math.floor((Date.now() - timestamp) / 1000);
-  if (elapsedSec < 30) return 'Just now';
-  if (elapsedSec < 60) return `${elapsedSec} seconds ago`;
-  const elapsedMin = Math.floor(elapsedSec / 60);
-  if (elapsedMin < 60) return `${elapsedMin} minute${elapsedMin > 1 ? 's' : ''} ago`;
-  return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
 
 export function CloudSyncPanel() {
   const {

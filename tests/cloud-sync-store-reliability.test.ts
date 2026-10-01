@@ -18,7 +18,9 @@ test('store settles success, serial reruns, failures, reconnect and stale comple
   Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true } });
   let runs = 0, active = 0, maximum = 0;
   let worker: () => Promise<any> = async () => ({ status: 'synced', uploaded: 1, downloaded: 0 });
-  (globalThis as any).__panvasSyncTest = async () => {
+  const runProviders: any[] = [];
+  (globalThis as any).__panvasSyncTest = async (input: any) => {
+    runProviders.push(input.provider);
     runs++; active++; maximum = Math.max(maximum, active);
     try { return await worker(); } finally { active--; }
   };
@@ -49,6 +51,7 @@ test('store settles success, serial reruns, failures, reconnect and stale comple
     release(); await Promise.all([first, second, third]);
     assert.equal(runs, 3, 'initial run plus one active and one coalesced rerun');
     assert.equal(maximum, 1);
+    assert.ok(runProviders.every(provider => provider === runProviders[0]), 'same account retains one provider across cycles and queued reruns');
 
     store.setState({ reviewItems: [{ conflictId: 'sync-conflict:ws-broken:folder:folder-old', workspaceId: 'ws-broken', entityKind: 'folder', entityId: 'folder-old' }] });
     worker = async () => ({ status: 'synced-review', downloaded: 0, conflicts: [], workspaceOutcomes: [
@@ -82,6 +85,8 @@ test('store settles success, serial reruns, failures, reconnect and stale comple
     assert.equal(await store.getState().requestConnect('googledrive'), true);
     await store.getState().triggerSync();
     assert.equal(store.getState().statusByProvider.googledrive, 'synced');
+    assert.notEqual(runProviders.at(-1), runProviders[0], 'disconnect/reconnect invalidates the previous provider');
+    const reconnectedProvider = runProviders.at(-1);
 
     // Regression for the recorded account-adoption loop: the destination is
     // empty, local V2 metadata still belongs to account A, and the legacy V1
@@ -112,6 +117,7 @@ test('store settles success, serial reruns, failures, reconnect and stale comple
     assert.equal(movedProfile.accountIdentifier, 'synthetic-account-b');
     assert.notEqual(movedProfile.profileId, 'profile-a', 'switching to an empty account namespace starts fresh profile metadata');
     assert.equal(store.getState().statusByProvider.googledrive, 'synced');
+    assert.notEqual(runProviders.at(-1), reconnectedProvider, 'account B cannot inherit account A provider caches');
     assert.equal(await store.getState().moveSyncToCurrentGoogleAccount(), true, 'repeating adoption for the selected account is idempotent');
     assert.deepEqual(JSON.parse(values.get('panvas.cloudWorkspaceBindings.v1')!).map((binding: any) => binding.providerAccountId), ['synthetic-account-b']);
   } finally {

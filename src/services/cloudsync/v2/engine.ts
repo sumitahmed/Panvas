@@ -11,6 +11,47 @@ import type { LegacyMigrationResult } from './legacyMigration.ts';
 const keyOf = (value: { kind?: SyncEntityKind; entityType?: SyncEntityKind; id?: string; entityId?: string }) => `${value.kind ?? value.entityType}:${value.id ?? value.entityId}`;
 const phase: Record<SyncEntityKind, number> = { workspace: 0, folder: 1, notebook: 2, notebookSection: 3, notebookPage: 4, canvasFile: 4, pageContent: 5, pageDrawing: 5, canvasScene: 5, customBlock: 6, asset: 7 };
 
+/** Positive proofs and fetched bytes expire at the end of this one run.
+ * A repair/upload invalidates the hash; failed/missing reads are never cached.
+ * Mutable profile/catalog/manifest reads and ETag guards are never cached here.
+ */
+function providerForCycle(provider: SyncV2Provider): SyncV2Provider & { releaseObjects(): void } {
+  const metadata = new Map<string, Promise<{ size: number } | null>>();
+  const objects = new Map<string, Promise<Uint8Array>>();
+  const validatedMetadata = (hash: string) => {
+    let pending = metadata.get(hash);
+    if (!pending) {
+      pending = provider.getObjectMetadata(hash).then(value => { if (!value) metadata.delete(hash); return value; }, error => { metadata.delete(hash); throw error; });
+      metadata.set(hash, pending);
+    }
+    return pending;
+  };
+  return {
+    releaseObjects: () => objects.clear(),
+    readProfile: () => provider.readProfile(), writeProfile: (value, etag) => provider.writeProfile(value, etag),
+    readCatalog: () => provider.readCatalog(), writeCatalog: (value, etag) => provider.writeCatalog(value, etag),
+    readManifest: id => provider.readManifest(id), writeManifest: (id, value, etag) => provider.writeManifest(id, value, etag),
+    getObjectMetadata: validatedMetadata,
+    getObject(hash) {
+      let pending = objects.get(hash);
+      if (!pending) {
+        pending = provider.getObject(hash).then(async bytes => {
+          const proof = await validatedMetadata(hash);
+          if (!proof || proof.size !== bytes.byteLength) throw v2Failure('object-download', 'object-size-mismatch', 'verify-download');
+          return bytes;
+        }).catch(error => { objects.delete(hash); throw error; });
+        objects.set(hash, pending);
+      }
+      return pending;
+    },
+    async putObjectIfAbsent(hash, bytes) {
+      metadata.delete(hash); objects.delete(hash);
+      try { return await provider.putObjectIfAbsent(hash, bytes); }
+      finally { metadata.delete(hash); objects.delete(hash); }
+    },
+  };
+}
+
 async function mapBounded<T>(items: readonly T[], worker: (item: T) => Promise<void>, concurrency = 8): Promise<void> {
   let next = 0;
   const settled = await Promise.allSettled(Array.from({ length: Math.min(concurrency, items.length) }, async () => {
@@ -207,6 +248,8 @@ export async function runCloudSyncV2(input: {
   environment?: 'desktop' | 'web';
   legacyMigrator?: () => Promise<LegacyMigrationResult>;
 }): Promise<SyncV2Result> {
+  const cycleProvider = providerForCycle(input.provider);
+  input = { ...input, provider: cycleProvider };
   const result: SyncV2Result = { status: 'error', uploaded: 0, downloaded: 0, preservedConflicts: 0, conflicts: [], workspaceOutcomes: [] };
   const workspaceOutcomeById = new Map<string, SyncV2WorkspaceOutcome>();
   const recordWorkspaceOutcome = (workspaceId: string, classification: SyncV2WorkspaceClassification, status: SyncV2WorkspaceOutcome['status'], diagnostic?: SafeCloudDiagnostic) => {
@@ -218,6 +261,7 @@ export async function runCloudSyncV2(input: {
   let currentWorkspaceId: string | undefined;
   let currentEntity: { kind: SyncEntityKind; id: string } | undefined;
   let currentStage = 'profile-read';
+  let cycleEnded = false;
   try {
     assertCurrent();
     input.source.beginCycle?.();
@@ -292,14 +336,22 @@ export async function runCloudSyncV2(input: {
       currentEntity = undefined;
       currentStage = 'workspace-read';
       input.onProgress?.(`Syncing workspace ${workspaceIndex + 1} of ${workspaceIds.length}…`);
-      const [manifestRead, initialScanned] = await Promise.all([input.provider.readManifest(workspaceId), copiedWorkspaces.has(workspaceId) ? Promise.resolve(copiedWorkspaces.get(workspaceId)!) : input.source.scanWorkspace(workspaceId)]);
+      const [manifestRead, snapshot] = await Promise.all([
+        input.provider.readManifest(workspaceId),
+        copiedWorkspaces.has(workspaceId)
+          ? Promise.resolve({ owned: copiedWorkspaces.get(workspaceId)!, all: copiedWorkspaces.get(workspaceId)! })
+          : input.source.scanWorkspaceSnapshot
+            ? input.source.scanWorkspaceSnapshot(workspaceId)
+            : input.source.scanWorkspace(workspaceId).then(owned => ({ owned, all: null })),
+      ]);
+      const initialScanned = snapshot.owned;
       // A returning browser may contain rows stamped by an older local auth
       // identity (or no identity at all). Once the Drive profile is verified,
       // inspect the complete workspace so content/base proofs can distinguish
       // stale ownership metadata from a genuine edit. Rows are still guarded
       // at apply time unless this cycle proves the cloud copy is canonical.
       let scanned = !copiedWorkspaces.has(workspaceId) && manifestRead.value && input.source.scanWorkspaceIncludingUnowned
-        ? await input.source.scanWorkspaceIncludingUnowned(workspaceId)
+        ? snapshot.all ?? await input.source.scanWorkspaceIncludingUnowned(workspaceId)
         : initialScanned;
       if (manifestRead.value && !validManifest(manifestRead.value, workspaceId)) throw v2Failure('manifest-validation', 'invalid-manifest', 'read-manifest');
       const manifest = manifestRead.value;
@@ -392,6 +444,7 @@ export async function runCloudSyncV2(input: {
             }
           } catch (error) {
             if (error instanceof SyntaxError) rootProblem = 'remote-workspace-root-invalid';
+            else if (error instanceof CloudOperationError && error.diagnostic.reason === 'object-size-mismatch') rootProblem = 'remote-workspace-root-integrity-failed';
             else if (error instanceof CloudOperationError && error.diagnostic.reason === 'remote-object-missing') rootProblem = 'remote-workspace-root-object-missing';
             else throw error;
           }
@@ -579,20 +632,21 @@ export async function runCloudSyncV2(input: {
         }
       } else {
 
-      for (const key of keys) {
+      await mapBounded(keys, async key => {
         assertCurrent();
         const local = localByKey.get(key);
         const remote = remoteByKey.get(key);
         const base = baselineByKey.get(key);
         currentEntity = remote ?? (local ? { kind: local.entity.entityType, id: local.entity.entityId } : undefined);
         currentStage = 'record-reconciliation';
+        try {
         if (local && !local.entity.tombstone && !local.hash) throw v2Failure('local-scan', 'local-payload-unavailable', 'hash-local', local.entity.entityType);
 
         if (local && !remote) {
-          if (local.entity.tombstone) continue;
+          if (local.entity.tombstone) return;
           if (manifest && initialAdoption && !repairedWorkspaceRoot && !local.bootstrapIdentityHash) {
             result.conflicts.push({ workspaceId, kind: local.entity.entityType, id: local.entity.entityId });
-            continue;
+            return;
           }
           const trustedRecoveryRoot = local.entity.entityType === 'workspace'
             && local.entity.entityId === workspaceId
@@ -607,21 +661,21 @@ export async function runCloudSyncV2(input: {
             // visible. Its ancestry is not proven, so keep the local row and
             // surface an exact review item instead of mixing accounts.
             result.conflicts.push({ workspaceId, kind: local.entity.entityType, id: local.entity.entityId });
-            continue;
+            return;
           }
           uploads.push({ record: { kind: local.entity.entityType, id: local.entity.entityId, parentId: local.entity.parentId, hash: local.hash, baseHash: base?.baseHash ?? null, tombstone: false, ...(local.entity.entityType === 'asset' ? { encoding: 'asset-envelope-v1' as const } : {}) }, bytes: local.entity.bytes });
-          continue;
+          return;
         }
         if (!local && remote) {
-          if (remote.tombstone) { nextBaselines.set(key, baselineFor(remote, null, manifest!.revision)); continue; }
+          if (remote.tombstone) { nextBaselines.set(key, baselineFor(remote, null, manifest!.revision)); return; }
           const bytes = await readRemoteObjectWithExactReplica(input.provider, remote.hash!, { workspaceId, entityKind: remote.kind, entityId: remote.id }, local);
           if (await sha256Bytes(bytes) !== remote.hash) throw v2Failure('object-download', 'object-integrity-failed', 'download', remote.kind);
           downloads.push({ record: remote, bytes });
-          continue;
+          return;
         }
-        if (!local || !remote) continue;
+        if (!local || !remote) return;
         const localMatchesRemote = local.entity.tombstone === remote.tombstone && (remote.tombstone || local.hash === remote.hash);
-        if (localMatchesRemote) { nextBaselines.set(key, baselineFor(remote, local.hash, manifest!.revision)); continue; }
+        if (localMatchesRemote) { nextBaselines.set(key, baselineFor(remote, local.hash, manifest!.revision)); return; }
 
         // Even with an incomplete baseline, identical document content is
         // proof of convergence. Browser ownership/bookkeeping bytes need not
@@ -632,7 +686,7 @@ export async function runCloudSyncV2(input: {
           const localContent = await contentIdentity(remote.kind, local.entity.bytes);
           if (localContent !== null && localContent === await contentIdentity(remote.kind, bytes)) {
             nextBaselines.set(key, baselineFor(remote, local.hash, manifest!.revision));
-            continue;
+            return;
           }
         }
 
@@ -655,7 +709,7 @@ export async function runCloudSyncV2(input: {
               if (await sha256Bytes(bytes) !== remote.hash) throw v2Failure('object-download', 'object-integrity-failed', 'download', remote.kind);
               downloads.push({ record: remote, bytes });
             }
-            continue;
+            return;
           }
         }
 
@@ -663,14 +717,14 @@ export async function runCloudSyncV2(input: {
           const bytes = await readRemoteObjectWithExactReplica(input.provider, remote.hash!, { workspaceId, entityKind: remote.kind, entityId: remote.id }, local);
           if (await sha256Bytes(bytes) !== remote.hash) throw v2Failure('object-download', 'object-integrity-failed', 'download', remote.kind);
           downloads.push({ record: remote, bytes });
-          continue;
+          return;
         }
 
         if (initialAdoption && !base && !local.entity.tombstone && !remote.tombstone) {
           // Without a common BASE, neither version has authority. Leave the
           // entire workspace untouched until an explicit workspace choice.
           result.conflicts.push({ workspaceId, kind: local.entity.entityType, id: local.entity.entityId });
-          continue;
+          return;
         }
 
         let localMatchesBase = Boolean(base) && local.entity.tombstone === base!.tombstone && (local.entity.tombstone || local.hash === base!.localHash || local.hash === base!.baseHash);
@@ -695,7 +749,7 @@ export async function runCloudSyncV2(input: {
               remoteMatchesBase ||= baseContent !== null && remoteContent === baseContent;
               if (localContent === remoteContent) {
                 nextBaselines.set(key, baselineFor(remote, local.hash, manifest!.revision));
-                continue;
+                return;
               }
             }
           }
@@ -716,7 +770,11 @@ export async function runCloudSyncV2(input: {
         } else {
           result.conflicts.push({ workspaceId, kind: local.entity.entityType, id: local.entity.entityId });
         }
-      }
+        } catch (error) {
+          if (error instanceof CloudOperationError) throw new CloudOperationError(error.code, { ...error.diagnostic, workspaceId, entityKind: remote?.kind ?? local?.entity.entityType, entityId: remote?.id ?? local?.entity.entityId });
+          throw error;
+        }
+      }, 4);
       }
 
       if (result.conflicts.some(conflict => conflict.workspaceId === workspaceId)) {
@@ -733,18 +791,23 @@ export async function runCloudSyncV2(input: {
       // within each phase.
       uploads.sort((left, right) => phase[left.record.kind] - phase[right.record.kind]
         || keyOf(left.record).localeCompare(keyOf(right.record)));
-      for (const upload of uploads) {
-        currentEntity = upload.record;
-        currentStage = 'object-upload';
-        assertCurrent();
-        if (!upload.record.tombstone) {
-          const put = await input.provider.putObjectIfAbsent(upload.record.hash!, upload.bytes!);
-          if (put === 'uploaded') result.uploaded += 1;
-          const metadata = await input.provider.getObjectMetadata(upload.record.hash!);
-          if (!metadata || metadata.size !== upload.bytes!.byteLength) throw v2Failure('object-upload', 'uploaded-object-unavailable', 'verify-upload', upload.record.kind);
-        }
-        nextRecords.set(keyOf(upload.record), upload.record);
+      // Preserve dependency barriers (especially root-first recovery), while
+      // overlapping immutable objects inside each phase. Drain every worker
+      // on failure before returning; publication remains after all verification.
+      for (const uploadPhase of [...new Set(uploads.map(upload => phase[upload.record.kind]))]) {
+        await mapBounded(uploads.filter(upload => phase[upload.record.kind] === uploadPhase), async upload => {
+          currentEntity = upload.record;
+          currentStage = 'object-upload';
+          assertCurrent();
+          if (!upload.record.tombstone) {
+            const put = await input.provider.putObjectIfAbsent(upload.record.hash!, upload.bytes!);
+            if (put === 'uploaded') result.uploaded += 1;
+            const metadata = await input.provider.getObjectMetadata(upload.record.hash!);
+            if (!metadata || metadata.size !== upload.bytes!.byteLength) throw v2Failure('object-upload', 'uploaded-object-unavailable', 'verify-upload', upload.record.kind);
+          }
+        }, 4);
       }
+      for (const upload of uploads) nextRecords.set(keyOf(upload.record), upload.record);
 
       if (repairedWorkspaceRoot) {
         const uploadedRoot = uploads.find(upload => keyOf(upload.record) === `workspace:${workspaceId}`);
@@ -840,7 +903,7 @@ export async function runCloudSyncV2(input: {
         // must not participate in the optimistic edit check before native
         // reconstruction creates the canonical workspace directory.
         const expected = recoveryRoot ? scanned.filter(entity => entity !== recoveryRoot) : scanned;
-        await input.adapter.applyWorkspace({ workspaceId, expected, downloads: downloads.map(item => ({ record: item.record, bytes: item.record.tombstone ? null : item.bytes })), allowStaleOwnershipRepair, assertCurrent });
+        await input.adapter.applyWorkspace({ workspaceId, expected, expectedHashes: new Map([...localByKey].map(([key, local]) => [key, local.hash])), downloads: downloads.map(item => ({ record: item.record, bytes: item.record.tombstone ? null : item.bytes })), allowStaleOwnershipRepair, assertCurrent });
         result.downloaded += downloads.length;
       } else for (const download of downloads) {
         currentEntity = download.record;
@@ -850,7 +913,9 @@ export async function runCloudSyncV2(input: {
       }
       if (committedManifest) {
         currentStage = 'local-baseline-rebuild';
-        const applied = input.source.scanFreshWorkspace ? new Map((await input.source.scanFreshWorkspace(workspaceId)).map(entity => [keyOf(entity), entity])) : null;
+        // Only applied downloads need transformed replica bytes. For no-op and
+        // upload-only runs, bless the captured upload hash, never a fresh edit.
+        const applied = downloads.length && input.source.scanFreshWorkspace ? new Map((await input.source.scanFreshWorkspace(workspaceId)).map(entity => [keyOf(entity), entity])) : null;
         for (const record of committedManifest.records) {
           const local = localByKey.get(keyOf(record));
           const uploaded = uploads.find(item => keyOf(item.record) === keyOf(record));
@@ -899,6 +964,9 @@ export async function runCloudSyncV2(input: {
         const classification: SyncV2WorkspaceClassification = shown.code === 'conflict' ? 'conflict' : shown.code === 'remote-workspace' ? 'orphaned' : 'ambiguous';
         recordWorkspaceOutcome(workspaceId, classification, classification === 'conflict' ? 'conflict' : 'error', diagnostic);
         continue;
+      } finally {
+        // Large downloaded assets need not stay alive across all workspaces.
+        cycleProvider.releaseObjects();
       }
     }
 
@@ -935,6 +1003,10 @@ export async function runCloudSyncV2(input: {
     // a genuine two-sided edit from an orphan/recovery warning.
 
     // Post-sync convergence check: verify local workspaces match remote catalog
+    // The reconciliation snapshot predates reconstruction/ownership repairs.
+    // End it before checking the live local workspace index.
+    input.source.endCycle?.();
+    cycleEnded = true;
     const postSyncLocalIds = (await input.source.listWorkspaceIds()).filter(id => id !== 'default').sort();
     const postSyncRemoteIds = [...nextCatalog.values()].map(w => w.workspaceId).sort();
     const converged = postSyncLocalIds.length === postSyncRemoteIds.length && postSyncLocalIds.every((id, idx) => id === postSyncRemoteIds[idx]);
@@ -958,6 +1030,6 @@ export async function runCloudSyncV2(input: {
     const shown = presentCloudError(error, currentStage);
     return { ...result, status: 'error', error: shown.message, errorCode: shown.code, diagnostic: sanitizeCloudDiagnostic({ ...shown.diagnostic, workspaceId: shown.diagnostic.workspaceId ?? currentWorkspaceId, entityKind: shown.diagnostic.entityKind ?? currentEntity?.kind, entityId: shown.diagnostic.entityId ?? currentEntity?.id }) };
   } finally {
-    input.source.endCycle?.();
+    if (!cycleEnded) input.source.endCycle?.();
   }
 }

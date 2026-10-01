@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createServer } from 'vite';
+import { formatLastSynced } from '../src/components/library/cloudSyncTimestamp.ts';
 
 test('production sync panel offers one main action, clear choices and a separate recovery notice', async () => {
   const server = await createServer({ configFile: false, envFile: false, optimizeDeps: { noDiscovery: true },
@@ -35,6 +36,7 @@ test('production sync panel offers one main action, clear choices and a separate
     for (const text of ['Some older workspaces need recovery', 'Sync diagnostic details', 'View recovery information', 'remote root is unavailable', 'stage:', 'reason:', 'workspaceId', 'entityKind', 'entityId', 'schemaVersion', 'retryable', 'throwingFunction', 'still loading', 'private-workspace', '>Keep both<', '>Use this device<', 'cloud-sync-review-heading']) assert.equal(recovery.includes(text), false, text);
     state.statusByProvider.googledrive = 'synced'; state.workspaceRecoveryIssues = [];
     const synced = render(); assert.ok(synced.includes('>Synced<'));
+    assert.ok(synced.includes(`Last synced: ${formatLastSynced(123)}`), 'the panel displays the exact calendar date and local time');
     assert.equal(synced.includes('cloud-sync-review-heading'), false);
   } finally { delete globalThis.__syncPanelState; await server.close(); }
 });
