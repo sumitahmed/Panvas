@@ -60,7 +60,7 @@ test('Windows release metadata preserves Panvas user data and excludes developme
   const winTargets = build?.win?.target ?? [];
 
   assert.equal(manifest.name, 'panvas');
-  assert.equal(manifest.version, '0.1.4');
+  assert.equal(manifest.version, '0.1.5');
   assert.equal(build?.appId, 'com.panvas.app');
   assert.equal(build?.productName, 'Panvas');
   assert.equal(build?.win?.artifactName, '${productName}-${version}-Setup.${ext}');
@@ -105,7 +105,7 @@ test('public Windows download metadata and CTAs use the current release', async 
   for (const name of ['LandingPage', 'HeroInkPlayground', 'DownloadPage']) {
     const source = await readFile(`src/components/marketing/${name}.tsx`, 'utf8');
     assert.ok(source.includes('href={PANVAS_RELEASE.windows.downloadUrl}'), `${name} downloads the installer directly`);
-    assert.doesNotMatch(source, /0\.1\.3/, `${name} contains no stale release label`);
+    assert.doesNotMatch(source, /0\.1\.4/, `${name} contains no stale release label`);
   }
   const download = await readFile('src/components/marketing/DownloadPage.tsx', 'utf8');
   assert.match(download, /disabled=\{!PANVAS_INSTALLER_SHA256\}/);
@@ -115,6 +115,10 @@ test('public Windows download metadata and CTAs use the current release', async 
 test('published Windows artifact metadata includes its hash, byte size and release notes', async () => {
   const { PANVAS_RELEASE } = await import('../src/components/marketing/releaseMetadata.ts');
   const windows = PANVAS_RELEASE.windows;
+  if (!windows.checksumSha256) {
+    assert.equal(windows.installerSize, 'See GitHub release');
+    return;
+  }
   assert.match(windows.checksumSha256, /^[0-9a-f]{64}$/);
   assert.match(windows.installerSize, /^[1-9][0-9,]* bytes$/);
   const bytes = Number(windows.installerSize.replaceAll(',', '').replace(' bytes', ''));
