@@ -3,6 +3,9 @@
 // ============================================
 
 import React, { useEffect, useRef } from 'react';
+import { flushSync } from 'react-dom';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
+import { applyFullDarkViewClass } from '@/lib/theme';
 import { useLocation } from 'wouter';
 import { Sidebar } from './Sidebar';
 import { TopBar } from './TopBar';
@@ -19,7 +22,7 @@ interface AppShellProps {
 }
 
 export function AppShell({ children }: AppShellProps) {
-  const { isSidebarOpen, sidebarWidth } = useUIStore();
+  const { isSidebarOpen, sidebarWidth, isFullDarkViewChoiceOpen, setFullDarkView } = useUIStore();
   const { notebookModeLevel, isNotebookPaneVisible, workspaceViewMode } = useLayoutStore();
   const activePageId = useWorkspaceStore(state => state.activePageId);
   const activeCanvasId = useWorkspaceStore(state => state.activeCanvasId);
@@ -29,6 +32,18 @@ export function AppShell({ children }: AppShellProps) {
   useMobileVisualViewport(hasTouchInput || isMobileViewport);
   const [location] = useLocation();
   const hideAppChrome = notebookModeLevel > 0 || workspaceViewMode === 'present';
+  useEffect(() => {
+    const printing = (active: boolean) => {
+      document.documentElement.classList[active ? 'add' : 'remove']('panvas-printing');
+      flushSync(() => useUIStore.setState({ isPrinting: active }));
+      const state = useUIStore.getState();
+      applyFullDarkViewClass(state.theme, state.fullDarkView && !active);
+    };
+    const before = () => printing(true), after = () => printing(false);
+    window.addEventListener('beforeprint', before);
+    window.addEventListener('afterprint', after);
+    return () => { window.removeEventListener('beforeprint', before); window.removeEventListener('afterprint', after); };
+  }, []);
 
   // On phones the library sidebar is an overlay rather than a flex column.
   // Picking a destination (route navigation or opening a document) dismisses
@@ -73,6 +88,7 @@ export function AppShell({ children }: AppShellProps) {
 
   return (
     <div data-touch-input={hasTouchInput} className="panvas-app-shell h-screen w-full min-w-0 flex flex-col overflow-hidden bg-panvas-bg-primary">
+      <ConfirmDialog open={isFullDarkViewChoiceOpen} title="Enable Full Dark View?" description="Darken notebook pages and PDFs too for easier low-light reading. Your original files, page colors and ink are not changed." confirmLabel="Full Dark View" cancelLabel="Standard Dark" tone="neutral" onConfirm={() => setFullDarkView(true)} onCancel={() => setFullDarkView(false)} />
       {/* Top Bar */}
       <div className={hideAppChrome ? 'hidden' : ''}>
         <TopBar />

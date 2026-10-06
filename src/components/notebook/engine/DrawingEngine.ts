@@ -23,6 +23,7 @@ import { boundsOverlap, eraseBounds, type EraseBounds } from './capsuleErase.ts'
 import { PenGeometry } from './penGeometry.ts';
 import { WetInkSurface } from './WetInkSurface.ts';
 import type { HandwritingTrace } from '../../../dev/handwritingTrace.ts';
+import { fullDarkInkColor } from '../../../lib/fullDarkView.ts';
 
 export class DrawingEngine {
   private strokes: Stroke[] = [];
@@ -42,11 +43,25 @@ export class DrawingEngine {
   private liveSnapshotCanvas: HTMLCanvasElement | null = null;
   private isLiveDrawing = false;
   private wetInk: WetInkSurface | null = null;
+  private spareWetInk: WetInkSurface | null = null;
+  private spareWetInkTimer: ReturnType<typeof setTimeout> | null = null;
   private liveFrame: number | null = null;
   private pendingInk: Stroke | null = null;
   private liveTrace: HandwritingTrace | null = null;
   private frameQueuedAt = 0;
   private lastFrameAt = 0;
+  private fullDarkView = false;
+
+  setFullDarkView(enabled: boolean): void {
+    if (enabled === this.fullDarkView) return;
+    this.fullDarkView = enabled;
+    this.shapeManager.setFullDarkView(enabled);
+    this.redraw();
+  }
+
+  private displayStroke(stroke: Stroke): Stroke {
+    return this.fullDarkView ? { ...stroke, color: fullDarkInkColor(stroke.color) } : stroke;
+  }
 
   attachLayerCanvas(id: string, canvas: HTMLCanvasElement, width: number, height: number, scale: number): () => void {
     const ctx = this.viewport.configureCanvas(canvas, width, height, scale / Math.sqrt(Math.max(1, this.layerManager.getLayers().length)));
@@ -90,6 +105,7 @@ export class DrawingEngine {
 
   /** Bind to a canvas element. Call after mount. */
   setCanvas(canvas: HTMLCanvasElement, cssWidth: number, cssHeight: number): void {
+    this.releaseSpareWetInk();
     this.canvas = canvas;
     this.canvasCssWidth = cssWidth;
     this.canvasCssHeight = cssHeight;
@@ -120,11 +136,13 @@ export class DrawingEngine {
     this.canvasCssWidth = 0;
     this.canvasCssHeight = 0;
     this.endLiveStroke();
+    this.releaseSpareWetInk();
   }
 
   /** Resize the canvas (e.g., on window resize). */
   resize(cssWidth: number, cssHeight: number): void {
     if (!this.canvas) return;
+    this.releaseSpareWetInk();
     this.canvasCssWidth = cssWidth;
     this.canvasCssHeight = cssHeight;
     this.ctx = this.viewport.configureCanvas(this.canvas, cssWidth, cssHeight, this._scaleMultiplier);
@@ -378,7 +396,8 @@ export class DrawingEngine {
   }
 
   renderStroke(ctx: CanvasRenderingContext2D, stroke: Stroke): void {
-    const { points, color, thickness, opacity, tool } = stroke;
+    const { points, thickness, opacity, tool } = stroke;
+    const color = this.fullDarkView ? fullDarkInkColor(stroke.color) : stroke.color;
     if (!points || points.length === 0) return;
     if (stroke.centerline === 'polyline' && tool === 'pen' && (!stroke.pattern || stroke.pattern === 'solid')) {
       ctx.save();
@@ -426,7 +445,7 @@ export class DrawingEngine {
     ctx.setLineDash([]);
 
     if (stroke.inkFamily) {
-      ctx.fillStyle = stroke.color;
+      ctx.fillStyle = color;
       const path = this.inkPath(stroke);
       if (path) { ctx.fill(path); ctx.restore(); return; }
       ctx.beginPath();
@@ -437,7 +456,7 @@ export class DrawingEngine {
       ctx.fill(); ctx.restore(); return;
     }
     if (stroke.pattern === 'dashed'  || stroke.pattern === 'dotted') {
-      this.renderPatternedStroke(ctx, stroke);
+      this.renderPatternedStroke(ctx, this.displayStroke(stroke));
       ctx.restore();
       return;
     }
@@ -696,12 +715,27 @@ export class DrawingEngine {
     }
   }
 
-  /** Cancel pending presentation and release the transient surfaces. */
+  private releaseSpareWetInk(): void {
+    if (this.spareWetInkTimer !== null) clearTimeout(this.spareWetInkTimer);
+    this.spareWetInkTimer = null;
+    this.spareWetInk?.dispose();
+    this.spareWetInk = null;
+  }
+
+  /** Remove wet presentation immediately; reuse its buffers only during a
+   * short handwriting burst, then release the backing memory when idle. */
   endLiveStroke(): void {
     if (this.liveFrame !== null) cancelAnimationFrame(this.liveFrame);
     this.liveFrame = null;
     this.pendingInk = null;
-    this.wetInk?.dispose();
+    if (this.wetInk) {
+      this.releaseSpareWetInk();
+      if (this.wetInk.target.canvas.isConnected) {
+        this.wetInk.pause();
+        this.spareWetInk = this.wetInk;
+        this.spareWetInkTimer = setTimeout(() => this.releaseSpareWetInk(), 250);
+      } else this.wetInk.dispose();
+    }
     this.wetInk = null;
     this.liveTrace = null;
     this.isLiveDrawing = false;
@@ -735,9 +769,18 @@ export class DrawingEngine {
         this.viewport.applyTransform(ctx);
         const transform = ctx.getTransform();
         ctx.restore();
-        this.wetInk = new WetInkSurface(ctx, transform);
+        if (this.spareWetInk?.matches(ctx)) {
+          if (this.spareWetInkTimer !== null) clearTimeout(this.spareWetInkTimer);
+          this.spareWetInkTimer = null;
+          this.wetInk = this.spareWetInk;
+          this.spareWetInk = null;
+          this.wetInk.resume(transform);
+        } else {
+          this.releaseSpareWetInk();
+          this.wetInk = new WetInkSurface(ctx, transform);
+        }
       }
-      const work = this.wetInk.render(stroke);
+      const work = this.wetInk.render(this.displayStroke(stroke));
       if (trace) {
         trace.counters.wetPrimitives = (trace.counters.wetPrimitives ?? 0) + work.primitives;
         trace.counters.wetDirtyPixels = (trace.counters.wetDirtyPixels ?? 0) + work.dirtyPixels;
@@ -786,7 +829,7 @@ export class DrawingEngine {
     }
     this.pendingInk = stroke;
     this.flushLiveInk(true);
-    if (this.wetInk && this.wetInk.target === ctx) this.wetInk.commit(stroke);
+    if (this.wetInk && this.wetInk.target === ctx) this.wetInk.commit(this.displayStroke(stroke));
     else {
       ctx.save();
       this.viewport.applyTransform(ctx);

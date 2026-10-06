@@ -1,4 +1,7 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useRef } from 'react';
+import { useFullDarkView } from '@/hooks/useFullDarkView';
+import { fullDarkSurfaceColor } from '@/lib/fullDarkView';
+import { useDocumentTextPresentation } from './useDocumentTextPresentation';
 import { generateHTML } from '@tiptap/core';
 import type { TextObject } from './engine/drawingTypes';
 import { notebookTipTapExtensions } from './tiptapExtensions';
@@ -41,6 +44,9 @@ function sanitizeTipTapDoc(content: unknown): Record<string, any> | null {
 
 export const StaticTextPreview: React.FC<{ object: TextObject; scale: number; zIndex?: number; offset?: { x: number; y: number } }> = ({ object, scale, zIndex, offset }) => {
   gate0Profiler.resource('reactRenders.StaticTextPreview', 1);
+  const fullDarkView = useFullDarkView();
+  const textRef = useRef<HTMLDivElement>(null);
+  useDocumentTextPresentation(textRef, fullDarkView, object.content);
   const html = useMemo(() => {
     try {
       const doc = sanitizeTipTapDoc(object.content);
@@ -57,7 +63,7 @@ export const StaticTextPreview: React.FC<{ object: TextObject; scale: number; zI
   const stickyColor = getStickyNoteColor(object);
   const stickyOpacity = getStickyNoteOpacity(object);
   const stickyShape = getStickyNoteShape(object);
-  const bgRgba = isSticky ? hexToRgba(stickyColor, stickyOpacity) : undefined;
+  const bgRgba = isSticky ? hexToRgba(fullDarkView ? fullDarkSurfaceColor(stickyColor, true) : stickyColor, stickyOpacity) : undefined;
   const legacyBg = /^#[0-9a-f]{6}$/i.test(String(object.metadata?.elementBackground ?? ''))
     ? String(object.metadata?.elementBackground)
     : undefined;
@@ -100,8 +106,9 @@ export const StaticTextPreview: React.FC<{ object: TextObject; scale: number; zI
         </div>
       )}
       <div
+        ref={textRef}
         dangerouslySetInnerHTML={{ __html: html }} 
-        className={`tiptap ProseMirror outline-none ${handwritingText ? 'panvas-h2t-text' : `prose prose-neutral max-w-none prose-sm ${isSticky ? 'p-0' : 'p-1'}`}`}
+        className={`panvas-document-text tiptap ProseMirror outline-none ${handwritingText ? 'panvas-h2t-text' : `prose prose-neutral max-w-none prose-sm ${isSticky ? 'p-0' : 'p-1'}`}`}
         style={{ wordBreak: 'break-word', whiteSpace: 'pre-wrap', overflowWrap: 'break-word', ...(isSticky ? { height: '100%', overflow: 'hidden', padding: stickyShape === 'star' ? '34% 24% 20%' : ['circle', 'oval'].includes(stickyShape) ? '20% 18%' : '14px 16px' } : {}) }}
       />
     </div>

@@ -2508,7 +2508,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
           </div>
         )
       )}
-      {!isMobileViewport && workspaceViewMode !== 'present' && notebookModeLevel !== 2 && <div className={`panvas-notebook-chrome panvas-layer-toolbar absolute top-0 left-0 right-0 p-4 flex justify-between items-start pointer-events-none gap-4 ${isPropertiesPanelOpen ? 'right-72 max-[599px]:right-0' : ''}`}>
+      {!isMobileViewport && workspaceViewMode !== 'present' && notebookModeLevel !== 2 && <div style={{ marginRight: isCompactWorkspace ? reservedPropertiesWidth : undefined }} className={`panvas-notebook-chrome panvas-layer-toolbar absolute top-0 left-0 right-0 p-4 flex justify-between items-start pointer-events-none gap-4 ${isPropertiesPanelOpen ? 'right-72 max-[599px]:right-0' : ''}`}>
         {/* Below ~500px of notebook width the navigator's minimum footprint
             (~116px even fully truncated) starves the toolbar cell below the
             minimal tier and the bar overlaps the workspace controls. Tool

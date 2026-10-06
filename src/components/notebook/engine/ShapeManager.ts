@@ -8,11 +8,14 @@ import type { Shape, ShapeType } from './drawingTypes.ts';
 import { DEFAULT_PAGE_LAYER_ID } from './drawingTypes.ts';
 import type { ViewportManager } from './ViewportManager.ts';
 import { LayerManager } from './LayerManager.ts';
+import { fullDarkInkColor } from '../../../lib/fullDarkView.ts';
 
 export class ShapeManager {
   private shapes: Shape[] = [];
   private viewport: ViewportManager;
   private layerManager: LayerManager;
+  private fullDarkView = false;
+  setFullDarkView(enabled: boolean): void { this.fullDarkView = enabled; }
 
   constructor(viewport: ViewportManager, layerManager: LayerManager = new LayerManager()) {
     this.viewport = viewport;
@@ -69,6 +72,7 @@ export class ShapeManager {
 
   /** Render a single shape (used for final rendering and live preview). */
   renderShape(ctx: CanvasRenderingContext2D, shape: Shape): void {
+    if (this.fullDarkView) shape = { ...shape, color: fullDarkInkColor(shape.color), fill: shape.fill ? fullDarkInkColor(shape.fill) : shape.fill };
     ctx.save();
     
     if (shape.shapeType === 'line' || shape.shapeType === 'arrow') {

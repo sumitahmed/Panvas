@@ -1,4 +1,8 @@
-import React, { useEffect, useState, useRef, useMemo } from 'react';
+import React, { useEffect, useLayoutEffect, useState, useRef, useMemo } from 'react';
+import { useFullDarkView } from '@/hooks/useFullDarkView';
+import { FULL_DARK_PDF_FILTER, fullDarkSurfaceColor, isBrightDocumentCanvas } from '@/lib/fullDarkView';
+import { useDocumentTextPresentation } from './useDocumentTextPresentation';
+import { useUIStore } from '@/stores/uiStore';
 import { textObjectStyle } from './textTypography';
 import { notebookRepository } from '@/repositories/NotebookRepository';
 import { canvasRepository } from '@/repositories/CanvasRepository';
@@ -41,6 +45,9 @@ interface InactivePagePreviewProps {
 
 const StaticTextPreview: React.FC<{ object: TextObject; scale: number; offset?: { x: number; y: number } }> = ({ object, scale, offset }) => {
   gate0Profiler.resource('reactRenders.InactiveStaticTextPreview', 1);
+  const fullDarkView = useFullDarkView();
+  const textRef = useRef<HTMLDivElement>(null);
+  useDocumentTextPresentation(textRef, fullDarkView, object.content);
   const editor = useEditor({
     editable: false,
     extensions: notebookTipTapExtensions,
@@ -57,7 +64,7 @@ const StaticTextPreview: React.FC<{ object: TextObject; scale: number; offset?: 
   const stickyColor = getStickyNoteColor(object);
   const stickyOpacity = getStickyNoteOpacity(object);
   const stickyShape = getStickyNoteShape(object);
-  const bgRgba = isSticky ? hexToRgba(stickyColor, stickyOpacity) : undefined;
+  const bgRgba = isSticky ? hexToRgba(fullDarkView ? fullDarkSurfaceColor(stickyColor, true) : stickyColor, stickyOpacity) : undefined;
   const legacyBg = /^#[0-9a-f]{6}$/i.test(String(object.metadata?.elementBackground ?? ''))
     ? String(object.metadata?.elementBackground)
     : undefined;
@@ -94,11 +101,11 @@ const StaticTextPreview: React.FC<{ object: TextObject; scale: number; offset?: 
           )}
         </div>
       )}
-      <EditorContent 
+      <div ref={textRef} className="panvas-document-text"><EditorContent
         editor={editor} 
         className={`outline-none prose prose-neutral max-w-none prose-sm ${isSticky ? 'p-0' : 'p-1'}`} 
         style={{ wordBreak: 'break-word', whiteSpace: 'pre-wrap', overflowWrap: 'break-word' }}
-      />
+      /></div>
     </div>
   );
 };
@@ -125,6 +132,12 @@ const InactivePagePreviewComponent: React.FC<InactivePagePreviewProps> = ({
 
   // Preview engine instance persists across width/height changes (e.g. zoom).
   const engineRef = useRef<{ drawing: DrawingEngine; viewport: ViewportManager } | null>(null);
+  const fullDarkView = useFullDarkView();
+  const [brightPdfPreview, setBrightPdfPreview] = useState(false);
+  useLayoutEffect(() => {
+    engineRef.current?.drawing.setFullDarkView(fullDarkView);
+    if (fullDarkView && page.type === 'pdf' && canvasRef.current) setBrightPdfPreview(isBrightDocumentCanvas(canvasRef.current));
+  }, [fullDarkView, page.type]);
   const renderGenerationRef = useRef(0);
   const data = pageSnapshot ?? loadedData;
   const properties = data ? data.properties : createEmptyDrawingData().properties;
@@ -166,6 +179,7 @@ const InactivePagePreviewComponent: React.FC<InactivePagePreviewProps> = ({
     const shapes = new ShapeManager(viewport, layers);
     const images = new ImageManager(viewport, layers);
     const drawing = new DrawingEngine(viewport, shapes, images, layers);
+    drawing.setFullDarkView(fullDarkView);
 
     drawing.setCanvas(canvasRef.current, width, height);
 
@@ -270,6 +284,8 @@ const InactivePagePreviewComponent: React.FC<InactivePagePreviewProps> = ({
           viewport: scaledViewport,
         }).promise;
         gate0Profiler.resource('pdfRenderTasks', -1);
+        const appearance = useUIStore.getState();
+        if (appearance.theme === 'dark' && appearance.fullDarkView && !appearance.isPrinting) setBrightPdfPreview(isBrightDocumentCanvas(canvas));
         gate0Profiler.event('pdf-render', renderStartedAt ? performance.now() - renderStartedAt : undefined, { pageId: page.id, focused: false });
       } catch (err) {
         console.error('Failed to load PDF preview:', err);
@@ -308,7 +324,7 @@ const InactivePagePreviewComponent: React.FC<InactivePagePreviewProps> = ({
           <canvas 
             ref={canvasRef} 
             className={`pointer-events-none ${page.type === 'pdf' ? 'shadow-md bg-white' : ''}`}
-            style={page.type === 'default' ? { width, height } : {}}
+            style={page.type === 'default' ? { width, height } : { filter: fullDarkView && brightPdfPreview ? FULL_DARK_PDF_FILTER : 'none' }}
           />
         </div>
         

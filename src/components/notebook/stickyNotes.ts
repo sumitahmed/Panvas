@@ -3,6 +3,9 @@ import type { NotebookEngine } from './engine/NotebookEngine.ts';
 
 export const STICKY_NOTE_WIDTH = 220;
 export const STICKY_NOTE_MIN_HEIGHT = 180;
+// Three 12px resize handles fit along a 32px edge without overlapping.
+// Creation presets keep their existing dimensions; this is only a resize floor.
+export const STICKY_NOTE_RESIZE_MIN = 32;
 export const DEFAULT_STICKY_NOTE_COLOR = '#fef08a';
 
 export const STICKY_NOTE_COLORS = [
@@ -31,6 +34,15 @@ export const STICKY_NOTE_SHAPES = [
 
 export type StickyNoteShape = (typeof STICKY_NOTE_SHAPES)[number]['id'];
 export const DEFAULT_STICKY_NOTE_SHAPE: StickyNoteShape = 'rounded-rect';
+
+/** Fit an equal-sided shape inside the current note instead of enlarging it. */
+export function stickyShapeBounds(bounds: { width: number; height: number }, shape: StickyNoteShape) {
+  if (shape === 'square' || shape === 'circle') {
+    const edge = Math.max(STICKY_NOTE_RESIZE_MIN, Math.min(bounds.width, bounds.height));
+    return { width: edge, height: edge };
+  }
+  return bounds;
+}
 
 export type StickyPaper = 'plain' | 'lined' | 'grid';
 export const STICKY_PRESETS = [

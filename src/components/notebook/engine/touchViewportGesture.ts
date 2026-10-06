@@ -36,6 +36,8 @@ export interface TwoFingerViewportGestureOptions {
   maxScale?: number;
   /** Unscaled layout offsets (centering/padding) must not scale with content. */
   getContentOffset?: (scale: number) => ViewportTouchPoint;
+  /** Documents with fixed page gaps can retain an actual DOM page anchor. */
+  captureContentAnchor?: (center: ViewportTouchPoint) => (scale: number, center: ViewportTouchPoint) => void;
   navigationGestures?: NavigationGestureLifecycle;
   /** Cancel synchronously on tool changes without rebinding pointer listeners. */
   subscribeCancellation?: (cancel: () => void) => () => void;
@@ -93,6 +95,7 @@ export function attachTwoFingerViewportGesture({
   minScale = 0.25,
   maxScale = 4,
   getContentOffset = () => ({ x: 0, y: 0 }),
+  captureContentAnchor,
   navigationGestures,
   subscribeCancellation,
 }: TwoFingerViewportGestureOptions): () => void {
@@ -102,6 +105,7 @@ export function attachTwoFingerViewportGesture({
   let frame: number | null = null;
   let suppressUntilAllLifted = false;
   let releaseNavigation: (() => void) | null = null;
+  let applyContentAnchor: ReturnType<NonNullable<TwoFingerViewportGestureOptions['captureContentAnchor']>> | null = null;
 
   const twoPointers = (): [ViewportTouchPoint, ViewportTouchPoint] | null => {
     const points = [...pointers.values()];
@@ -129,6 +133,7 @@ export function attachTwoFingerViewportGesture({
     if (!pair) return;
     const bounds = target.getBoundingClientRect();
     const center = midpoint(pair[0], pair[1]);
+    applyContentAnchor = captureContentAnchor?.(center) ?? null;
     const scale = getScale();
     const offset = getContentOffset(scale);
     anchor = {
@@ -159,8 +164,11 @@ export function attachTwoFingerViewportGesture({
       maxScale,
       contentOffset: getContentOffset(clamp(anchor.scale * distance(pair[0], pair[1]) / anchor.distance, minScale, maxScale)),
     });
-    setScale(next.scale);
-    schedulePosition(next);
+    if (applyContentAnchor) applyContentAnchor(next.scale, midpoint(pair[0], pair[1]));
+    else {
+      setScale(next.scale);
+      schedulePosition(next);
+    }
   };
 
   const record = (event: PointerEvent) => {
@@ -197,6 +205,7 @@ export function attachTwoFingerViewportGesture({
     const capturedIds = [...pointers.keys()];
     pointers.clear();
     anchor = null;
+    applyContentAnchor = null;
     suppressUntilAllLifted = false;
     const release = releaseNavigation;
     releaseNavigation = null;

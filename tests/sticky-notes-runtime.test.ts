@@ -4,6 +4,7 @@ import type { DrawingData, TextObject } from '../src/components/notebook/engine/
 import { HistoryManager } from '../src/components/notebook/engine/HistoryManager.ts';
 import { LayerManager } from '../src/components/notebook/engine/LayerManager.ts';
 import { TextManager } from '../src/components/notebook/engine/TextManager.ts';
+import { SelectionEngine } from '../src/components/notebook/engine/SelectionEngine.ts';
 import {
   createStickyNote,
   DEFAULT_STICKY_NOTE_COLOR,
@@ -20,10 +21,59 @@ import {
   STICKY_NOTE_MIN_HEIGHT,
   STICKY_NOTE_SHAPES,
   STICKY_NOTE_WIDTH,
+  STICKY_NOTE_RESIZE_MIN,
+  stickyShapeBounds,
   updateStickyNote,
   updateStickyNoteColor,
   type StickyNoteShape,
 } from '../src/components/notebook/stickyNotes.ts';
+
+test('small and narrow sticky shapes fit inside existing bounds without inflation', () => {
+  for (const bounds of [{ width: 32, height: 32 }, { width: 240, height: 40 }, { width: 40, height: 240 }]) {
+    for (const shape of STICKY_NOTE_SHAPES) {
+      const next = stickyShapeBounds(bounds, shape.id);
+      assert.ok(next.width >= STICKY_NOTE_RESIZE_MIN && next.height >= STICKY_NOTE_RESIZE_MIN);
+      assert.ok(next.width <= bounds.width && next.height <= bounds.height);
+      if (shape.id === 'square' || shape.id === 'circle') assert.equal(next.width, next.height);
+      else assert.deepEqual(next, bounds);
+    }
+  }
+});
+
+test('single sticky uses DOM chrome while mixed selection keeps generic controls and logical ownership', () => {
+  const layers = new LayerManager(), texts = new TextManager(layers);
+  const note = createStickyNote({ id: 'single-sticky', x: 100, y: 100 });
+  texts.addText(note);
+  const image = { id: 'image', type: 'image', x: 400, y: 400, width: 80, height: 60 };
+  const history = new HistoryManager();
+  const selection = new SelectionEngine({ redraw() {}, getStrokes: () => [] } as any,
+    { getShapes: () => [], removeShapes: () => [] } as any, history,
+    { getState: () => ({ scale: 1 }), applyTransform() {} } as any,
+    texts, { getImages: () => [image], removeImages: () => [] } as any, layers);
+  let boxes = 0;
+  const ctx = new Proxy({ strokeRect: () => { boxes++; } }, { get: (target, key) => target[key as keyof typeof target] ?? (() => {}) }) as any;
+  selection.select(note.id, 'text');
+  selection.renderSelection(ctx);
+  assert.equal(boxes, 0);
+  assert.deepEqual(selection.getSelectedElements(), [{ id: note.id, type: 'text' }]);
+  assert.equal(selection.getHandleAt(96, 96), null);
+  selection.select(image.id, 'image', true);
+  selection.renderSelection(ctx);
+  assert.equal(boxes, 18);
+  assert.equal(selection.getHandleAt(96, 96)?.id, note.id);
+  selection.clearSelection();
+  assert.equal(selection.getSelectedElements().length, 0);
+  selection.select(note.id, 'text');
+  // Empty stroke/shape collections use the same mixed deletion transaction.
+  (selection as any).drawingEngine.removeStrokes = () => [];
+  selection.deleteSelection();
+  assert.equal(texts.getTexts().length, 0);
+  history.undo();
+  assert.equal(texts.getTexts()[0], note);
+  assert.equal(selection.getSelectedElements()[0].id, note.id);
+  history.redo();
+  assert.equal(texts.getTexts().length, 0);
+});
 
 test('creates sticky note with all 6 supported shapes and appropriate default bounds', () => {
   const shapes: StickyNoteShape[] = ['square', 'rounded-rect', 'rectangle', 'circle', 'oval', 'star'];

@@ -7,6 +7,7 @@ import { stickyPaperStyle } from './stickyNotes';
 // Preserves DOM element identity, canvas state, and vector templates during scroll.
 
 import React, { useEffect, useLayoutEffect, useRef, useMemo, useState } from 'react';
+import { resolveDocumentToolCursor } from './documentToolCursor';
 import { PageRenderer } from './PageRenderer';
 import { FloatingTextEditor } from './FloatingTextEditor';
 import { createEmptyDrawingData, type DrawingData, type TextObject, type ToolState, DEFAULT_PAGE_LAYER_ID } from './engine/drawingTypes';
@@ -36,6 +37,9 @@ import { isVoiceNoteObject } from '@/services/audio/voiceNoteObjects';
 import type { AudioNote } from './engine/drawingTypes';
 import { resolvePageSurfaceGeometry } from '@/lib/pageProperties';
 import { gate0Profiler } from '@/dev/gate0Profiler';
+import { useFullDarkView } from '@/hooks/useFullDarkView';
+import { FULL_DARK_PDF_FILTER, isBrightDocumentCanvas } from '@/lib/fullDarkView';
+import { useUIStore } from '@/stores/uiStore';
 
 const ignoreTextEditorBlur = () => {};
 
@@ -66,37 +70,6 @@ export interface NotebookPageViewProps {
   onImageManagerReady?: (pageId: string, images: ImageManager | null) => void;
 }
 
-/**
- * Native-looking ink cursors keep the pen tip, rather than a crosshair centre,
- * on the document point that receives the stroke. They are deliberately small
- * and monochrome so they work on every paper colour and theme.
- */
-const svgCursor = (svg: string, hotspotX: number, hotspotY: number, fallback = 'crosshair') =>
-  `url("data:image/svg+xml,${encodeURIComponent(svg)}") ${hotspotX} ${hotspotY}, ${fallback}`;
-
-const ERASER_CURSOR = svgCursor(`<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><path d="m7 20 10-10a3 3 0 0 1 4.2 0l4.8 4.8a3 3 0 0 1 0 4.2l-8 8H9l-4-4 2-7Z" fill="#f6c7d7" stroke="#5d4650" stroke-width="1.7" stroke-linejoin="round"/><path d="m11 24 5-5" fill="none" stroke="#fff" stroke-width="1.5"/></svg>`, 9, 25, 'cell');
-
-function dynamicInkCursor(tool: ToolState['drawingTool'], color: string): string {
-  const ink = /^#[0-9a-f]{6}$/i.test(color) ? color : '#2563eb';
-  if (tool === 'laser') {
-    return svgCursor(`<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><circle cx="16" cy="16" r="9" fill="${ink}" fill-opacity=".18"/><circle cx="16" cy="16" r="4.5" fill="${ink}" stroke="#fff" stroke-width="1.5"/><circle cx="16" cy="16" r="1.4" fill="#fff"/></svg>`, 16, 16);
-  }
-  const tip = tool === 'highlighter' ? '#fef08a' : ink;
-  const body = tool === 'pencil' ? '#fbfaf7' : tip;
-  const accent = tool === 'highlighter' ? ink : '#24201a';
-  return svgCursor(`<svg xmlns="http://www.w3.org/2000/svg" width="34" height="34" viewBox="0 0 34 34"><path d="m7 26 3.5-8L24 4.5l5.5 5.5L16 23.5 7 26Z" fill="${body}" stroke="${accent}" stroke-width="1.8" stroke-linejoin="round"/><path d="m21.5 7 5.5 5.5" fill="none" stroke="${ink}" stroke-width="2"/><path d="m7 26 6.2-2.2-4-4L7 26Z" fill="${ink}" stroke="#24201a" stroke-width="1.2" stroke-linejoin="round"/></svg>`, 7, 26);
-}
-
-function resolvePageCursor(toolState: ToolState): string | undefined {
-  if (toolState.mode === 'erase') return ERASER_CURSOR;
-  if (toolState.mode !== 'draw') return undefined;
-  const handwritingInk = toolState.handwritingToTextEnabled
-    && (toolState.drawingTool === 'pen' || toolState.drawingTool === 'pencil');
-  return dynamicInkCursor(
-    toolState.drawingTool,
-    handwritingInk ? toolState.handwritingInkColor : toolState.color,
-  );
-}
 
 function LayerCanvas({ drawing, id, width, height, scale, order }: { drawing: DrawingEngine; id: string; width: number; height: number; scale: number; order: number }) {
   const ref = useRef<HTMLCanvasElement>(null);
@@ -151,7 +124,7 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
     instanceIdRef.current = 'inst_' + Math.random().toString(36).substring(2, 8);
   }
 
-  const pageCursor = isFocused ? resolvePageCursor(toolState) : undefined;
+  const pageCursor = isFocused ? resolveDocumentToolCursor(toolState) : undefined;
   const pageGeometry = useMemo(() => resolvePageSurfaceGeometry(properties), [properties]);
   const textPageOffset = useMemo(
     () => ({ x: pageGeometry.source.left, y: pageGeometry.source.top }),
@@ -159,11 +132,23 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
   );
   const sceneReady = !isFocused || sceneOwnerPageId === page.id;
   const liveSceneReady = isFocused && sceneReady;
+  const fullDarkView = useFullDarkView();
+  const [brightPdfPreview, setBrightPdfPreview] = useState(false);
+  useLayoutEffect(() => {
+    if (fullDarkView && page.type === 'pdf' && canvasRef.current) setBrightPdfPreview(isBrightDocumentCanvas(canvasRef.current));
+  }, [fullDarkView, page.type]);
+  useLayoutEffect(() => {
+    if (liveSceneReady) notebookEngine.drawing.setFullDarkView(fullDarkView);
+    staticEngineRef.current?.drawing.setFullDarkView(fullDarkView);
+  }, [fullDarkView, liveSceneReady, notebookEngine]);
 
   // The committed surface belongs to this page, independent of the shared
   // interaction engine. Only data/geometry changes repaint it.
   useLayoutEffect(() => {
-    if (!data || page.type === 'pdf' || !canvasRef.current) return;
+    // The focused live surface already owns these pixels. Refresh this page-owned
+    // preview synchronously at handoff, rather than replaying the whole scene
+    // behind every newly committed stroke.
+    if (liveSceneReady || !data || page.type === 'pdf' || !canvasRef.current) return;
     let engine = staticEngineRef.current;
     if (!engine) {
       const viewport = new ViewportManager();
@@ -175,6 +160,7 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
       images.setRedrawCallback(() => drawing.redraw());
       engine = { drawing, viewport, layers, images, shapes };
       staticEngineRef.current = engine;
+      drawing.setFullDarkView(fullDarkView);
       onImageManagerReady?.(page.id, images);
       setStaticDrawing(drawing);
     }
@@ -199,6 +185,7 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
   // `data` also carries page properties. A paper-color update replaces that
   // wrapper object, but must not replay unchanged strokes/images/shapes.
   }, [
+    liveSceneReady,
     data?.version,
     data?.objects,
     data?.strokes,
@@ -337,6 +324,8 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
         canvas.style.width = `${cssWidth}px`;
         canvas.style.height = `${cssHeight}px`;
         canvas.getContext('2d')!.drawImage(buffer, 0, 0);
+        const appearance = useUIStore.getState();
+        if (appearance.theme === 'dark' && appearance.fullDarkView && !appearance.isPrinting) setBrightPdfPreview(isBrightDocumentCanvas(canvas));
         buffer.width = buffer.height = 0;
       } catch (error) {
         if (!cancelled) console.error('Failed to load PDF preview:', error);
@@ -396,7 +385,7 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
         ))}
 
         <canvas ref={canvasRef} data-committed-page-id={page.id} className="absolute inset-0 z-10 w-full h-full pointer-events-none"
-          style={{ filter: page.type === 'pdf' ? 'none' : undefined }} />
+          style={{ filter: page.type === 'pdf' ? (fullDarkView && brightPdfPreview ? FULL_DARK_PDF_FILTER : 'none') : undefined }} />
         </div>
         {!data && <div role="status" className="absolute inset-0 flex items-center justify-center text-xs opacity-60">Loading page?</div>}
 

@@ -30,6 +30,29 @@ export class WetInkSurface {
       zIndex: getComputedStyle(target.canvas).zIndex });
     target.canvas.insertAdjacentElement('afterend', this.canvas);
   }
+  /** Retain a clean buffer briefly between adjacent handwriting strokes. */
+  pause(): void {
+    this.canvas.remove();
+    if (this.bounds) {
+      const b = this.pixels(this.bounds);
+      for (const context of [this.ctx, this.prefixCtx]) {
+        context.resetTransform();
+        if (b.right > b.left && b.bottom > b.top) context.clearRect(b.left, b.top, b.right - b.left, b.bottom - b.top);
+      }
+    }
+    this.geometry = new PenGeometry();
+    this.stable = 0;
+    this.oldTail = this.bounds = null;
+  }
+  resume(transform: DOMMatrix): void {
+    this.transform = transform;
+    Object.assign(this.canvas.style, { left: this.target.canvas.style.left || '0px', top: this.target.canvas.style.top || '0px', width: this.target.canvas.style.width, height: this.target.canvas.style.height, zIndex: getComputedStyle(this.target.canvas).zIndex });
+    this.target.canvas.insertAdjacentElement('afterend', this.canvas);
+  }
+  matches(target: CanvasRenderingContext2D): boolean {
+    return target === this.target && this.canvas.width === target.canvas.width
+      && this.canvas.height === target.canvas.height;
+  }
   private pixels(bounds: InkBounds): InkBounds {
     const m = this.transform;
     const corners = [[bounds.left, bounds.top], [bounds.right, bounds.top], [bounds.right, bounds.bottom], [bounds.left, bounds.bottom]]
@@ -42,10 +65,12 @@ export class WetInkSurface {
   render(stroke: Stroke): { primitives: number; dirtyPixels: number; rebuilt: boolean } {
     const rebuilt = this.geometry.update(stroke.points);
     if (rebuilt) {
-      this.prefixCtx.resetTransform();
-      this.prefixCtx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-      this.ctx.resetTransform();
-      this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+      if (this.bounds) {
+        this.prefixCtx.resetTransform();
+        this.prefixCtx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        this.ctx.resetTransform();
+        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+      }
       this.stable = 0;
       this.oldTail = null;
       this.bounds = null;

@@ -22,10 +22,17 @@ import {
   isLegacyStickyPlaceholderContent,
   STICKY_NOTE_COLORS,
   STICKY_NOTE_SHAPES,
-  STICKY_NOTE_MIN_HEIGHT,
   type StickyNoteShape,
 } from './stickyNotes';
 import { gate0Profiler } from '@/dev/gate0Profiler';
+import { useFullDarkView } from '@/hooks/useFullDarkView';
+import { fullDarkSurfaceColor } from '@/lib/fullDarkView';
+import { useDocumentTextPresentation } from './useDocumentTextPresentation';
+import { OverlayManager } from '@/components/ui/OverlayManager';
+import { STICKY_NOTE_RESIZE_MIN, stickyShapeBounds } from './stickyNotes';
+
+const STICKY_PALETTE_COLORS = STICKY_NOTE_COLORS.filter((color, index, colors) =>
+  colors.findIndex(item => item.value === color.value) === index);
 
 interface FloatingTextEditorProps {
   object: TextObject;
@@ -67,14 +74,17 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
     gate0Profiler.resource('tipTapEditors', 1);
     return () => gate0Profiler.resource('tipTapEditors', -1);
   }, []);
-  const isSelected = engine.selection.getSelectedElements().some(el => el.id === object.id);
+  const selectedElements = engine.selection.getSelectedElements();
+  const isSelected = selectedElements.some(el => el.id === object.id);
   const stickyNote = isStickyNote(object);
   const handwritingText = isHandwritingTextObject(object) && !stickyNote;
   const [stickyStylePanel, setStickyStylePanel] = useState<'color' | 'shape' | null>(null);
-  const textWidth = Math.max(stickyNote ? 140 : 160, object.width ?? 0);
-  const textMinHeight = stickyNote ? 100 : 72;
+  const textWidth = Math.max(stickyNote ? STICKY_NOTE_RESIZE_MIN : 160, object.width ?? 0);
+  const textMinHeight = stickyNote ? STICKY_NOTE_RESIZE_MIN : 72;
   const containerRef = useRef<HTMLDivElement>(null);
+  const fullDarkView = useFullDarkView();
   const surfaceRef = useRef<HTMLDivElement>(null);
+  const stickyControlsRef = useRef<HTMLDivElement>(null);
   const gestureCleanup = useRef<(() => void) | null>(null);
   useEffect(() => () => gestureCleanup.current?.(), []);
 
@@ -91,7 +101,7 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
 
   useEffect(() => {
     setSize({
-      width: Math.max(stickyNote ? 140 : 160, object.width ?? 0),
+      width: Math.max(stickyNote ? STICKY_NOTE_RESIZE_MIN : 160, object.width ?? 0),
       height: object.height || textMinHeight,
     });
   }, [object.width, object.height, stickyNote, textMinHeight]);
@@ -141,6 +151,8 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
       }
     },
   });
+
+  useDocumentTextPresentation(containerRef, fullDarkView && Boolean(editor), object.content);
 
   useEffect(() => {
     if (editor) {
@@ -221,6 +233,11 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
     if (e.button !== 0 || !engine.texts.isEditable(object) || isHandTool) return;
     e.stopPropagation();
     e.preventDefault();
+
+    if (toolMode === 'select' && (e.shiftKey || (isSelected && selectedElements.length > 1))) {
+      engine.input.routeOverlayPointerDown(e.nativeEvent);
+      return;
+    }
 
     const target = e.currentTarget as HTMLElement;
     target.setPointerCapture(e.pointerId);
@@ -312,7 +329,7 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
     const startW = size.width;
     const startH = size.height;
     const gestureScale = (surfaceRef.current?.getBoundingClientRect().width ?? size.width * scale) / (pdfPlacement ? sourceRectToVisual({ x: 0, y: 0, width: size.width, height: size.height }, pdfPlacement.sourceDimensions, pdfPlacement.rotation).width : size.width);
-    const minW = stickyNote ? 140 : 100;
+    const minW = stickyNote ? STICKY_NOTE_RESIZE_MIN : 100;
     const minH = textMinHeight;
 
     const onPointerMove = (moveEv: PointerEvent) => {
@@ -367,6 +384,15 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
           newX = startX + (startW - newW);
           newY = startY + (startH - newH);
           break;
+      }
+
+      if (stickyNote && ['square', 'circle'].includes(getStickyNoteShape(object))) {
+        const edge = Math.abs(newW - startW) >= Math.abs(newH - startH) ? newW : newH;
+        newW = newH = Math.max(STICKY_NOTE_RESIZE_MIN, edge);
+        newX = handle.includes('l') ? startX + startW - newW
+          : handle === 'tc' || handle === 'bc' ? startX + (startW - newW) / 2 : startX;
+        newY = handle.startsWith('t') ? startY + startH - newH
+          : handle === 'ml' || handle === 'mr' ? startY + (startH - newH) / 2 : startY;
       }
 
       object.x = newX;
@@ -478,7 +504,8 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
   };
 
   const isInteractive = editor?.isFocused ?? false;
-  const showHandles = !isHandTool && engine.texts.isEditable(object) && (isSelected || isInteractive);
+  const showHandles = !isHandTool && engine.texts.isEditable(object) && (isSelected || isInteractive)
+    && (!stickyNote || selectedElements.length <= 1);
   const containsLink = JSON.stringify(object.content).includes('"type":"link"');
   const pastePresentation = object.metadata?.pastePresentation;
   const pastePresentationClass = !stickyNote && pastePresentation === 'sticky-note'
@@ -518,8 +545,7 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
   const stickyColor = getStickyNoteColor(object);
   const stickyOpacity = getStickyNoteOpacity(object);
   const stickyShape = getStickyNoteShape(object);
-  const bgRgba = stickyNote ? hexToRgba(stickyColor, stickyOpacity) : undefined;
-  const sourceHeight = Math.max(textMinHeight, object.height ?? 0);
+  const bgRgba = stickyNote ? hexToRgba(fullDarkView ? fullDarkSurfaceColor(stickyColor, true) : stickyColor, stickyOpacity) : undefined;
   const currentWidth = size.width;
   const currentHeight = size.height;
 
@@ -549,12 +575,7 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
     const previousBounds = { width: object.width, height: object.height || textMinHeight };
     let nextBounds = previousBounds;
     if (updates.shape && updates.shape !== previousShape) {
-      const edge = Math.max(previousBounds.width, previousBounds.height);
-      nextBounds = ['square', 'circle', 'star'].includes(updates.shape)
-        ? { width: edge, height: edge }
-        : ['rectangle', 'oval'].includes(updates.shape)
-          ? { width: edge, height: Math.max(100, edge * 2 / 3) }
-          : previousBounds;
+      nextBounds = stickyShapeBounds(previousBounds, updates.shape);
     }
 
     const nextColor = updates.color ?? previousColor;
@@ -596,7 +617,7 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
     <div
       ref={surfaceRef}
       data-text-object-id={object.id}
-      className={`absolute ${pastePresentationClass} ${isSelected ? 'ring-1.5 ring-panvas-accent-blue rounded-sm' : ''} ${
+      className={`absolute ${pastePresentationClass} ${isSelected && (!stickyNote || selectedElements.length === 1) ? 'ring-1.5 ring-panvas-accent-blue rounded-sm' : ''} ${
         isHandTool ? 'pointer-events-none z-0' : 'pointer-events-auto z-20'
       }`}
       style={{
@@ -632,7 +653,7 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
         }
       }}
       onDoubleClick={(e) => {
-        if (!isTextTool) {
+        if (!isTextTool && !e.shiftKey && selectedElements.length <= 1) {
           e.stopPropagation();
           engine.tools.setMode('text');
           editor.commands.focus('end');
@@ -692,7 +713,7 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
       )}
 
       {stickyNote && showHandles && (
-        <div className="absolute -top-7 left-[calc(50%+26px)] z-30 flex gap-1">
+        <div ref={stickyControlsRef} className="absolute -top-7 left-[calc(50%+26px)] z-30 flex gap-1">
           <button type="button" className="flex h-5 w-5 items-center justify-center rounded-full border border-panvas-border-subtle bg-panvas-bg-elevated/90 text-panvas-text-secondary shadow-xs hover:text-panvas-text-primary focus-ring" title="Sticky note color" aria-label="Sticky note color" aria-expanded={stickyStylePanel === 'color'} onPointerDown={event => { event.preventDefault(); event.stopPropagation(); }} onClick={event => { event.stopPropagation(); setStickyStylePanel(panel => panel === 'color' ? null : 'color'); }}><Palette size={11} /></button>
           <button type="button" className="flex h-5 w-5 items-center justify-center rounded-full border border-panvas-border-subtle bg-panvas-bg-elevated/90 text-panvas-text-secondary shadow-xs hover:text-panvas-text-primary focus-ring" title="Sticky note shape" aria-label="Sticky note shape" aria-expanded={stickyStylePanel === 'shape'} onPointerDown={event => { event.preventDefault(); event.stopPropagation(); }} onClick={event => { event.stopPropagation(); setStickyStylePanel(panel => panel === 'shape' ? null : 'shape'); }}><Shapes size={11} /></button>
         </div>
@@ -700,20 +721,23 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
 
       {/* Sticky Note Controls Toolbar */}
       {stickyNote && showHandles && stickyStylePanel && (
+        <OverlayManager isOpen onClose={() => setStickyStylePanel(null)} anchorRef={stickyControlsRef} placement="top-end" offset={{ x: 0, y: 8 }}>
         <div
-          className={`panvas-overlay panvas-floating-surface pointer-events-auto absolute bottom-[calc(100%+38px)] left-0 z-40 flex items-center gap-1.5 rounded-lg px-2.5 py-2 shadow-lg border border-panvas-border-subtle bg-panvas-bg-elevated text-panvas-text-primary text-xs max-w-[calc(100vw-32px)] ${stickyStylePanel === 'color' ? 'w-[360px] flex-wrap' : 'w-auto min-w-[190px]'}`}
+          className={`panvas-floating-surface pointer-events-auto flex gap-1.5 rounded-lg p-2 shadow-lg border border-panvas-border-subtle bg-panvas-bg-elevated text-panvas-text-primary text-xs ${stickyStylePanel === 'color' ? 'w-[176px] flex-wrap' : 'w-max items-center'}`}
           role="toolbar"
           aria-label="Sticky note controls"
           onPointerDown={(e) => {
             e.stopPropagation();
           }}
+          onClick={event => event.stopPropagation()}
+          onDoubleClick={event => event.stopPropagation()}
         >
           {stickyStylePanel === 'shape' && <div className="relative flex items-center">
             <select
               aria-label="Sticky note shape"
               value={stickyShape}
               onChange={(e) => handleStickyUpdate({ shape: e.target.value as StickyNoteShape })}
-              className="bg-transparent text-2xs font-medium text-panvas-text-primary outline-none cursor-pointer pr-1 py-0.5"
+              className="h-7 bg-transparent text-2xs font-medium text-panvas-text-primary outline-none cursor-pointer pr-1"
             >
               {STICKY_NOTE_SHAPES.map(s => (
                 <option key={s.id} value={s.id} className="bg-panvas-bg-elevated text-panvas-text-primary">
@@ -724,29 +748,28 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
           </div>}
 
           {/* Color Palette (7 preset colors) */}
-          {stickyStylePanel === 'color' && <div className="flex shrink-0 items-center gap-1">
-            {STICKY_NOTE_COLORS.map(({ name, value }) => (
+          {stickyStylePanel === 'color' && <div className="grid w-full grid-cols-4 justify-items-center gap-1">
+            {STICKY_PALETTE_COLORS.map(({ name, value }) => (
               <button
                 key={`${name}-${value}`}
                 type="button"
                 aria-label={`${name} sticky note`}
                 title={name}
-                className={`h-[18px] w-[18px] shrink-0 rounded-full border border-black/15 transition-transform hover:scale-110 cursor-pointer ${stickyColor.toLowerCase() === value.toLowerCase() ? 'ring-2 ring-panvas-accent-blue ring-offset-1 ring-offset-panvas-bg-primary' : ''}`}
-                style={{ backgroundColor: value }}
+                className="grid h-7 w-7 shrink-0 place-items-center rounded-md cursor-pointer focus-ring"
                 onPointerDown={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
                 }}
                 onClick={() => handleStickyUpdate({ color: value })}
-              />
+              ><span className={`h-[18px] w-[18px] rounded-full border border-black/15 ${stickyColor.toLowerCase() === value.toLowerCase() ? 'ring-2 ring-panvas-accent-blue ring-offset-1 ring-offset-panvas-bg-primary' : ''}`} style={{ backgroundColor: value }} /></button>
             ))}
 
             {/* Custom Hex Color Picker */}
             <label
               title="Custom color"
-              className="relative flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full border border-black/15 cursor-pointer hover:scale-110 transition-transform overflow-hidden"
-              style={{ background: 'conic-gradient(red, yellow, lime, aqua, blue, magenta, red)' }}
+              className="relative grid h-7 w-7 shrink-0 place-items-center rounded-md cursor-pointer overflow-hidden"
             >
+              <span className="h-[18px] w-[18px] rounded-full border border-black/15" style={{ background: 'conic-gradient(red, yellow, lime, aqua, blue, magenta, red)' }} />
               <input
                 type="color"
                 aria-label="Custom color picker"
@@ -758,10 +781,8 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
             </label>
           </div>}
 
-          {stickyStylePanel === 'color' && <div className="h-3.5 w-px bg-panvas-border-subtle" />}
-
           {/* Opacity Slider */}
-          {stickyStylePanel === 'color' && <div className="flex items-center gap-1 pl-0.5">
+          {stickyStylePanel === 'color' && <div className="flex flex-1 items-center gap-1">
             <input
               type="range"
               min="10"
@@ -783,15 +804,15 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
                 window.addEventListener('pointerup', finish);
                 window.addEventListener('pointercancel', finish);
               }}
-              className="w-14 h-1 accent-panvas-accent-blue cursor-pointer"
+              className="w-20 h-1 accent-panvas-accent-blue cursor-pointer"
             />
-            <span className="text-2xs text-panvas-text-tertiary tabular-nums w-6 text-right select-none">
+            <span className="text-2xs text-panvas-text-tertiary tabular-nums w-8 text-right select-none">
               {Math.round(stickyOpacity * 100)}%
             </span>
           </div>}
           <button
             type="button"
-            className="ml-auto flex h-6 w-6 items-center justify-center rounded-md text-panvas-text-tertiary hover:bg-panvas-bg-hover hover:text-panvas-text-primary focus-ring"
+            className="ml-auto flex h-7 w-7 items-center justify-center rounded-md text-panvas-text-tertiary hover:bg-panvas-bg-hover hover:text-panvas-text-primary focus-ring"
             aria-label="Close sticky note style"
             title="Close"
             onPointerDown={event => { event.preventDefault(); event.stopPropagation(); }}
@@ -800,12 +821,13 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
             <X size={13} />
           </button>
         </div>
+        </OverlayManager>
       )}
 
       {/* Editor Content */}
       <div
         ref={containerRef}
-        className="relative min-w-0"
+        className="panvas-document-text relative min-w-0"
         style={pdfPlacement ? {
           position: 'absolute',
           left: 0,
@@ -830,36 +852,44 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
             <div
               className="pointer-events-auto absolute -top-1.5 -left-1.5 h-3 w-3 rounded-xs border-1.5 border-panvas-accent-blue bg-panvas-bg-elevated shadow-sm transition-transform hover:scale-125 z-30 cursor-nwse-resize"
               onPointerDown={(e) => handleResizeStart('tl', e)}
+              data-text-resize-handle="tl"
             />
             <div
               className="pointer-events-auto absolute -top-1.5 -right-1.5 h-3 w-3 rounded-xs border-1.5 border-panvas-accent-blue bg-panvas-bg-elevated shadow-sm transition-transform hover:scale-125 z-30 cursor-nesw-resize"
               onPointerDown={(e) => handleResizeStart('tr', e)}
+              data-text-resize-handle="tr"
             />
             <div
               className="pointer-events-auto absolute -bottom-1.5 -left-1.5 h-3 w-3 rounded-xs border-1.5 border-panvas-accent-blue bg-panvas-bg-elevated shadow-sm transition-transform hover:scale-125 z-30 cursor-nesw-resize"
               onPointerDown={(e) => handleResizeStart('bl', e)}
+              data-text-resize-handle="bl"
             />
             <div
               className="pointer-events-auto absolute -bottom-1.5 -right-1.5 h-3 w-3 rounded-xs border-1.5 border-panvas-accent-blue bg-panvas-bg-elevated shadow-sm transition-transform hover:scale-125 z-30 cursor-nwse-resize"
               onPointerDown={(e) => handleResizeStart('br', e)}
+              data-text-resize-handle="br"
             />
 
             {/* Edge Handles */}
             <div
               className="pointer-events-auto absolute -top-1.5 left-1/2 h-3 w-3 -translate-x-1/2 rounded-xs border-1.5 border-panvas-accent-blue bg-panvas-bg-elevated shadow-sm transition-transform hover:scale-125 z-30 cursor-ns-resize"
               onPointerDown={(e) => handleResizeStart('tc', e)}
+              data-text-resize-handle="tc"
             />
             <div
               className="pointer-events-auto absolute -bottom-1.5 left-1/2 h-3 w-3 -translate-x-1/2 rounded-xs border-1.5 border-panvas-accent-blue bg-panvas-bg-elevated shadow-sm transition-transform hover:scale-125 z-30 cursor-ns-resize"
               onPointerDown={(e) => handleResizeStart('bc', e)}
+              data-text-resize-handle="bc"
             />
             <div
               className="pointer-events-auto absolute top-1/2 -left-1.5 h-3 w-3 -translate-y-1/2 rounded-xs border-1.5 border-panvas-accent-blue bg-panvas-bg-elevated shadow-sm transition-transform hover:scale-125 z-30 cursor-ew-resize"
               onPointerDown={(e) => handleResizeStart('ml', e)}
+              data-text-resize-handle="ml"
             />
             <div
               className="pointer-events-auto absolute top-1/2 -right-1.5 h-3 w-3 -translate-y-1/2 rounded-xs border-1.5 border-panvas-accent-blue bg-panvas-bg-elevated shadow-sm transition-transform hover:scale-125 z-30 cursor-ew-resize"
               onPointerDown={(e) => handleResizeStart('mr', e)}
+              data-text-resize-handle="mr"
             />
           </>
         )}

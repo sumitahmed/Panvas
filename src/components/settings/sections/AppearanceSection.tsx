@@ -3,7 +3,7 @@ import { Moon, Sun, PenTool } from 'lucide-react';
 import { useUIStore } from '@/stores/uiStore';
 
 export function AppearanceSection() {
-  const { theme, setTheme } = useUIStore();
+  const { theme, setTheme, fullDarkView, setFullDarkView } = useUIStore();
 
   return (
     <div className="flex flex-col gap-8 animate-in fade-in duration-300">
@@ -45,6 +45,10 @@ export function AppearanceSection() {
           <p className="text-xs text-panvas-text-tertiary">
             Ink pairs warm-gray tablet surfaces with softer colors. Paper color stays independent, and switching to Light or Dark restores full color.
           </p>
+          {theme === 'dark' && <label className="flex items-center justify-between gap-4 rounded-xl border border-panvas-border-subtle p-3">
+            <span><span className="block text-sm font-medium">Full Dark View</span><span className="block text-xs text-panvas-text-secondary">Darken notebook pages and PDFs for reading.</span></span>
+            <input type="checkbox" role="switch" aria-label="Full Dark View" checked={fullDarkView} onChange={event => setFullDarkView(event.target.checked)} className="h-4 w-4 accent-panvas-accent-blue" />
+          </label>}
         </div>
       </div>
     </div>

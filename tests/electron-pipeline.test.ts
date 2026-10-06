@@ -80,8 +80,10 @@ async function createWorkspaceNotebookSection(page: import('playwright').Page): 
   await domClick(page.getByRole('button', { name: 'Create', exact: true }));
   await page.locator('#create-dialog-input').waitFor({ state: 'hidden', timeout: 8000 });
   await page.waitForTimeout(1200);
-  // Make the new workspace active (creation does not auto-select it).
-  await domClick(sidebar.getByRole('button', { name: new RegExp(WORKSPACE_NAME.slice(0, 20)) }).first());
+  // Verify the actual parent before creating entities in the test workspace.
+  const workspace = JSON.parse(await readFile(path.join(PANVAS_BASE, WORKSPACE_NAME, '.panvas', 'workspace.json'), 'utf8'));
+  await domClick(sidebar.locator('div[role="button"]').filter({ hasText: WORKSPACE_NAME }).first());
+  await page.waitForFunction(id => localStorage.getItem('panvas.activeWorkspaceId') === id, workspace.id);
   await page.waitForTimeout(900);
 
   await domClick(newItem);
@@ -92,7 +94,10 @@ async function createWorkspaceNotebookSection(page: import('playwright').Page): 
   await page.waitForTimeout(900);
 
   await ensureTreeRowVisible(page, /Pipeline Notebook/);
-  await domClick(sidebar.getByRole('button', { name: /Pipeline Notebook/ }).first());
+  const afterNotebook = JSON.parse(await readFile(path.join(PANVAS_BASE, WORKSPACE_NAME, '.panvas', 'workspace.json'), 'utf8'));
+  const notebook = afterNotebook.notebooks.find((item: any) => item.name === 'Pipeline Notebook');
+  assert.ok(notebook, 'notebook was persisted in the isolated workspace');
+  await domClick(sidebar.locator(`[data-tree-id="${notebook.id}"]`));
   await page.waitForTimeout(800);
 
   await domClick(newItem);
@@ -102,8 +107,15 @@ async function createWorkspaceNotebookSection(page: import('playwright').Page): 
   await page.locator('#create-dialog-input').waitFor({ state: 'hidden', timeout: 8000 });
   await page.waitForTimeout(900);
 
-  await ensureTreeRowVisible(page, /Pipeline Section/);
-  const section = sidebar.getByRole('button', { name: /Pipeline Section/ }).first();
+  const afterSection = JSON.parse(await readFile(path.join(PANVAS_BASE, WORKSPACE_NAME, '.panvas', 'workspace.json'), 'utf8'));
+  const sectionRecord = afterSection.notebookSections.find((item: any) => item.notebookId === notebook.id && item.name === 'Pipeline Section');
+  assert.ok(sectionRecord, 'section was persisted under the test notebook');
+  // Creating a child reloads persisted expansion state. Expand its notebook,
+  // rather than toggling the unrelated workspace and hiding the entire tree.
+  const expandNotebook = sidebar.getByRole('button', { name: 'Expand Pipeline Notebook', exact: true });
+  if (await expandNotebook.count()) await domClick(expandNotebook);
+  const section = sidebar.locator(`[data-tree-id="${sectionRecord.id}"]`);
+  await section.waitFor({ state: 'visible', timeout: 12000 });
   await domClick(section);
   await page.waitForTimeout(700);
 }
@@ -145,8 +157,12 @@ async function assertPdfRenders(page: import('playwright').Page, label: string):
     return { w: c.width, h: c.height };
   });
   assert.ok(canvasInfo.w > 50 && canvasInfo.h > 50, `[${label}] pdf.js canvas has no rendered content`);
-  // The bottom navigation reports real page counts for our 3-page fixture.
-  const navText = await page.evaluate(() => document.body.innerText);
+  // PDF navigation is deliberately hidden while Pen is selected. Exercise
+  // the normal Select shortcut before checking our three-page fixture.
+  await page.keyboard.press('v');
+  const navigation = page.getByRole('group', { name: 'Page navigation', exact: true });
+  await navigation.waitFor({ state: 'visible', timeout: 5000 });
+  const navText = await navigation.innerText();
   assert.match(navText, /1\s*\/\s*3/, `[${label}] page indicator '1 / 3' not found`);
 }
 

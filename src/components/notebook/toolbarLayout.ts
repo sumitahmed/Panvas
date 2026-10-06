@@ -5,15 +5,15 @@
 // so the breakpoints can be unit-tested (tests/toolbar-layout.test.ts).
 // Contract source: docs/08_IMPLEMENTATION_ROADMAP.md section 7.
 //
-// The writing sequence ends at Select. The compact Shapes-family group is
-// promoted beside it when measured width permits; remaining utilities use More.
+// Direct writing ends with Select and Hand. Pencil and utilities use More.
 
 export type ToolbarGroupId =
   | 'history'    // undo / redo
   | 'handwriting' // real-time handwriting to editable text
-  | 'primary'    // pen, pencil, highlighter, marker, eraser, text
+  | 'primary'    // pen, highlighter, marker, eraser, text
   | 'select'
   | 'hand'
+  | 'pencil'
   | 'image'
   | 'shapes'     // rectangle, ellipse, arrow, line
   | 'ruler'
@@ -31,6 +31,7 @@ export const TOOLBAR_GROUP_ORDER: readonly ToolbarGroupId[] = [
   'primary',
   'select',
   'hand',
+  'pencil',
   'image',
   'shapes',
   'ruler',
@@ -45,9 +46,10 @@ export const TOOLBAR_GROUP_ORDER: readonly ToolbarGroupId[] = [
 export const TOOLBAR_GROUP_WIDTHS: Record<ToolbarGroupId | CompactGroupId, number> = {
   history: 98,   // 2 x 40px buttons + gap + separator
   handwriting: 54,
-  primary: 276,  // 6 x 40px buttons + gaps + separator
+  primary: 232,  // 5 x 40px buttons + gaps + separator
   select: 54,
   hand: 54,
+  pencil: 54,
   image: 98,   // image + sticky note buttons + separator
   shapes: 54,    // one Shapes-family button + separator
   ruler: 54,
@@ -108,90 +110,36 @@ export function recordRecentColor(
  * while there is enough room for the group itself.
  */
 export function resolveFullscreenToolbarLayout(containerWidth: number | null, activeToolGroupId?: ToolbarGroupId): ToolbarLayout {
-  const secondary = TOOLBAR_GROUP_ORDER.filter(
-    group => group !== 'history' && group !== 'handwriting' && group !== 'primary' && group !== 'select',
-  );
-
-  // Before measurement, render the complete tool-only contract. The parent
-  // constrains the bar, and the measured pass below will move controls into
-  // More if the actual width is smaller.
-  if (containerWidth === null) {
-    return {
-      visible: ['history', 'handwriting', 'primary', 'select'],
-      overflow: secondary,
-      compact: false,
-    };
+  const full: ToolbarGroupId[] = ['history', 'handwriting', 'primary', 'select', 'hand'];
+  const finish = (visible: (ToolbarGroupId | CompactGroupId)[], compact: boolean): ToolbarLayout => ({
+    visible,
+    overflow: TOOLBAR_GROUP_ORDER.filter(group => !visible.includes(group)
+      && !(visible.includes('active-tool') && group === activeToolGroupId && group !== 'primary')),
+    compact,
+  });
+  if (containerWidth === null) return finish(full, false);
+  const canFit = (groups: readonly ToolbarGroupId[]) => CHROME_WIDTH + OVERFLOW_BUTTON_WIDTH
+    + groups.reduce((sum, group) => sum + TOOLBAR_GROUP_WIDTHS[group], 0) <= containerWidth;
+  for (const candidate of [full, full.slice(0, 4), full.slice(0, 3), full.slice(1), full.slice(1, 4), full.slice(1, 3)]) {
+    if (canFit(candidate)) return finish(candidate, containerWidth < TOOLBAR_COMPACT_BREAKPOINT);
   }
-
-  // Fullscreen always has a More affordance for secondary tools, so reserve
-  // its width while deciding what can remain inline. The order below is
-  // intentionally priority-driven rather than using the normal compact
-  // active-tool fallback.
-  const chromeWithMore = CHROME_WIDTH + OVERFLOW_BUTTON_WIDTH;
-  const canFit = (groups: readonly (ToolbarGroupId | CompactGroupId)[]) =>
-    chromeWithMore + groups.reduce((sum, group) => sum + TOOLBAR_GROUP_WIDTHS[group], 0) <= containerWidth;
-  const withoutActiveTool = (groups: readonly ToolbarGroupId[]) => activeToolGroupId
-    ? groups.filter(group => group !== activeToolGroupId)
-    : [...groups];
-
-  if (canFit(['history', 'handwriting', 'primary', 'select'])) {
-    return { visible: ['history', 'handwriting', 'primary', 'select'], overflow: secondary, compact: false };
-  }
-  if (canFit(['history', 'handwriting', 'primary'])) {
-    return {
-      visible: ['history', 'handwriting', 'primary'],
-      overflow: withoutActiveTool(['select', ...secondary]),
-      compact: containerWidth < TOOLBAR_COMPACT_BREAKPOINT,
-    };
-  }
-  if (canFit(['handwriting', 'primary', 'select'])) {
-    return {
-      visible: ['handwriting', 'primary', 'select'],
-      overflow: withoutActiveTool(['history', ...secondary]),
-      compact: containerWidth < TOOLBAR_COMPACT_BREAKPOINT,
-    };
-  }
-  if (canFit(['handwriting', 'primary'])) {
-    return {
-      visible: ['handwriting', 'primary'],
-      overflow: withoutActiveTool(['history', 'select', ...secondary]),
-      compact: containerWidth < TOOLBAR_COMPACT_BREAKPOINT,
-    };
-  }
-
-  // At an extremely narrow browser width, keep the existing active-tool
-  // fallback as a last resort. Electron's supported window sizes remain above
-  // this tier, so normal fullscreen usage still exposes all writing tools.
-  return {
-    visible: ['active-tool'],
-    overflow: withoutActiveTool(['history', 'primary', 'select', ...secondary]),
-    compact: true,
-  };
+  return finish(['active-tool'], true);
 }
 
 /**
  * Resolve the deterministic toolbar layout for the width actually available to
  * the toolbar container.
  *
- * Bracket contract (section 7 of the implementation roadmap):
- * - >= 1000px full:        every group directly visible.
- * - 720–999px laptop:      history, primary, select visible; hand, image,
- *                          shapes, ruler, format live in the overflow menu.
- * - 560–719px small:       same visible set (primary still fits whole, so
- *                          pencil stays one click away).
- * - < 560px   minimum:     history, a single active-tool control, select, and
- *                          the overflow menu; nothing else renders inline.
- *
- * Independently of the bracket, a measured fit check drops trailing groups so
- * the rendered bar never exceeds the container width. History is always
- * visible; at minimum the active-tool control is too.
+ * Wide bars show history, H2T, the five writing controls, Select and Hand.
+ * Pencil and utilities remain in More. Measured fit moves trailing groups
+ * into More; compact bars retain one active tool and reachable alternatives.
  */
 export function resolveToolbarLayout(containerWidth: number | null, activeToolGroupId?: ToolbarGroupId): ToolbarLayout {
-  const primaryEnd = TOOLBAR_GROUP_ORDER.indexOf('select');
+  const primaryEnd = TOOLBAR_GROUP_ORDER.indexOf('hand');
   if (containerWidth === null) {
     return {
-      visible: [...TOOLBAR_GROUP_ORDER.slice(0, primaryEnd + 1), 'shapes'],
-      overflow: TOOLBAR_GROUP_ORDER.slice(primaryEnd + 1).filter(group => group !== 'shapes'),
+      visible: TOOLBAR_GROUP_ORDER.slice(0, primaryEnd + 1),
+      overflow: TOOLBAR_GROUP_ORDER.slice(primaryEnd + 1),
       compact: false,
     };
   }
@@ -199,7 +147,7 @@ export function resolveToolbarLayout(containerWidth: number | null, activeToolGr
   const compact = containerWidth < TOOLBAR_COMPACT_BREAKPOINT;
 
   // Stable primary ceiling: secondary controls never displace the requested
-  // Handwriting-to-Text -> writing tools -> Select -> More sequence.
+  // Handwriting-to-Text -> writing tools -> Select -> Hand -> More sequence.
   const ceiling = primaryEnd;
 
   // Measured-fit ceiling: last group index that fits in the container.
@@ -230,28 +178,27 @@ export function resolveToolbarLayout(containerWidth: number | null, activeToolGr
       if (containerWidth >= handwritingAndActive) {
         return {
           visible: ['handwriting', 'active-tool'],
-          overflow: TOOLBAR_GROUP_ORDER.filter(group => group !== 'handwriting' && group !== activeToolGroupId),
+          overflow: TOOLBAR_GROUP_ORDER.filter(group => group !== 'handwriting' && (group !== activeToolGroupId || group === 'primary')),
           compact: true,
         };
       }
       return {
         visible: ['active-tool'],
-        overflow: TOOLBAR_GROUP_ORDER.filter(group => group !== activeToolGroupId),
+        overflow: TOOLBAR_GROUP_ORDER.filter(group => (group !== activeToolGroupId || group === 'primary')),
         compact: true,
       };
     }
     const withSelect = base + TOOLBAR_GROUP_WIDTHS.select <= containerWidth;
     const visible: (ToolbarGroupId | CompactGroupId)[] = ['history', 'handwriting', 'active-tool'];
     if (withSelect && activeToolGroupId !== 'select') visible.push('select');
-    const overflow = TOOLBAR_GROUP_ORDER.filter(group => !visible.includes(group) && group !== activeToolGroupId);
+    if (base + TOOLBAR_GROUP_WIDTHS.select + TOOLBAR_GROUP_WIDTHS.hand <= containerWidth && activeToolGroupId !== 'hand') visible.push('hand');
+    const overflow = TOOLBAR_GROUP_ORDER.filter(group => !visible.includes(group) && (group !== activeToolGroupId || group === 'primary'));
     return { visible, overflow, compact: true };
   }
 
   const lastVisible = Math.max(0, Math.min(ceiling, fit));
   const visible: (ToolbarGroupId | CompactGroupId)[] = [...TOOLBAR_GROUP_ORDER.slice(0, lastVisible + 1)];
-  const usedByPrimary = CHROME_WIDTH + OVERFLOW_BUTTON_WIDTH
-    + visible.reduce((sum, group) => sum + TOOLBAR_GROUP_WIDTHS[group], 0);
-  if (containerWidth >= TOOLBAR_MEDIUM_BREAKPOINT && usedByPrimary + TOOLBAR_GROUP_WIDTHS.shapes <= containerWidth) visible.push('shapes');
+
   return {
     visible,
     overflow: TOOLBAR_GROUP_ORDER.filter(group => !visible.includes(group)),

@@ -449,10 +449,12 @@ test('21. Images/media remain unchanged between White and Ink', async () => {
 
 test('22. Page/grid/template colors are not unintentionally modified by the Ink UI treatment', async () => {
   const pageRenderer = await read('../src/components/notebook/PageRenderer.tsx');
-  // Verify explicit contract in PageRenderer:
-  // "Paper and template ink are persisted document values. Application theme only styles Panvas chrome and must never rewrite either value."
-  assert.match(pageRenderer, /const effectiveBgColor = renderModel\.paperColor;/);
-  assert.match(pageRenderer, /const effectiveLineColor = renderModel\.lineColor;/);
+  const fullDarkHook = await read('../src/hooks/useFullDarkView.ts');
+  // Only the separate Dark viewing preference can adapt the displayed colors.
+  // Ink and Light still use the original persisted paper/template values.
+  assert.match(fullDarkHook, /state\.theme === 'dark' && state\.fullDarkView && !state\.isPrinting/);
+  assert.match(pageRenderer, /const effectiveBgColor = fullDarkView \? fullDarkSurfaceColor\(renderModel\.paperColor\) : renderModel\.paperColor;/);
+  assert.match(pageRenderer, /const effectiveLineColor = fullDarkView \? fullDarkRuleLineColor\(renderModel\.lineColor\) : renderModel\.lineColor;/);
   assert.match(pageRenderer, /backgroundColor: effectiveBgColor/);
 });
 

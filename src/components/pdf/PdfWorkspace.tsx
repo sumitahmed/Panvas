@@ -1,7 +1,9 @@
-import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from 'react';
 import { Bookmark, BookOpen, CalendarClock, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Download, FileText, Hand, Maximize2, MessageCircle, Minus, PanelLeftClose, PanelLeftOpen, PanelRight, Plus, Redo2, Undo2 } from 'lucide-react';
 import { PdfThumbnailSidebar } from './PdfThumbnailSidebar';
 import { PdfPageRenderer } from './PdfPageRenderer';
+import { usePdfViewportZoom } from './usePdfViewportZoom';
+import { resolveDocumentToolCursor } from '@/components/notebook/documentToolCursor';
 import { usePdfDocument } from '@/hooks/usePdfDocument';
 import type { NotebookPage, PdfPageState, PdfPageRotation } from '@/types/notebook';
 import { NotebookEngine } from '@/components/notebook/engine/NotebookEngine';
@@ -30,6 +32,8 @@ import { NoteSpaceControl } from '@/components/notebook/NoteSpaceControl';
 import { resolveActivePdfPage } from './pdfNavigation';
 import { attachTwoFingerViewportGesture } from '@/components/notebook/engine/touchViewportGesture';
 import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
+import { useFullDarkView } from '@/hooks/useFullDarkView';
+import { fullDarkSurfaceColor } from '@/lib/fullDarkView';
 
 const iconButtonClass = 'flex h-8 w-8 items-center justify-center rounded-md text-panvas-text-secondary transition-colors hover:bg-panvas-bg-hover hover:text-panvas-text-primary active:bg-panvas-bg-active focus-ring';
 interface PdfPageDescriptor {
@@ -37,9 +41,11 @@ interface PdfPageDescriptor {
   noteSpace: PageNoteSpace;
   drawing: DrawingData;
 }
+const settledPdfScale = (current: number, next: number) => Math.abs(current - next) < 1e-7 ? current : next;
 
 export function PdfWorkspace({ page }: { page?: NotebookPage }) {
   const isPhone = useIsMobileViewport();
+  const fullDarkView = useFullDarkView();
   const [mobileControlsOpen, setMobileControlsOpen] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   
@@ -53,20 +59,30 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
 
   // Engine setup
   const notebookEngine = useMemo(() => new NotebookEngine(), []);
+  useLayoutEffect(() => { notebookEngine.drawing.setFullDarkView(fullDarkView); }, [notebookEngine, fullDarkView]);
+  const [rasterScale, setRasterScale] = useState(1);
+  const annotationGestureActive = useRef(false);
+  const rasterPending = useRef(false);
   const [viewport, setViewport] = useState<Readonly<ViewportState>>(() => notebookEngine.viewport.getState());
   // Read the engine directly instead of mirroring it — see useEngineState.ts.
   const toolState = useToolState(notebookEngine);
   const [textObjects, setTextObjects] = useState<TextObject[]>([]);
+  const [loadedAnnotationId, setLoadedAnnotationId] = useState<string | null>(null);
+  const activeAnnotationId = page ? pdfAnnotationStorageId(page.id, currentPage) : null;
+  const activeSceneReady = activeAnnotationId !== null && loadedAnnotationId === activeAnnotationId;
   const [activeEditor, setActiveEditor] = useState<Editor | null>(null);
   const [noteSpace, setNoteSpace] = useState<PageNoteSpace>(() => resolvePageNoteSpace({}));
   const [sourcePaperDimensions, setSourcePaperDimensions] = useState({ width: 794, height: 1123 });
   const [dimensionsSourceId, setDimensionsSourceId] = useState<string | undefined>();
+  const [pageDescriptors, setPageDescriptors] = useState<Record<number, PdfPageDescriptor>>({});
   const [isExporting, setIsExporting] = useState(false);
   const userId = useAuthStore(state => state.user?.id ?? null);
   const pdfPageState = useMemo(() => normalizePdfPageState(page?.pdfPageState, numPages), [numPages, page?.pdfPageState]);
   const currentRotation = pdfPageState.rotations[currentPage] ?? 0;
   const currentOrderIndex = Math.max(0, pdfPageState.pageOrder.indexOf(currentPage));
-  const primaryGeometry = useMemo(() => pdfSurroundingGeometry(sourcePaperDimensions, currentRotation, noteSpace), [sourcePaperDimensions, currentRotation, noteSpace]);
+  const currentSource = pageDescriptors[currentPage]?.source ?? sourcePaperDimensions;
+  const currentNoteSpace = activeSceneReady ? noteSpace : pageDescriptors[currentPage]?.noteSpace ?? noteSpace;
+  const primaryGeometry = useMemo(() => pdfSurroundingGeometry(currentSource, currentRotation, currentNoteSpace), [currentSource, currentRotation, currentNoteSpace]);
   const paperDimensions = primaryGeometry.visual;
   useEffect(() => notebookEngine.onPropertiesChange(props => {
     const nextNoteSpace = resolvePageNoteSpace(props);
@@ -88,14 +104,15 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const documentScrollRef = useRef<HTMLDivElement>(null);
   const pageElementRefs = useRef(new Map<number, HTMLDivElement>());
+  const { setZoom: setZoomStable, getScale: getZoomScale, isZooming, captureTouchAnchor } = usePdfViewportZoom(notebookEngine.viewport, documentScrollRef, pageElementRefs, currentPage);
   const commandedPageRef = useRef<number | null>(null);
   const scrollFrameRef = useRef<number | null>(null);
   const sidebarRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const [sidebarWidth, setSidebarWidth] = useState(0);
+  const positionedDocumentRef = useRef<string | null>(null);
   const [isBottomNavCollapsed, setIsBottomNavCollapsed] = useState(false);
-  const [pageDescriptors, setPageDescriptors] = useState<Record<number, PdfPageDescriptor>>({});
   const geometryReady = numPages > 0 && Object.keys(pageDescriptors).length === numPages;
   
 
@@ -120,10 +137,13 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
     return attachTwoFingerViewportGesture({
       target: scroller,
       getScale: () => notebookEngine.viewport.getState().scale,
-      setScale: scale => notebookEngine.viewport.setZoom(scale),
+      setScale: scale => setZoomStable(scale),
+      captureContentAnchor: captureTouchAnchor,
       cancelActivePointerInteraction: () => notebookEngine.input.cancelActivePointerInteraction(),
+      navigationGestures: notebookEngine.input.navigationGestures,
+      subscribeCancellation: cancel => notebookEngine.tools.subscribe(cancel),
     });
-  }, [notebookEngine, isLoading, numPages]);
+  }, [notebookEngine, isLoading, numPages, setZoomStable, captureTouchAnchor]);
 
   // PdfWorkspace is reused when moving directly between PDF pages. A page number
   // from the previous document is not meaningful for the newly selected document.
@@ -184,23 +204,6 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
     });
   }, [numPages]);
 
-  const setZoomStable = useCallback((nextScale: number) => {
-    const scroller = documentScrollRef.current;
-    const element = pageElementRefs.current.get(currentPage);
-    if (!scroller || !element) {
-      notebookEngine.viewport.setZoom(nextScale);
-      return;
-    }
-    const scrollerBounds = scroller.getBoundingClientRect();
-    const before = element.getBoundingClientRect();
-    const anchorY = scrollerBounds.top + scrollerBounds.height / 2;
-    const fractionY = before.height > 0 ? (anchorY - before.top) / before.height : 0.5;
-    notebookEngine.viewport.setZoom(nextScale);
-    requestAnimationFrame(() => {
-      const after = element.getBoundingClientRect();
-      scroller.scrollTop += after.top + fractionY * after.height - anchorY;
-    });
-  }, [currentPage, notebookEngine]);
 
   useEffect(() => {
     if (!page?.id || numPages < 1) return;
@@ -219,7 +222,7 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
   }, [geometryReady, navigateToPage]);
 
   useEffect(() => {
-    notebookEngine.viewport.setRenderTransform({ pan: false, scale: true });
+    notebookEngine.viewport.setRenderTransform({ pan: false, scale: false });
     return () => notebookEngine.viewport.setRenderTransform({ pan: true, scale: false });
   }, [notebookEngine]);
 
@@ -292,7 +295,21 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
 
   useEffect(() => {
     fittedDocumentRef.current = null;
+    positionedDocumentRef.current = null;
   }, [documentSessionId]);
+
+  useLayoutEffect(() => {
+    const scroller = documentScrollRef.current;
+    const first = pageElementRefs.current.get(pdfPageState.pageOrder[0]);
+    if (!scroller || !first || !geometryReady || !containerSize.width || !fittedDocumentRef.current || positionedDocumentRef.current === documentSessionId) return;
+    // Writable scroll room around a fitted page keeps an off-center zoom anchor
+    // attainable, rather than clamping it away until horizontal overflow starts.
+    const bounds = scroller.getBoundingClientRect();
+    const pageBounds = first.getBoundingClientRect();
+    scroller.scrollLeft += pageBounds.left + pageBounds.width / 2 - bounds.left - bounds.width / 2;
+    scroller.scrollTop = containerSize.height / 2;
+    positionedDocumentRef.current = documentSessionId;
+  }, [containerSize, documentSessionId, geometryReady, pdfPageState.pageOrder, viewport.scale]);
 
   useEffect(() => {
     const fitKey = isPhone ? `${documentSessionId}:${containerSize.width}` : documentSessionId;
@@ -313,9 +330,10 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
   useEffect(() => {
     const scroller = documentScrollRef.current;
     if (!scroller) return;
+    let scrollTimer: ReturnType<typeof setTimeout> | null = null;
     const resolveVisiblePage = () => {
       scrollFrameRef.current = null;
-      if (commandedPageRef.current) return;
+      if (commandedPageRef.current || notebookEngine.input.navigationGestures.active) return;
       const top = scroller.scrollTop;
       const bottom = top + scroller.clientHeight;
       const scrollerBounds = scroller.getBoundingClientRect();
@@ -330,33 +348,32 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
       if (resolved && resolved !== currentPage) setCurrentPage(resolved);
     };
     const handleScroll = () => {
+      if (notebookEngine.input.navigationGestures.active) return;
+      if (scrollTimer !== null) clearTimeout(scrollTimer);
+      if (isZooming()) {
+        scrollTimer = setTimeout(handleScroll, 180);
+        return;
+      }
       if (scrollFrameRef.current === null) scrollFrameRef.current = requestAnimationFrame(resolveVisiblePage);
     };
     const handleWheel = (event: WheelEvent) => {
       if (!event.ctrlKey && !event.metaKey) return;
       event.preventDefault();
-      const oldScale = notebookEngine.viewport.getState().scale;
-      const nextScale = Math.max(0.25, Math.min(4, oldScale * Math.exp(-event.deltaY * 0.0015)));
-      const bounds = scroller.getBoundingClientRect();
-      const anchorX = event.clientX - bounds.left;
-      const anchorY = event.clientY - bounds.top;
-      const documentX = (scroller.scrollLeft + anchorX) / oldScale;
-      const documentY = (scroller.scrollTop + anchorY) / oldScale;
-      notebookEngine.viewport.setZoom(nextScale);
-      requestAnimationFrame(() => {
-        scroller.scrollLeft = documentX * nextScale - anchorX;
-        scroller.scrollTop = documentY * nextScale - anchorY;
-      });
+      const nextScale = getZoomScale() * Math.exp(-event.deltaY * 0.0015);
+      setZoomStable(nextScale, { x: event.clientX, y: event.clientY });
     };
     scroller.addEventListener('scroll', handleScroll, { passive: true });
     scroller.addEventListener('wheel', handleWheel, { passive: false });
+    const unsubscribeIdle = notebookEngine.input.navigationGestures.onIdle(handleScroll);
     handleScroll();
     return () => {
       scroller.removeEventListener('scroll', handleScroll);
       scroller.removeEventListener('wheel', handleWheel);
+      unsubscribeIdle();
+      if (scrollTimer !== null) clearTimeout(scrollTimer);
       if (scrollFrameRef.current !== null) cancelAnimationFrame(scrollFrameRef.current);
     };
-  }, [currentPage, notebookEngine, pdfPageState.pageOrder, viewport.scale, pageDescriptors]);
+  }, [currentPage, notebookEngine, pdfPageState.pageOrder, getZoomScale, setZoomStable, isZooming, geometryReady]);
 
 
 
@@ -480,29 +497,52 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
       if (cancelled) return;
       notebookEngine.setDrawingData(drawingData || createEmptyDrawingData(), pdfPageId);
       setTextObjects([...notebookEngine.texts.getTexts()]);
+      setLoadedAnnotationId(pdfPageId);
     }
     void loadPageData();
     return () => { cancelled = true; };
   }, [workspace?.id, notebook?.id, page?.id, currentPage, notebookEngine]);
 
+  // Input stays attached while the document's DOM frame zooms. Raster detail
+  // catches up after navigation settles, without losing pointer capture.
   useEffect(() => {
-    if (!canvasRef.current || !workspace || !notebook || !page) return;
-    
-    const cssWidth = paperDimensions.width * viewport.scale;
-    const cssHeight = paperDimensions.height * viewport.scale;
-    
-    // We only mount/setCanvas. If the scale changes, we rely on the component re-rendering
-    // and calling resize() rather than tearing down the whole input manager.
-    // Wait, the original code called notebookEngine.mount on scale changes, which clears the context.
-    // To prevent pointer capture loss on pinch-to-zoom, we only mount once.
-    // However, NotebookEngine.ts doesn't have a check if it's already mounted.
-    // Let's just resize it.
-    notebookEngine.mount(canvasRef.current, cssWidth, cssHeight);
+    const timer = setTimeout(() => {
+      rasterPending.current = true;
+      if (!annotationGestureActive.current) {
+        setRasterScale(current => settledPdfScale(current, viewport.scale));
+        rasterPending.current = false;
+      }
+    }, 180);
+    return () => clearTimeout(timer);
+  }, [viewport.scale]);
+  useEffect(() => notebookEngine.onDrawingGestureLifecycle(active => {
+    annotationGestureActive.current = active;
+    if (!active && rasterPending.current) {
+      setRasterScale(current => settledPdfScale(current, notebookEngine.viewport.getState().scale));
+      rasterPending.current = false;
+    }
+  }), [notebookEngine]);
 
+  const annotationConfiguration = useRef('');
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !activeSceneReady) return;
+    notebookEngine.drawing.setScaleMultiplier(rasterScale);
+    notebookEngine.mount(canvas, paperDimensions.width, paperDimensions.height);
+    annotationConfiguration.current = `${paperDimensions.width}:${paperDimensions.height}:${rasterScale}`;
     return () => {
-      notebookEngine.unmount();
+      annotationConfiguration.current = '';
+      if (notebookEngine.drawing.getCanvasElement() === canvas) notebookEngine.unmount();
     };
-  }, [notebookEngine, paperDimensions, viewport.scale, workspace, notebook, page, currentPage]);
+  }, [notebookEngine, currentPage, page?.id, geometryReady, isLoading, activeSceneReady]);
+  useLayoutEffect(() => {
+    if (!annotationConfiguration.current) return;
+    const next = `${paperDimensions.width}:${paperDimensions.height}:${rasterScale}`;
+    if (next === annotationConfiguration.current) return;
+    notebookEngine.drawing.setScaleMultiplier(rasterScale);
+    notebookEngine.resize(paperDimensions.width, paperDimensions.height);
+    annotationConfiguration.current = next;
+  }, [notebookEngine, paperDimensions.width, paperDimensions.height, rasterScale]);
 
   useEffect(() => {
     if (!workspace || !notebook || !page) return;
@@ -761,7 +801,7 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
           </div>
         )}
 
-        {!isPhone && workspaceViewMode !== 'present' && <div className="pointer-events-auto mt-2 flex items-start gap-1.5">
+        {!isPhone && workspaceViewMode !== 'present' && <div className="pointer-events-auto mt-2 flex self-start items-start gap-1.5">
           <NotebookPageUtilities engine={notebookEngine} workspaceId={workspace?.id} notebookId={notebook?.id} ownerId={page ? pdfAnnotationStorageId(page.id, currentPage) : undefined} editable={workspaceViewMode === 'edit'} onPageDataPersisted={handlePageAudioPersisted} onChange={handleLayersChange} compact={containerSize.width < 900} />
           <button
             type="button"
@@ -776,8 +816,8 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
         </div>}
       </div>
 
-      <div ref={documentScrollRef} className={isPhone ? 'relative min-h-0 flex-1 overflow-auto p-2' : 'absolute inset-0 overflow-auto px-8 pb-28 pt-28'} aria-label="PDF document pages">
-        <div className="mx-auto flex min-w-max flex-col items-center gap-8">
+      <div ref={documentScrollRef} data-panvas-scroll-viewport style={{ overflowAnchor: 'none' }} className={isPhone ? 'relative min-h-0 flex-1 overflow-auto p-2' : 'absolute inset-0 overflow-auto px-8 pb-28 pt-28'} aria-label="PDF document pages">
+        <div className="mx-auto flex min-w-max flex-col items-center gap-8" style={{ width: 'max-content', paddingInline: containerSize.width / 2, paddingBlock: containerSize.height / 2 }}>
           {!geometryReady && <div className="flex min-h-[40vh] items-center justify-center text-sm text-panvas-text-tertiary">Preparing stable page layout…</div>}
           {geometryReady && (!isPhone && paneLayout === 'two-page'
             ? pdfPageState.pageOrder.reduce<number[][]>((rows, sourcePage, index) => {
@@ -791,25 +831,30 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
                 const descriptor = pageDescriptors[sourcePage] ?? { source: { width: 794, height: 1123 }, noteSpace: resolvePageNoteSpace({}), drawing: createEmptyDrawingData() };
                 const rotation = pdfPageState.rotations[sourcePage] ?? 0;
                 const active = sourcePage === currentPage;
-                const geometry = pdfSurroundingGeometry(descriptor.source, rotation, active ? noteSpace : descriptor.noteSpace);
+                const geometry = pdfSurroundingGeometry(descriptor.source, rotation, active && activeSceneReady ? noteSpace : descriptor.noteSpace);
                 return <div
                   key={sourcePage}
                   ref={element => { if (element) pageElementRefs.current.set(sourcePage, element); else pageElementRefs.current.delete(sourcePage); }}
                   data-pdf-source-page={sourcePage}
                   onPointerDownCapture={() => { if (!active) navigateToPage(sourcePage); }}
                   className={`relative shrink-0 bg-white shadow-2xl ${active ? 'ring-2 ring-panvas-accent-blue/35' : ''}`}
-                  style={{ width: geometry.visual.width * viewport.scale, height: geometry.visual.height * viewport.scale }}
+                  style={{ width: geometry.visual.width * viewport.scale, height: geometry.visual.height * viewport.scale, backgroundColor: fullDarkView ? fullDarkSurfaceColor('#ffffff') : '#ffffff' }}
                 >
                   <LazyPdfPageContent active={active}>
                     <div className="absolute" style={{ left: geometry.pdf.x * viewport.scale, top: geometry.pdf.y * viewport.scale, width: geometry.pdf.width * viewport.scale, height: geometry.pdf.height * viewport.scale }}>
-                      <PdfPageRenderer pdfDocument={pdfDocument} pageNumber={sourcePage} scale={viewport.scale} rotation={rotation} />
+                      <div style={{ width: geometry.pdf.width * rasterScale, height: geometry.pdf.height * rasterScale, transform: `scale(${viewport.scale / rasterScale})`, transformOrigin: 'top left' }}>
+                        <PdfPageRenderer pdfDocument={pdfDocument} pageNumber={sourcePage} scale={rasterScale} rotation={rotation} />
+                      </div>
                     </div>
                     {active && <>
+                      <div className="absolute left-0 top-0" style={{ width: geometry.visual.width, height: geometry.visual.height, transform: `scale(${viewport.scale})`, transformOrigin: 'top left' }}>
                       <canvas
                         ref={canvasRef}
-                        className={`panvas-colored-content panvas-layer-canvas-decoration absolute inset-0 h-full w-full touch-none ${toolState.mode === 'hand' ? 'cursor-grab active:cursor-grabbing' : toolState.mode === 'text' ? 'cursor-text' : toolState.mode === 'select' ? 'cursor-default' : 'cursor-crosshair'}`}
+                        className={`panvas-colored-content panvas-layer-canvas-decoration absolute inset-0 h-full w-full touch-none ${toolState.mode === 'hand' ? 'cursor-grab active:cursor-grabbing' : toolState.mode === 'text' ? 'cursor-text' : toolState.mode === 'select' ? 'cursor-default' : ''}`}
+                        style={{ cursor: resolveDocumentToolCursor(toolState), visibility: activeSceneReady ? 'visible' : 'hidden' }}
                       />
-                      {textObjects.filter(object => notebookEngine.layers.isVisible(object.layerId)).map(obj => (
+                      </div>
+                      {activeSceneReady && textObjects.filter(object => notebookEngine.layers.isVisible(object.layerId)).map(obj => (
                         <FloatingTextEditor
                           key={obj.id}
                           object={obj}
@@ -822,7 +867,7 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
                         />
                       ))}
                     </>}
-                    {!active && <PdfStaticAnnotationLayer drawing={descriptor.drawing} geometry={geometry} rotation={rotation} scale={viewport.scale} />}
+                    {(!active || !activeSceneReady) && <PdfStaticAnnotationLayer drawing={descriptor.drawing} geometry={geometry} rotation={rotation} scale={viewport.scale} rasterScale={rasterScale} />}
                   </LazyPdfPageContent>
                   {geometry.noteSpace.top + geometry.noteSpace.right + geometry.noteSpace.bottom + geometry.noteSpace.left > 0 && <div className="pointer-events-none absolute border border-panvas-border-subtle" style={{ left: geometry.pdf.x * viewport.scale, top: geometry.pdf.y * viewport.scale, width: geometry.pdf.width * viewport.scale, height: geometry.pdf.height * viewport.scale }} />}
                 </div>;
@@ -838,41 +883,37 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
   );
 }
 
-function PdfStaticAnnotationLayer({ drawing, geometry, rotation, scale }: {
+function PdfStaticAnnotationLayer({ drawing, geometry, rotation, scale, rasterScale }: {
   drawing: DrawingData;
   geometry: ReturnType<typeof pdfSurroundingGeometry>;
   rotation: PdfPageRotation;
   scale: number;
+  rasterScale: number;
 }) {
   const engine = useMemo(() => new NotebookEngine(), []);
+  const fullDarkView = useFullDarkView();
+  useLayoutEffect(() => { engine.drawing.setFullDarkView(fullDarkView); }, [engine, fullDarkView]);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const textObjects = (drawing.objects ?? []).filter((object): object is TextObject => object.type === 'text');
   const visibleLayers = new Set((drawing.layers ?? []).filter(layer => layer.visible).map(layer => layer.id));
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    engine.viewport.setRenderTransform({ pan: false, scale: true });
-    engine.viewport.setZoom(scale);
-    engine.viewport.setPageCoordinateTransform(rotation, geometry.sheet.width, geometry.sheet.height, geometry.offset.x, geometry.offset.y);
-    engine.setDrawingData(drawing);
-    engine.mount(canvas, geometry.visual.width * scale, geometry.visual.height * scale);
+    engine.viewport.setRenderTransform({ pan: false, scale: false });
+    engine.drawing.setScaleMultiplier(rasterScale);
+    engine.mount(canvas, geometry.visual.width, geometry.visual.height);
     return () => engine.unmount();
-  }, [
-    drawing,
-    engine,
-    geometry.offset.x,
-    geometry.offset.y,
-    geometry.sheet.height,
-    geometry.sheet.width,
-    geometry.visual.height,
-    geometry.visual.width,
-    rotation,
-    scale,
-  ]);
+  }, [engine]);
+  useLayoutEffect(() => {
+    engine.viewport.setPageCoordinateTransform(rotation, geometry.sheet.width, geometry.sheet.height, geometry.offset.x, geometry.offset.y);
+    engine.drawing.setScaleMultiplier(rasterScale);
+    engine.resize(geometry.visual.width, geometry.visual.height);
+    engine.setDrawingData(drawing);
+  }, [drawing, engine, geometry.offset.x, geometry.offset.y, geometry.sheet.height, geometry.sheet.width, geometry.visual.height, geometry.visual.width, rotation, rasterScale]);
 
   return <div className="pointer-events-none absolute inset-0" aria-hidden="true">
-    <canvas ref={canvasRef} className="panvas-colored-content absolute inset-0 h-full w-full" />
+    <div className="absolute left-0 top-0" style={{ width: geometry.visual.width, height: geometry.visual.height, transform: `scale(${scale})`, transformOrigin: 'top left' }}><canvas ref={canvasRef} className="panvas-colored-content absolute inset-0 h-full w-full" /></div>
     {textObjects.filter(object => visibleLayers.size === 0 || visibleLayers.has(object.layerId ?? 'layer-default')).map(object => (
       <FloatingTextEditor
         key={object.id}

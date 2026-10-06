@@ -209,6 +209,7 @@ export class SelectionEngine {
     const strokesToRestore: any[] = [];
     const shapesToRestore: any[] = [];
     const imagesToRestore: any[] = [];
+    const textsToRestore: TextObject[] = [];
 
     this.historyManager.push({
       description: 'Delete selection',
@@ -232,6 +233,8 @@ export class SelectionEngine {
         shapesToRestore.push(...removedShapes);
 
         const removedTexts = this.textManager.removeTexts(textIds);
+        textsToRestore.length = 0;
+        textsToRestore.push(...removedTexts);
 
         const removedImages = this.imageManager.removeImages(imageIds);
         imagesToRestore.length = 0;
@@ -243,8 +246,10 @@ export class SelectionEngine {
         for (const s of strokesToRestore) this.drawingEngine.addStroke(s);
         for (const s of shapesToRestore) this.shapeManager.addShape(s);
         for (const img of imagesToRestore) this.imageManager.addImage(img);
+        for (const text of textsToRestore) this.textManager.addText(text);
         this.selectedElements = [...elements];
         this.selectedIds = new Set(elements.map(e => e.id));
+        this.notifySelectionChange();
         this.drawingEngine.redraw();
       }
     });
@@ -542,6 +547,7 @@ export class SelectionEngine {
   }
 
   getHandleAt(x: number, y: number): { id: string, handle: Exclude<ResizeHandle, null> } | null {
+    if (this.usesStickyDomControls()) return null;
     const handleSize = 12 / this.viewport.getState().scale;
     const h2 = handleSize / 2;
 
@@ -1206,6 +1212,12 @@ export class SelectionEngine {
 
   private selectionControlsVisible = true;
 
+  private usesStickyDomControls(): boolean {
+    const selected = this.selectedElements;
+    return selected.length === 1 && selected[0].type === 'text'
+      && this.textManager.getTexts().some(text => text.id === selected[0].id && text.metadata?.isStickyNote === true);
+  }
+
   setSelectionControlsVisible(visible: boolean): void {
     this.selectionControlsVisible = visible;
     this.drawingEngine.redraw();
@@ -1214,6 +1226,10 @@ export class SelectionEngine {
   renderSelection(ctx: CanvasRenderingContext2D): void {
     if (!this.selectionControlsVisible) return;
     if (this.selectedElements.length === 0) return;
+
+    // A single sticky retains logical selection, clipboard and history ownership.
+    // Its DOM surface owns visible handles; mixed selections use this painter.
+    if (this.usesStickyDomControls()) return;
 
     ctx.save();
     this.viewport.applyTransform(ctx);

@@ -6,6 +6,8 @@ import React, { useEffect, useId, useRef, useState } from 'react';
 import type { PageProperties } from './engine/drawingTypes';
 import { TEMPLATE_REGISTRY } from './templates/TemplateRegistry.tsx';
 import { resolvePageTemplateRenderModel } from '@/lib/pageProperties';
+import { useFullDarkView } from '@/hooks/useFullDarkView';
+import { fullDarkSurfaceColor, fullDarkRuleLineColor } from '@/lib/fullDarkView';
 
 export { formatPageIndicator } from './pageIndicator';
 
@@ -80,6 +82,7 @@ function TemplateFieldInput({ field, template, scale, value, color, editable, on
 
 export const PageRenderer: React.FC<PageRendererProps> = ({ id, width, height, properties, className = '', children, pageNumberText, editable = false, onUpdateProperties }) => {
   const templateResourceScope = useId();
+  const fullDarkView = useFullDarkView();
   const { template, margins } = properties;
   const renderModel = resolvePageTemplateRenderModel(properties);
   const geometry = renderModel;
@@ -104,8 +107,8 @@ export const PageRenderer: React.FC<PageRendererProps> = ({ id, width, height, p
 
   // Paper and template ink are persisted document values. Application theme
   // only styles Panvas chrome and must never rewrite either value.
-  const effectiveBgColor = renderModel.paperColor;
-  const effectiveLineColor = renderModel.lineColor;
+  const effectiveBgColor = fullDarkView ? fullDarkSurfaceColor(renderModel.paperColor) : renderModel.paperColor;
+  const effectiveLineColor = fullDarkView ? fullDarkRuleLineColor(renderModel.lineColor) : renderModel.lineColor;
 
   // Retrieve template definition from registry
   const templateDef = TEMPLATE_REGISTRY[template] || TEMPLATE_REGISTRY.Blank;

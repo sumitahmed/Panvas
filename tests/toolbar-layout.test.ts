@@ -27,24 +27,24 @@ const FULL_FIT_WIDTH =
 
 test('unknown width (before first measurement) renders every group', () => {
   const layout = resolveToolbarLayout(null);
-  assert.deepEqual(layout.visible, ['history', 'handwriting', 'primary', 'select', 'shapes']);
-  assert.deepEqual(layout.overflow, ['hand', 'image', 'ruler', 'laser', 'gestures', 'format']);
+  assert.deepEqual(layout.visible, ['history', 'handwriting', 'primary', 'select', 'hand']);
+  assert.deepEqual(layout.overflow, ['pencil', 'image', 'shapes', 'ruler', 'laser', 'gestures', 'format']);
   assert.equal(layout.compact, false);
 });
 
 test('desktop bracket (>= full breakpoint) keeps every group directly visible', () => {
   for (const width of [TOOLBAR_FULL_BREAKPOINT, 1200, 1600]) {
     const layout = resolveToolbarLayout(width);
-    assert.deepEqual(layout.visible, ['history', 'handwriting', 'primary', 'select', 'shapes'], `width ${width}`);
-    assert.deepEqual(layout.overflow, ['hand', 'image', 'ruler', 'laser', 'gestures', 'format'], `width ${width}`);
+    assert.deepEqual(layout.visible, ['history', 'handwriting', 'primary', 'select', 'hand'], `width ${width}`);
+    assert.deepEqual(layout.overflow, ['pencil', 'image', 'shapes', 'ruler', 'laser', 'gestures', 'format'], `width ${width}`);
   }
 });
 
 test('half-window bracket (720-959px) keeps primary tools and select, moves secondary groups into More', () => {
   for (const width of [TOOLBAR_MEDIUM_BREAKPOINT, 800, 959]) {
     const layout = resolveToolbarLayout(width);
-    assert.deepEqual(layout.visible, ['history', 'handwriting', 'primary', 'select', 'shapes'], `width ${width}`);
-    assert.deepEqual(layout.overflow, ['hand', 'image', 'ruler', 'laser', 'gestures', 'format'], `width ${width}`);
+    assert.deepEqual(layout.visible, ['history', 'handwriting', 'primary', 'select', 'hand'], `width ${width}`);
+    assert.deepEqual(layout.overflow, ['pencil', 'image', 'shapes', 'ruler', 'laser', 'gestures', 'format'], `width ${width}`);
     assert.equal(layout.compact, false, `width ${width}`);
   }
 });
@@ -158,16 +158,20 @@ test('group order overflows secondary tools before primary tools', () => {
   assert.equal(layout.overflow.includes('primary'), false);
 });
 
-test('Shapes family is direct at medium and wide widths, overflowed when narrow, and never duplicated', () => {
-  for (const width of [720, 960, TOOLBAR_FULL_BREAKPOINT, 1600]) {
-    const layout = resolveToolbarLayout(width, 'shapes');
-    assert.ok(layout.visible.includes('shapes'), `width ${width}`);
-    assert.ok(!layout.overflow.includes('shapes'), `width ${width}`);
-  }
-  for (const width of [195, 480, 640]) {
+test('Pencil and Shapes stay in More while Select and Hand are direct when width permits', () => {
+  for (const width of [640, 720, 960, TOOLBAR_FULL_BREAKPOINT, 1600]) {
     const layout = resolveToolbarLayout(width);
-    assert.ok(layout.overflow.includes('shapes'), `width ${width}`);
-    assert.ok(!layout.visible.includes('shapes'), `width ${width}`);
+    assert.deepEqual(layout.visible.slice(-2), ['select', 'hand']);
+    for (const group of ['pencil', 'shapes'] as const) {
+      assert.ok(layout.overflow.includes(group));
+      assert.ok(!layout.visible.includes(group));
+    }
+  }
+  for (const width of [195, 480]) {
+    const layout=resolveToolbarLayout(width,'pencil');
+    assert.ok(layout.visible.includes('active-tool'));
+    assert.ok(layout.overflow.includes('primary'));
+    assert.ok(!layout.overflow.includes('pencil'));
   }
 });
 
@@ -178,9 +182,9 @@ test('desktop primary sequence fits before the More button', () => {
   assert.ok(FULL_FIT_WIDTH > directWidth);
 });
 
-test('primary toolbar source order is Undo, Redo, Handwriting, Pencil, Pen, Marker, Highlighter, Eraser, Text, Select', async () => {
+test('primary toolbar source order is Undo, Redo, Handwriting, Pen, Highlighter, Marker, Eraser, Text, Select, Hand', async () => {
   const toolbar = await readFile(new URL('../src/components/notebook/NotebookFloatingToolbar.tsx', import.meta.url), 'utf8');
-  const keys = ['key="undo"', 'key="redo"', 'key="handwriting-to-text"', 'key="pencil"', 'key="pen"', 'key="marker"', 'key="highlighter"', 'key="eraser"', 'key="text"', 'key="select"'];
+  const keys = ['key="undo"', 'key="redo"', 'key="handwriting-to-text"', 'key="pen"', 'key="highlighter"', 'key="marker"', 'key="eraser"', 'key="text"', 'key="select"', 'key="hand"'];
   const positions = keys.map(key => toolbar.indexOf(key));
   assert.ok(positions.every(position => position >= 0));
   assert.deepEqual([...positions].sort((left, right) => left - right), positions);
@@ -218,8 +222,8 @@ test('fullscreen notebook chrome is one hideable drawing-tool header', async () 
 
 test('fullscreen layout prioritizes history, writing tools, and select before secondary tools', () => {
   const layout = resolveFullscreenToolbarLayout(820);
-  assert.deepEqual(layout.visible, ['history', 'handwriting', 'primary', 'select']);
-  assert.ok(layout.overflow.includes('hand'));
+  assert.deepEqual(layout.visible, ['history', 'handwriting', 'primary', 'select', 'hand']);
+  assert.ok(layout.overflow.includes('pencil'));
   assert.ok(layout.overflow.includes('gestures'));
 
   const narrow = resolveFullscreenToolbarLayout(620);
@@ -230,7 +234,7 @@ test('fullscreen layout prioritizes history, writing tools, and select before se
 test('fullscreen desktop host exposes all writing tools from available host width', async () => {
   const renderer = await readFile(new URL('../src/components/notebook/NotebookRenderer.tsx', import.meta.url), 'utf8');
   const layout = resolveFullscreenToolbarLayout(900);
-  assert.deepEqual(layout.visible, ['history', 'handwriting', 'primary', 'select']);
+  assert.deepEqual(layout.visible, ['history', 'handwriting', 'primary', 'select', 'hand']);
   assert.match(renderer, /left-3 right-3 top-3[^\"]*min-w-0/);
   assert.match(renderer, /availableWidth=\{fullscreenToolbarHostWidth/);
   assert.doesNotMatch(renderer, /aria-label="Fullscreen notebook tools"[^>]+left-1\/2/);

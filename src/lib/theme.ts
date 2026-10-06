@@ -15,6 +15,18 @@ export type ResolvedTheme = PanvasTheme;
 export const PANVAS_THEMES: readonly PanvasTheme[] = ['light', 'ink', 'dark'];
 
 export const THEME_STORAGE_KEY = 'panvas-theme';
+export const FULL_DARK_VIEW_STORAGE_KEY = 'panvas-full-dark-view';
+
+export function readFullDarkView(): boolean {
+  try { return localStorage.getItem(FULL_DARK_VIEW_STORAGE_KEY) === 'true'; }
+  catch { return false; }
+}
+
+export function applyFullDarkViewClass(theme: PanvasTheme, enabled: boolean): void {
+  if (typeof document === 'undefined') return;
+  document.documentElement.classList.remove('full-dark-view');
+  if (theme === 'dark' && enabled) document.documentElement.classList.add('full-dark-view');
+}
 
 export const THEME_CLASSES = ['dark', 'theme-ink'] as const;
 
@@ -41,7 +53,7 @@ export function themeClassesFor(resolved: ResolvedTheme): string[] {
 }
 
 /** Replace the previous theme classes with the ones for `resolved`. */
-export function applyThemeClasses(resolved: ResolvedTheme): void {
+export function applyThemeClasses(resolved: ResolvedTheme, fullDarkView = readFullDarkView()): void {
   if (typeof document === 'undefined') return;
   const html = document.documentElement;
   // Remove the retired E-Ink marker too, so an existing session is restored
@@ -50,6 +62,7 @@ export function applyThemeClasses(resolved: ResolvedTheme): void {
   for (const className of themeClassesFor(resolved)) {
     html.classList.add(className);
   }
+  applyFullDarkViewClass(resolved, fullDarkView);
 }
 
 /**

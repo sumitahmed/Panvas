@@ -1073,6 +1073,20 @@
   filter: var(--content-filter);
 }
 
+/* Full Dark View adapts known document surfaces, never a parent containing UI
+   or photographs. Inline TipTap paint remains its original stored value. */
+.dark.full-dark-view .panvas-document-text {
+  color: #dce3eb;
+  --tw-prose-body: #dce3eb;
+  --tw-prose-headings: #dce3eb;
+  --tw-prose-bold: #dce3eb;
+  --tw-prose-links: #8ab8ff;
+  --tw-prose-code: #dce3eb;
+}
+.panvas-printing [data-page-id] {
+  transition: none !important;
+}
+
 .panvas-notebook-viewport div[id^="page-"][data-page-id] {
   box-shadow: var(--shadow-paper);
 }

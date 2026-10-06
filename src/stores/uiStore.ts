@@ -10,6 +10,9 @@ import {
   readAndMigrateTheme,
   resolveTheme,
   THEME_STORAGE_KEY,
+  FULL_DARK_VIEW_STORAGE_KEY,
+  readFullDarkView,
+  applyFullDarkViewClass,
   type PanvasTheme,
   type ResolvedTheme,
 } from '@/lib/theme';
@@ -79,6 +82,10 @@ interface UIState {
   theme: PanvasTheme;
   resolvedTheme: ResolvedTheme;
   setTheme: (theme: PanvasTheme) => void;
+  fullDarkView: boolean;
+  isFullDarkViewChoiceOpen: boolean;
+  isPrinting: boolean;
+  setFullDarkView: (enabled: boolean) => void;
 
   // New UI states
   // Deprecated: use layoutStore instead
@@ -163,6 +170,14 @@ export const useUIStore = create<UIState>()(
   // Theme
   theme: initialTheme.theme,
   resolvedTheme: initialTheme.resolved,
+  fullDarkView: readFullDarkView(),
+  isFullDarkViewChoiceOpen: false,
+  isPrinting: false,
+  setFullDarkView: (enabled) => {
+    try { localStorage.setItem(FULL_DARK_VIEW_STORAGE_KEY, String(enabled)); } catch { /* Session preference still works. */ }
+    set({ fullDarkView: enabled, isFullDarkViewChoiceOpen: false });
+    applyFullDarkViewClass(get().theme, enabled && !get().isPrinting);
+  },
   setTheme: (theme) => {
     try {
       localStorage.setItem(THEME_STORAGE_KEY, theme);
@@ -170,8 +185,9 @@ export const useUIStore = create<UIState>()(
       // Persisting is best-effort; the session theme still applies.
     }
     const resolvedTheme = resolveTheme(theme);
-    set({ theme, resolvedTheme });
-    applyThemeClasses(resolvedTheme);
+    const enteringDark = get().theme !== 'dark' && theme === 'dark';
+    set({ theme, resolvedTheme, isFullDarkViewChoiceOpen: enteringDark });
+    applyThemeClasses(resolvedTheme, get().fullDarkView && !get().isPrinting);
 
     if (typeof window !== 'undefined' && window.panvas?.settings?.setTheme) {
       window.panvas.settings.setTheme(resolvedTheme);

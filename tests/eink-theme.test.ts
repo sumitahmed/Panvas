@@ -82,7 +82,7 @@ test('legacy theme migration persists canonical Ink without OS-dependent modes',
 test('bootstrap and UI store apply the canonical theme before the app renders', async () => {
   const store = await read('../src/stores/uiStore.ts');
   assert.match(store, /readAndMigrateTheme/);
-  assert.match(store, /applyThemeClasses\(resolvedTheme\)/);
+  assert.match(store, /applyThemeClasses\(resolvedTheme, get\(\)\.fullDarkView/);
   assert.doesNotMatch(store, /theme-eink/);
   const bootstrap = await read('../src/bootstrap.tsx');
   assert.match(bootstrap, /readAndMigrateTheme\(\)/);
@@ -108,7 +108,7 @@ test('Ink has distinct warm-gray tablet surfaces and a presentation-only content
 
 test('imported PDF previews retain source colors while authored annotation layers use theme presentation', async () => {
   const preview = await read('../src/components/notebook/NotebookPageView.tsx');
-  assert.match(preview, /filter: page\.type === 'pdf' \? 'none' : undefined/);
+  assert.match(preview, /filter: page\.type === 'pdf' \? \(fullDarkView && brightPdfPreview \? FULL_DARK_PDF_FILTER : 'none'\) : undefined/);
   const workspace = await read('../src/components/pdf/PdfWorkspace.tsx');
   assert.match(workspace, /className=.*panvas-colored-content panvas-layer-canvas-decoration/);
 });

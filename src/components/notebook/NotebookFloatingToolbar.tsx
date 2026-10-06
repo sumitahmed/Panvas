@@ -641,11 +641,8 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
     input.click();
   };
 
-  // Group order and overflow behavior come from the tested contract in
-  // toolbarLayout.ts (roadmap section 7): groups later in the order move into
-  // the "More Tools" overflow menu first — format, then shapes, image, hand —
-  // while the recognition tool and primary writing tools (Pencil, Pen, Marker, Highlighter, Eraser,
-  // Text) and Select stay directly accessible down to the compact breakpoint.
+  // The width contract keeps five writing controls followed by Select and Hand.
+  // Pencil and secondary tools stay reachable through More.
   const toolGroups: { id: ToolbarGroupId; items: React.ReactNode[] }[] = [
     {
       id: 'history',
@@ -669,10 +666,9 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
     {
       id: 'primary',
       items: [
-        <ToolButton key="pencil" icon={<ToolGlyph tool="pencil" color={toolSettings.pencil.color} />} active={activeTool === 'pencil'} onClick={() => handleToolClick('pencil')} tooltip="Pencil (N)" hasPopup />,
         <ToolButton key="pen" icon={<ToolGlyph tool="pen" color={toolSettings.pen.color} />} active={activeTool === 'pen'} onClick={() => handleToolClick('pen')} tooltip="Pen (P)" hasPopup />,
-        <ToolButton key="marker" icon={<ToolGlyph tool="marker" color={toolSettings.marker.color} />} active={activeTool === 'marker'} onClick={() => handleToolClick('marker')} tooltip="Marker (M)" hasPopup />,
         <ToolButton key="highlighter" icon={<ToolGlyph tool="highlighter" color={toolSettings.highlighter.color} />} active={activeTool === 'highlighter'} onClick={() => handleToolClick('highlighter')} tooltip="Highlighter (H)" hasPopup />,
+        <ToolButton key="marker" icon={<ToolGlyph tool="marker" color={toolSettings.marker.color} />} active={activeTool === 'marker'} onClick={() => handleToolClick('marker')} tooltip="Marker (M)" hasPopup />,
         <ToolButton key="eraser" icon={<Eraser size={16} />} active={activeTool === 'eraser'} onClick={() => handleToolClick('eraser')} tooltip="Eraser (E)" hasPopup />,
         <ToolButton key="text" icon={<Type size={16} />} active={activeTool === 'text'} onClick={() => handleToolClick('text')} tooltip="Text (T)" />
       ]
@@ -688,6 +684,12 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
       items: [
         <ToolButton key="hand" icon={<Hand size={16} />} active={activeTool === 'hand'} onClick={() => handleToolClick('hand')} tooltip="Hand (Space)" />
       ]
+    },
+    {
+      id: 'pencil',
+      items: [
+        <ToolButton key="pencil" icon={<ToolGlyph tool="pencil" color={toolSettings.pencil.color} />} active={activeTool === 'pencil'} onClick={() => handleToolClick('pencil')} tooltip="Pencil (N)" hasPopup />
+      ],
     },
     {
       id: 'image',
@@ -759,12 +761,13 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
     : containerWidth;
   const activeToolGroupId: ToolbarGroupId =
     activeTool === 'laser' ? 'laser' :
+    activeTool === 'pencil' ? 'pencil' :
     isConfigurableDrawingTool(activeTool) || activeTool === 'eraser' || activeTool === 'text' ? 'primary' :
     activeTool === 'select' ? 'select' :
     activeTool === 'hand' ? 'hand' :
     'shapes';
-  const layout = compactTools
-    ? { visible: [] as ToolbarGroupId[], overflow: ['primary', 'hand', 'handwriting', 'image', 'shapes', 'ruler', 'laser', 'gestures', 'format'] as ToolbarGroupId[] }
+  const layout: ReturnType<typeof resolveToolbarLayout> = compactTools
+    ? { visible: [] as ToolbarGroupId[], overflow: ['primary', 'pencil', 'hand', 'handwriting', 'image', 'shapes', 'ruler', 'laser', 'gestures', 'format'] as ToolbarGroupId[], compact: true }
     : fullscreenToolOnly
     ? resolveFullscreenToolbarLayout(layoutWidth, activeToolGroupId)
     : resolveToolbarLayout(layoutWidth, activeToolGroupId);
@@ -938,6 +941,7 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
               className="panvas-icon-control relative h-10 w-10 rounded-xl focus-ring max-[599px]:h-9 max-[599px]:w-9 max-[599px]:rounded-lg"
               title="More Tools"
               aria-label="More Tools"
+              data-active-overflow-tool={activeToolInOverflow ? activeTool : undefined}
               aria-expanded={showOverflow}
             >
               <MoreHorizontal size={16} />
@@ -999,9 +1003,9 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
                       </button>
                     ) : (
                       <div>
-                      {isPhone && <div className="px-2 pb-1 text-xs font-medium text-panvas-text-secondary">{({ history: 'History', handwriting: 'Handwriting to text', primary: 'Writing tools', select: 'Selection', hand: 'Move around the page', image: 'Insert image or sticky note', shapes: 'Shapes', ruler: 'Ruler', laser: 'Presentation pointer', format: 'Formatting' } as Record<string, string>)[groupId]}</div>}
+                      {isPhone && <div className="px-2 pb-1 text-xs font-medium text-panvas-text-secondary">{({ history: 'History', handwriting: 'Handwriting to text', primary: 'Writing tools', pencil: 'Pencil', select: 'Selection', hand: 'Move around the page', image: 'Insert image or sticky note', shapes: 'Shapes', ruler: 'Ruler', laser: 'Presentation pointer', format: 'Formatting' } as Record<string, string>)[groupId]}</div>}
                       <div className="flex items-center justify-center gap-1 max-[599px]:flex-wrap max-[599px]:justify-start">
-                        {groupById.get(groupId)?.items}
+                        {groupById.get(groupId)?.items.filter(item => !(layout.visible.includes('active-tool') && groupId === 'primary' && React.isValidElement(item) && item.key === activeTool))}
                       </div>
                       </div>
                     )}

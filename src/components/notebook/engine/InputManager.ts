@@ -61,6 +61,8 @@ export class InputManager {
   // Live drawing state
   private isDrawing = false;
   private lastClickTime = 0;
+  private lastClickPoint: { x: number; y: number } | null = null;
+  private lastClickPointerType = '';
   private strokeStartTime: number = 0;
   private currentPoints: StrokePoint[] = [];
   private inkInputFilter = new InkInputFilter();
@@ -282,7 +284,10 @@ export class InputManager {
     const now = Date.now();
     
     // Check for double click to edit text box
-    if (now - this.lastClickTime < 300) {
+    if (!e.shiftKey && e.button === 0 && now - this.lastClickTime < 300
+      && this.lastClickPoint && this.lastClickPointerType === e.pointerType
+      && Math.hypot(e.clientX - this.lastClickPoint.x, e.clientY - this.lastClickPoint.y) <= 6
+      && this.selectionEngine.getSelectedElements().length <= 1) {
       if (toolState.mode === 'select') {
         const point = this.getCanvasPoint(e);
         this.selectionEngine.selectAt(point.x, point.y, false);
@@ -295,7 +300,9 @@ export class InputManager {
         }
       }
     }
-    this.lastClickTime = now;
+    this.lastClickTime = e.shiftKey ? 0 : now;
+    this.lastClickPoint = { x: e.clientX, y: e.clientY };
+    this.lastClickPointerType = e.pointerType;
 
     // Handle middle-click pan override
     if (e.button === 1) {
@@ -674,7 +681,7 @@ export class InputManager {
   // scroll container owns mouse/pen panning (see NotebookRenderer) because a hand drag
   // must work when it starts on an inter-page gap, a side margin, or a non-focused page
   // — none of which are this canvas. Two cases still belong to the canvas:
-  //   * The PDF workspace has no `.notebook-viewport`; it pans a shared CSS camera.
+  //   * PDF annotations pan their native document scroller.
   //   * Touch, because `touch-action: none` (set in attach) suppresses native scrolling
   //     on this canvas, while the viewport controller leaves touch to native scrolling.
   private isPanning = false;
@@ -708,7 +715,7 @@ export class InputManager {
     this.panStartX = e.clientX;
     this.panStartY = e.clientY;
 
-    this.panScrollTarget = this.canvas.closest('.notebook-viewport');
+    this.panScrollTarget = this.canvas.closest('.notebook-viewport, [data-panvas-scroll-viewport]');
     if (this.panScrollTarget) {
       this.panStartScrollLeft = this.panScrollTarget.scrollLeft;
       this.panStartScrollTop = this.panScrollTarget.scrollTop;
