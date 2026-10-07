@@ -32,11 +32,13 @@ test('mobile shell sidebar overlays content and closes on navigation and Escape'
   assert.match(shell, /flex-1 flex overflow-hidden relative/);
 });
 
-test('mobile More menu and drawing popups stay inside the viewport', async () => {
+test('phone and landscape More menus and drawing popups stay inside the viewport', async () => {
   const toolbar = await read('../src/components/notebook/NotebookFloatingToolbar.tsx');
-  assert.match(toolbar, /max-\[599px\]:w-\[min\(20rem,calc\(100vw-1\.5rem\)\)\]/);
-  assert.match(toolbar, /max-\[599px\]:max-h-\[60vh\]/);
-  assert.match(toolbar, /max-\[599px\]:flex-wrap/);
+  assert.match(toolbar, /max-\[1023px\]:w-\[min\(20rem,calc\(100vw-1\.5rem\)\)\]/);
+  assert.match(toolbar, /panvas-more-menu/);
+  const styles = await read('../src/styles/index.css');
+  assert.match(styles, /\.panvas-more-menu \{ max-height: inherit; overflow-y: auto; overscroll-behavior: contain;/);
+  assert.match(toolbar, /max-\[1023px\]:flex-wrap/);
 });
 
 test('H→Text strip leads with color/thickness on phones and moves text settings into a popover', async () => {
@@ -85,7 +87,7 @@ test('phone toolbar chrome is visually compact while keeping reachable touch tar
   assert.match(toolbar, /max-\[599px\]:h-4 max-\[599px\]:mx-0\.5/);
   // Pen/Pencil/H→Text contextual strips: 36px tall, tighter padding.
   assert.match(toolbar, /h-10 shrink-0 items-center gap-1 px-2 max-\[599px\]:h-9 max-\[599px\]:gap-0\.5 max-\[599px\]:px-1\.5/);
-  assert.match(toolbar, /panvas-floating-surface flex h-9 max-w-\[calc\(100vw-1rem\)\] items-center gap-0\.5 px-1\.5/);
+  assert.match(toolbar, /panvas-floating-surface flex min-h-9 max-w-full flex-wrap items-center gap-0\.5 px-1\.5/);
   // Colors, palette, and thickness stay reachable on phones.
   assert.match(toolbar, /recentColors\.slice\(0, 5\)/);
   assert.match(toolbar, /role="group" aria-label=\{`\$\{label\} thickness`\}/);

@@ -101,7 +101,7 @@ export function attachTwoFingerViewportGesture({
 }: TwoFingerViewportGestureOptions): () => void {
   const pointers = new Map<number, ViewportTouchPoint>();
   let anchor: GestureAnchor | null = null;
-  let pendingPosition: Pick<TwoFingerViewportResult, 'scrollLeft' | 'scrollTop'> | null = null;
+  let pendingPosition: TwoFingerViewportResult | null = null;
   let frame: number | null = null;
   let suppressUntilAllLifted = false;
   let releaseNavigation: (() => void) | null = null;
@@ -115,17 +115,20 @@ export function attachTwoFingerViewportGesture({
   const applyPendingPosition = () => {
     frame = null;
     if (!pendingPosition) return;
-    target.scrollLeft = pendingPosition.scrollLeft;
-    target.scrollTop = pendingPosition.scrollTop;
-  };
-
-  const schedulePosition = (next: Pick<TwoFingerViewportResult, 'scrollLeft' | 'scrollTop'>) => {
-    pendingPosition = next;
+    const next = pendingPosition;
+    pendingPosition = null;
+    // The owner commits its scaled layout before we correct scroll. Applying
+    // scroll against the old layout clamps it, then jumps on the next frame.
+    setScale(next.scale);
     target.scrollLeft = next.scrollLeft;
     target.scrollTop = next.scrollTop;
+  };
+
+  const schedulePosition = (next: TwoFingerViewportResult) => {
+    pendingPosition = next;
     if (frame === null && typeof requestAnimationFrame === 'function') {
       frame = requestAnimationFrame(applyPendingPosition);
-    }
+    } else if (typeof requestAnimationFrame !== 'function') applyPendingPosition();
   };
 
   const begin = () => {
@@ -166,7 +169,6 @@ export function attachTwoFingerViewportGesture({
     });
     if (applyContentAnchor) applyContentAnchor(next.scale, midpoint(pair[0], pair[1]));
     else {
-      setScale(next.scale);
       schedulePosition(next);
     }
   };

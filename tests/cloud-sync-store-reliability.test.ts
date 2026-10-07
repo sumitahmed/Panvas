@@ -4,7 +4,7 @@ import path from 'node:path';
 import { createServer } from 'vite';
 import { loadWorkspaceBindings } from '../src/services/cloudsync/workspaceBindings.ts';
 
-test('store settles success, serial reruns, failures, reconnect and stale completion using synthetic IPC', async () => {
+test('store settles success, serial reruns, failures, reconnect and stale completion using synthetic IPC', async t => {
   const previousWindow = (globalThis as any).window;
   const previousStorage = (globalThis as any).localStorage;
   const values = new Map<string, string>();
@@ -40,6 +40,10 @@ test('store settles success, serial reruns, failures, reconnect and stale comple
     assert.equal(store.getState().statusByProvider.googledrive, 'synced');
     assert.ok(store.getState().lastSyncedByProvider.googledrive);
     assert.equal(store.getState().lastError, null);
+    const retainedDrive = runProviders[0].getDriveProvider();
+    const originalClear = retainedDrive.clearCaches.bind(retainedDrive);
+    let clears = 0;
+    retainedDrive.clearCaches = () => { clears++; originalClear(); };
 
     let release!: () => void;
     worker = async () => { await new Promise<void>(resolve => { release = resolve; }); return { status: 'synced', downloaded: 0 }; };
@@ -52,6 +56,8 @@ test('store settles success, serial reruns, failures, reconnect and stale comple
     assert.equal(runs, 3, 'initial run plus one active and one coalesced rerun');
     assert.equal(maximum, 1);
     assert.ok(runProviders.every(provider => provider === runProviders[0]), 'same account retains one provider across cycles and queued reruns');
+    assert.equal(clears, 0, 'same-account manual/automatic reruns retain provider caches');
+    t.diagnostic(JSON.stringify({ logicalRuns: runs, maxConcurrentRuns: maximum, providerInstances: new Set(runProviders).size, cacheClears: clears }));
 
     store.setState({ reviewItems: [{ conflictId: 'sync-conflict:ws-broken:folder:folder-old', workspaceId: 'ws-broken', entityKind: 'folder', entityId: 'folder-old' }] });
     worker = async () => ({ status: 'synced-review', downloaded: 0, conflicts: [], workspaceOutcomes: [

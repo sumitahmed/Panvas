@@ -4,7 +4,7 @@ import { Download, Heart, Plus, Shapes, Trash2, Upload } from 'lucide-react';
 import type { NotebookEngine } from './engine/NotebookEngine';
 import { filterLocalElements, getStarterElements, localElementRepository, type LocalElement, type LocalElementFilter } from '@/services/elements/LocalElementRepository';
 import { useUIStore } from '@/stores/uiStore';
-import { useDismissibleLayer } from '@/components/ui/useDismissibleLayer';
+import { OverlayManager } from '@/components/ui/OverlayManager';
 
 export function NotebookElementsControl({ engine, workspaceId, onInsert }: { engine: NotebookEngine; workspaceId?: string; onInsert?: () => void }) {
   const [isOpen, setIsOpen] = useState(false);
@@ -14,7 +14,6 @@ export function NotebookElementsControl({ engine, workspaceId, onInsert }: { eng
   const controlRef = useRef<HTMLDivElement>(null);
   const showToast = useUIStore(state => state.showToast);
 
-  useDismissibleLayer(isOpen, controlRef, () => setIsOpen(false));
 
   useEffect(() => {
     if (!workspaceId || !isOpen) return;
@@ -92,8 +91,8 @@ export function NotebookElementsControl({ engine, workspaceId, onInsert }: { eng
       </button>
       <input ref={fileRef} type="file" accept="application/json,.json" className="hidden" onChange={event => { const file = event.target.files?.[0]; if (file) void importCollection(file); event.target.value = ''; }} />
 
-      {isOpen && (
-        <div className="panvas-overlay panvas-floating-surface absolute right-0 top-11 w-80 max-w-[calc(100vw-1.5rem)] p-2">
+      <OverlayManager isOpen={isOpen} onClose={() => setIsOpen(false)} anchorRef={controlRef} placement="bottom-start">
+        <div role="dialog" aria-label="Local Elements" className="panvas-utility-panel panvas-floating-surface w-80 p-2">
           <div className="flex items-center justify-between px-1 pb-2">
             <div><div className="text-xs font-semibold text-panvas-text-primary">Local Elements</div><div className="text-2xs text-panvas-text-tertiary">Reusable object groups, stored with this workspace</div></div>
             <button type="button" onClick={capture} className="flex h-7 items-center gap-1 rounded-md px-2 text-xs text-panvas-text-secondary hover:bg-panvas-bg-hover"><Plus size={13} />Save selection</button>
@@ -122,7 +121,7 @@ export function NotebookElementsControl({ engine, workspaceId, onInsert }: { eng
             <button type="button" disabled={elements.length === 0} onClick={() => void exportCollection()} className="flex items-center gap-1 rounded-md px-2 py-1.5 text-2xs text-panvas-text-secondary hover:bg-panvas-bg-hover disabled:opacity-40"><Download size={12} />Export</button>
           </div>
         </div>
-      )}
+      </OverlayManager>
     </div>
   );
 }

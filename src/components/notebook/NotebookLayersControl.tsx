@@ -1,14 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronUp, Eye, EyeOff, Layers3, Lock, LockOpen, Plus, Trash2 } from 'lucide-react';
 import type { NotebookEngine } from './engine/NotebookEngine';
-import { useDismissibleLayer } from '@/components/ui/useDismissibleLayer';
+import { OverlayManager } from '@/components/ui/OverlayManager';
 
 export function NotebookLayersControl({ engine, onChange }: { engine: NotebookEngine; onChange?: () => void }) {
   const [isOpen, setIsOpen] = useState(false);
   const [, setRevision] = useState(0);
   const controlRef = useRef<HTMLDivElement>(null);
 
-  useDismissibleLayer(isOpen, controlRef, () => setIsOpen(false));
 
   useEffect(() => engine.layers.subscribe(() => setRevision(value => value + 1)), [engine]);
 
@@ -32,8 +31,8 @@ export function NotebookLayersControl({ engine, onChange }: { engine: NotebookEn
         <Layers3 size={16} />
       </button>
 
-      {isOpen && (
-        <div className="panvas-overlay panvas-floating-surface absolute right-0 top-11 w-72 max-w-[calc(100vw-1.5rem)] p-2">
+      <OverlayManager isOpen={isOpen} onClose={() => setIsOpen(false)} anchorRef={controlRef} placement="bottom-start">
+        <div role="dialog" aria-label="Layers" className="panvas-utility-panel panvas-floating-surface w-72 p-2">
           <div className="mb-2 flex items-center justify-between px-1">
             <div>
               <div className="text-xs font-semibold text-panvas-text-primary">Layers</div>
@@ -75,7 +74,7 @@ export function NotebookLayersControl({ engine, onChange }: { engine: NotebookEn
             })}
           </div>
         </div>
-      )}
+      </OverlayManager>
     </div>
   );
 }

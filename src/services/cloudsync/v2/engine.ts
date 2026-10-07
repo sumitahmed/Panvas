@@ -7,6 +7,9 @@ import { semanticSystemBootstrapBytes } from '../payloadSource.ts';
 import type { SafeCloudDiagnostic, SyncEntityKind } from '../types.ts';
 import type { SyncV2BaselineRecord, SyncV2BaselineStore, SyncV2Catalog, SyncV2ConflictResolution, SyncV2ConflictStore, SyncV2LocalAdapter, SyncV2LocalSource, SyncV2Manifest, SyncV2Profile, SyncV2Provider, SyncV2Record, SyncV2WorkspaceClassification, SyncV2WorkspaceOutcome } from './types.ts';
 import type { LegacyMigrationResult } from './legacyMigration.ts';
+import { ExactPayloadHashCache } from './exactPayloadHashCache.ts';
+
+const payloadHashes = new WeakMap<SyncV2LocalSource, { account: string; cache: ExactPayloadHashCache }>();
 
 const keyOf = (value: { kind?: SyncEntityKind; entityType?: SyncEntityKind; id?: string; entityId?: string }) => `${value.kind ?? value.entityType}:${value.id ?? value.entityId}`;
 const phase: Record<SyncEntityKind, number> = { workspace: 0, folder: 1, notebook: 2, notebookSection: 3, notebookPage: 4, canvasFile: 4, pageContent: 5, pageDrawing: 5, canvasScene: 5, customBlock: 6, asset: 7 };
@@ -15,7 +18,7 @@ const phase: Record<SyncEntityKind, number> = { workspace: 0, folder: 1, noteboo
  * A repair/upload invalidates the hash; failed/missing reads are never cached.
  * Mutable profile/catalog/manifest reads and ETag guards are never cached here.
  */
-function providerForCycle(provider: SyncV2Provider): SyncV2Provider & { releaseObjects(): void } {
+function providerForCycle(provider: SyncV2Provider): SyncV2Provider & { releaseObjects(): void; prepareObjects(hashes: readonly string[]): Promise<void> } {
   const metadata = new Map<string, Promise<{ size: number } | null>>();
   const objects = new Map<string, Promise<Uint8Array>>();
   const validatedMetadata = (hash: string) => {
@@ -27,6 +30,12 @@ function providerForCycle(provider: SyncV2Provider): SyncV2Provider & { releaseO
     return pending;
   };
   return {
+    async prepareObjects(hashes) {
+      if (!provider.getObjectMetadataBatch || !hashes.length) return;
+      for (const value of await provider.getObjectMetadataBatch([...new Set(hashes)])) {
+        metadata.set(value.hash, Promise.resolve({ size: value.size }));
+      }
+    },
     releaseObjects: () => objects.clear(),
     readProfile: () => provider.readProfile(), writeProfile: (value, etag) => provider.writeProfile(value, etag),
     readCatalog: () => provider.readCatalog(), writeCatalog: (value, etag) => provider.writeCatalog(value, etag),
@@ -92,12 +101,12 @@ function validManifest(value: SyncV2Manifest | null, workspaceId: string): value
     && new Set(value.records.map(keyOf)).size === value.records.length);
 }
 
-async function localRecord(entity: ScannedSyncEntity): Promise<{ entity: ScannedSyncEntity; hash: string | null; bootstrapIdentityHash: string | null }> {
+async function localRecord(entity: ScannedSyncEntity, cache: ExactPayloadHashCache): Promise<{ entity: ScannedSyncEntity; hash: string | null; bootstrapIdentityHash: string | null }> {
   const bootstrapIdentity = !entity.tombstone && entity.bytes
     ? semanticSystemBootstrapBytes(entity.entityType, entity.entityId, entity.bytes)
     : null;
   const [hash, bootstrapIdentityHash] = await Promise.all([
-    entity.tombstone ? null : entity.bytes ? sha256Bytes(entity.bytes) : null,
+    entity.tombstone ? null : entity.bytes ? cache.hash(`${entity.workspaceId}:${keyOf(entity)}`, entity.bytes) : null,
     bootstrapIdentity ? sha256Bytes(bootstrapIdentity) : null,
   ]);
   return { entity, hash, bootstrapIdentityHash };
@@ -249,6 +258,12 @@ export async function runCloudSyncV2(input: {
   legacyMigrator?: () => Promise<LegacyMigrationResult>;
 }): Promise<SyncV2Result> {
   const cycleProvider = providerForCycle(input.provider);
+  let hashes = payloadHashes.get(input.source);
+  if (!hashes || hashes.account !== input.accountIdentifier) {
+    hashes = { account: input.accountIdentifier, cache: new ExactPayloadHashCache() };
+    payloadHashes.set(input.source, hashes);
+  }
+  const hashCache = hashes.cache;
   input = { ...input, provider: cycleProvider };
   const result: SyncV2Result = { status: 'error', uploaded: 0, downloaded: 0, preservedConflicts: 0, conflicts: [], workspaceOutcomes: [] };
   const workspaceOutcomeById = new Map<string, SyncV2WorkspaceOutcome>();
@@ -374,11 +389,12 @@ export async function runCloudSyncV2(input: {
         continue;
       }
       if (!manifest && localIds.includes(workspaceId) && scanned.length === 0) throw v2Failure('local-scan', 'local-workspace-unavailable', 'scan-workspace');
-      const localPairs = await Promise.all(scanned.map(localRecord));
+      const localPairs = await Promise.all(scanned.map(entity => localRecord(entity, hashCache)));
       const localByKey = new Map(localPairs.map(pair => [keyOf(pair.entity), pair]));
       const currentOwnedKeys = new Set(initialScanned.filter(entity => entity.ownership === 'current').map(keyOf));
       const baselineRecords = await input.baselines.loadWorkspace(workspaceId);
       const baselineByKey = new Map(baselineRecords.map(record => [`${record.entityKind}:${record.entityId}`, record]));
+      await cycleProvider.prepareObjects((manifest?.records ?? []).filter(record => !record.tombstone).map(record => record.hash!));
       let repairedMissingRecords = 0;
       let repairedWorkspaceRoot: { record: SyncV2Record; bytes: Uint8Array } | null = null;
 
@@ -436,7 +452,7 @@ export async function runCloudSyncV2(input: {
             const rootWasMissing = !(await input.provider.getObjectMetadata(remoteRoot.hash!));
             const bytes = await readRemoteObjectWithExactReplica(input.provider, remoteRoot.hash!, { workspaceId, entityKind: 'workspace', entityId: workspaceId }, localByKey.get(`workspace:${workspaceId}`));
             if (rootWasMissing) result.uploaded += 1;
-            if (await sha256Bytes(bytes) !== remoteRoot.hash) rootProblem = 'remote-workspace-root-integrity-failed';
+            if (await hashCache.hash(`remote-root:${remoteRoot.hash}`, bytes) !== remoteRoot.hash) rootProblem = 'remote-workspace-root-integrity-failed';
             else {
               const root = JSON.parse(new TextDecoder().decode(bytes));
               if (!root || Array.isArray(root) || root.id !== workspaceId || root.deletedAt

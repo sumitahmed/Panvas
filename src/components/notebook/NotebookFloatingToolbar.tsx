@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { FloatingImageControls } from './FloatingImageControls';
 import { TextFontPicker } from './TextFontPicker';
+import { NotebookWorkspaceControls } from './NotebookWorkspaceControls';
 import { applyNotebookTextFont } from './textTypography';
 import type { Editor } from '@tiptap/react';
 import type { NotebookEngine } from './engine/NotebookEngine';
@@ -38,6 +39,8 @@ import {
 import {
   resolveToolbarLayout,
   resolveFullscreenToolbarLayout,
+  resolveMobileQuickTools,
+  TOOLBAR_GROUP_ORDER,
   recordRecentColor,
   type ToolbarGroupId,
 } from './toolbarLayout';
@@ -163,9 +166,10 @@ interface NotebookFloatingToolbarProps {
   fullscreenToolOnly?: boolean;
   availableWidth?: number | null;
   pageUtilities?: React.ReactNode;
+  overflowActions?: React.ReactNode;
 }
 
-export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = ({ editor, engine, saveKey, workspaceId, hasSelectedStrokes = false, onConvertHandwriting, embedded = false, hideCollapseButton = false, fullscreenToolOnly = false, availableWidth, pageUtilities }) => {
+export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = ({ editor, engine, saveKey, workspaceId, hasSelectedStrokes = false, onConvertHandwriting, embedded = false, hideCollapseButton = false, fullscreenToolOnly = false, availableWidth, pageUtilities, overflowActions }) => {
   const isPhone = useIsMobileViewport();
   const compactTools = useIsMobileViewport(1023);
   // Derive the displayed tool from the same ToolManager snapshot used by input routing.
@@ -211,6 +215,38 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
   const gestureAnchorRef = useRef<HTMLButtonElement>(null);
   
   const [containerWidth, setContainerWidth] = useState<number | null>(null);
+
+  // Sheets share the actual dock boundary, including safe-area padding and
+  // contextual rows. Keep this layout measurement out of document engines.
+  useEffect(() => {
+    const dock = containerRef.current?.closest<HTMLElement>('.panvas-mobile-tool-dock');
+    if (!dock) return;
+    const root = document.documentElement;
+    let frame = 0;
+    const update = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const bounds = dock.getBoundingClientRect();
+        root.style.setProperty('--panvas-tool-dock-inset', `${Math.max(0, window.innerHeight - bounds.top + 8)}px`);
+        root.style.setProperty('--panvas-tool-dock-height', `${bounds.height + 8}px`);
+      });
+    };
+    const observer = new ResizeObserver(update);
+    observer.observe(dock);
+    window.addEventListener('resize', update);
+    window.visualViewport?.addEventListener('resize', update);
+    window.visualViewport?.addEventListener('scroll', update);
+    update();
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      window.removeEventListener('resize', update);
+      window.visualViewport?.removeEventListener('resize', update);
+      window.visualViewport?.removeEventListener('scroll', update);
+      root.style.removeProperty('--panvas-tool-dock-inset');
+      root.style.removeProperty('--panvas-tool-dock-height');
+    };
+  }, [compactTools]);
 
   useEffect(() => engine.selection.subscribe(() => {
     setSelectionRevision(revision => revision + 1);
@@ -766,20 +802,20 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
     activeTool === 'select' ? 'select' :
     activeTool === 'hand' ? 'hand' :
     'shapes';
+  const mobileQuickTools = resolveMobileQuickTools(containerWidth);
   const layout: ReturnType<typeof resolveToolbarLayout> = compactTools
-    ? { visible: [] as ToolbarGroupId[], overflow: ['primary', 'pencil', 'hand', 'handwriting', 'image', 'shapes', 'ruler', 'laser', 'gestures', 'format'] as ToolbarGroupId[], compact: true }
+    ? { visible: [] as ToolbarGroupId[], overflow: TOOLBAR_GROUP_ORDER.filter(group => group === 'primary' || !mobileQuickTools.includes(group as typeof mobileQuickTools[number])), compact: true }
     : fullscreenToolOnly
     ? resolveFullscreenToolbarLayout(layoutWidth, activeToolGroupId)
     : resolveToolbarLayout(layoutWidth, activeToolGroupId);
   const groupById = new Map(toolGroups.map(group => [group.id, group]));
-  // In compact mode only select is directly visible; every other active tool
-  // lives behind the More button, which then carries the active-state dot.
+  // Compact tools follow the available width; Hand always stays direct.
   const activeToolInOverflow = layout.overflow.includes(activeToolGroupId)
     || (toolState.rulerEnabled && layout.overflow.includes('ruler'));
   const showInlineWritingPresets = isConfigurableDrawingTool(activeTool)
     && !toolState.handwritingToTextEnabled
     && layout.visible.includes('primary');
-  const showHandwritingSettings = !isPhone && toolState.handwritingToTextEnabled
+  const showHandwritingSettings = !compactTools && toolState.handwritingToTextEnabled
     && toolState.mode === 'draw'
     && (toolState.drawingTool === 'pen' || toolState.drawingTool === 'pencil');
   const selectedElements = engine.selection.getSelectedElements();
@@ -899,13 +935,14 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
         />
       </OverlayManager>
 
-      <div ref={toolbarRef} className={`pointer-events-auto flex items-center justify-center gap-1 text-panvas-text-primary max-[599px]:gap-0.5 ${embedded ? 'px-1 py-1' : 'panvas-toolbar-surface panvas-floating-surface px-3 py-2 max-[599px]:px-1.5 max-[599px]:py-1'}`}>
+      <div ref={toolbarRef} className={`pointer-events-auto flex items-center justify-center gap-1 text-panvas-text-primary max-[599px]:gap-0.5 ${compactTools ? 'panvas-compact-toolbar' : ''} ${embedded ? 'px-1 py-1' : 'panvas-toolbar-surface panvas-floating-surface px-3 py-2 max-[599px]:px-1.5 max-[599px]:py-1'}`}>
         {compactTools && <>
-          {groupById.get('history')?.items}
+          {mobileQuickTools.includes('history') && groupById.get('history')?.items}
           <ToolButton icon={<ToolGlyph tool={isConfigurableDrawingTool(activeTool) ? activeTool : 'pen'} color={getActiveToolColor(isConfigurableDrawingTool(activeTool) ? activeTool : 'pen', toolSettings)} />} active={isConfigurableDrawingTool(activeTool)} onClick={() => handleToolClick(isConfigurableDrawingTool(activeTool) ? activeTool : 'pen')} tooltip="Pen and writing settings" hasPopup />
-          {groupById.get('select')?.items}
-          <ToolButton icon={<Eraser size={18} />} active={activeTool === 'eraser'} onClick={() => handleToolClick('eraser')} tooltip="Eraser (E)" />
-          <ToolButton icon={<Type size={18} />} active={activeTool === 'text'} onClick={() => handleToolClick('text')} tooltip="Text (T)" />
+          {mobileQuickTools.includes('select') && groupById.get('select')?.items}
+          {groupById.get('hand')?.items}
+          {mobileQuickTools.includes('eraser') && <ToolButton icon={<Eraser size={18} />} active={activeTool === 'eraser'} onClick={() => handleToolClick('eraser')} tooltip="Eraser (E)" />}
+          {mobileQuickTools.includes('text') && <ToolButton icon={<Type size={18} />} active={activeTool === 'text'} onClick={() => handleToolClick('text')} tooltip="Text (T)" />}
         </>}
         
         {layout.visible.map((groupId, index) => (
@@ -931,7 +968,7 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
           </React.Fragment>
         ))}
 
-        {layout.overflow.length > 0 && (
+        {(layout.overflow.length > 0 || overflowActions) && (
           <>
             {!compactTools && <Divider />}
             <button
@@ -950,21 +987,33 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
               )}
             </button>
 
-            <OverlayManager isOpen={showOverflow} onClose={() => setShowOverflow(false)} anchorRef={overflowAnchorRef} placement={isPhone ? 'top-end' : 'bottom-end'}>
+            <OverlayManager isOpen={showOverflow} onClose={() => setShowOverflow(false)} anchorRef={overflowAnchorRef} placement={compactTools ? 'top-end' : 'bottom-end'}>
               <div
-                className="panvas-floating-surface flex w-max flex-col gap-2 p-2 max-[599px]:w-[min(20rem,calc(100vw-1.5rem))] max-[599px]:max-h-[60vh] max-[599px]:overflow-y-auto"
+                className="panvas-more-menu panvas-floating-surface flex w-max flex-col gap-2 p-2 max-[1023px]:gap-1 max-[1023px]:w-[min(20rem,calc(100vw-1.5rem))]"
                 role="menu"
                 aria-label="More Tools"
               >
+                {(overflowActions || compactTools) && <div className="flex flex-col" onClick={() => setShowOverflow(false)}>
+                  {overflowActions ?? <>
+                    <NotebookWorkspaceControls focusOnly embedded showLabel />
+                    <button type="button" className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-panvas-bg-hover focus-ring" aria-label="Open page and view inspector" onClick={() => useUIStore.getState().togglePropertiesPanel()}><PanelRight size={18} />Page and view</button>
+                  </>}
+                  <div className="my-1 h-px bg-panvas-border-subtle" />
+                </div>}
                 {pageUtilities && (
                   <div>
                     {isPhone && <div className="px-2 pb-1 text-xs font-medium text-panvas-text-secondary">Page actions</div>}
-                    <div className="flex items-center gap-1 max-[599px]:flex-wrap max-[599px]:justify-start">
+                    <div className="flex items-center gap-1 max-[1023px]:flex-wrap max-[1023px]:justify-start">
                       {pageUtilities}
                     </div>
                     {layout.overflow.length > 0 && <div className="h-[1px] w-full bg-panvas-border-subtle my-1" />}
                   </div>
                 )}
+                {compactTools && toolState.handwritingToTextEnabled && <HandwritingSettingsStrip
+                  settings={handwritingSettings}
+                  onChange={updateHandwritingSettings}
+                  onPalette={() => { setShowOverflow(false); setShowHandwritingPalette(true); }}
+                />}
                 {isConfigurableDrawingTool(activeTool) && !toolState.handwritingToTextEnabled && !showInlineWritingPresets && currentSettings && (
                   <>
                      <WritingPresetStrip
@@ -1004,7 +1053,7 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
                     ) : (
                       <div>
                       {isPhone && <div className="px-2 pb-1 text-xs font-medium text-panvas-text-secondary">{({ history: 'History', handwriting: 'Handwriting to text', primary: 'Writing tools', pencil: 'Pencil', select: 'Selection', hand: 'Move around the page', image: 'Insert image or sticky note', shapes: 'Shapes', ruler: 'Ruler', laser: 'Presentation pointer', format: 'Formatting' } as Record<string, string>)[groupId]}</div>}
-                      <div className="flex items-center justify-center gap-1 max-[599px]:flex-wrap max-[599px]:justify-start">
+                      <div className="flex items-center justify-center gap-1 max-[1023px]:flex-wrap max-[1023px]:justify-start">
                         {groupById.get(groupId)?.items.filter(item => !(layout.visible.includes('active-tool') && groupId === 'primary' && React.isValidElement(item) && item.key === activeTool))}
                       </div>
                       </div>
@@ -1898,7 +1947,7 @@ function HandwritingSettingsStrip({ settings, onChange, onPalette }: {
   onChange: (updates: Partial<HandwritingToolPreferences>) => void;
   onPalette: () => void;
 }) {
-  const isMobileViewport = useIsMobileViewport();
+  const isMobileViewport = useIsMobileViewport(1023);
   const [isTextSettingsOpen, setIsTextSettingsOpen] = useState(false);
   const textSettingsAnchorRef = useRef<HTMLButtonElement>(null);
 
@@ -1952,7 +2001,7 @@ function HandwritingSettingsStrip({ settings, onChange, onPalette }: {
   // collapse into a compact anchored popover.
   if (isMobileViewport) {
     return (
-      <div className="panvas-floating-surface flex h-9 max-w-[calc(100vw-1rem)] items-center gap-0.5 px-1.5" aria-label="Handwriting to Text settings">
+      <div className="panvas-floating-surface flex min-h-9 max-w-full flex-wrap items-center gap-0.5 px-1.5 py-1" aria-label="Handwriting to Text settings">
         {presetControls}
         <Divider />
         <button

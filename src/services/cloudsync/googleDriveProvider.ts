@@ -87,6 +87,7 @@ export class GoogleDriveSyncProvider implements CloudSyncProvider {
   private folderPromises = new Map<string, Promise<string>>();
   private creationIds = new Map<string, Promise<string>>();
   private objectUploads = new Map<string, Promise<ObjectPutResult>>();
+  private smallObjectReads = new Map<string, { signature: string; bytes: Uint8Array }>();
 
   constructor(options: GoogleDriveProviderOptions = {}) {
     this.tokenProvider = options.tokenProvider ?? (async () => {
@@ -297,14 +298,26 @@ export class GoogleDriveSyncProvider implements CloudSyncProvider {
     await this.ensureAppRoot();
     const objectFile = await this.resolveObjectFile(hash);
     if (!objectFile) throw new CloudOperationError('sync', { stage: 'object-download', reason: 'remote-object-missing', operation: 'download', retryable: false });
+    // Fresh Drive metadata guards reuse of immutable bytes. A changed checksum,
+    // version, size or ID forces a download; mutable JSON is never cached here.
+    const signature = JSON.stringify([objectFile.id, objectFile.size, objectFile.md5Checksum, objectFile.version, objectFile.modifiedTime]);
+    const cached = this.smallObjectReads.get(hash);
+    if (cached?.signature === signature && (objectFile.md5Checksum || objectFile.version)) return cached.bytes.slice();
     const token = await this.getValidToken();
     const response = await this.request(`Object download for "${hash}"`, `${this.apiBaseUrl}/files/${objectFile.id}?alt=media`, { headers: { Authorization: `Bearer ${token}` } }, this.uploadTimeoutMs);
     if (!response.ok) await this.handleHttpError(response, `Object download for "${hash}"`);
-    return new Uint8Array(await response.arrayBuffer());
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength <= 64 * 1024 && (objectFile.md5Checksum || objectFile.version)) {
+      this.smallObjectReads.delete(hash);
+      if (this.smallObjectReads.size >= 32) this.smallObjectReads.delete(this.smallObjectReads.keys().next().value!);
+      this.smallObjectReads.set(hash, { signature, bytes: bytes.slice() });
+    }
+    return bytes;
   }
 
   async putObjectIfAbsent(workspaceId: string, upload: ObjectUpload): Promise<ObjectPutResult> {
     this.assertCurrent();
+    this.smallObjectReads.delete(upload.hash);
     let pending = this.objectUploads.get(upload.hash);
     if (!pending) {
       pending = this.putObject(workspaceId, upload).finally(() => {
@@ -387,6 +400,40 @@ export class GoogleDriveSyncProvider implements CloudSyncProvider {
     const file = await this.resolveObjectFile(hash);
     if (!file || file.size === undefined) return null;
     return { size: Number(file.size) };
+  }
+
+  /** Validate only manifest objects in bounded name queries. Results expire at
+   * the engine's cycle boundary; misses are still looked up before an upload. */
+  async getMetadataBatch(hashes: readonly string[]): Promise<Array<{ hash: string; size: number }>> {
+    if (hashes.some(hash => !/^[a-f0-9]{64}$/.test(hash))) throw new Error('Invalid object hash.');
+    const electronDrive = this.electronDrive() as any;
+    if (electronDrive?.getMetadataBatch) return this.unwrapElectronDrive(electronDrive.getMetadataBatch(hashes));
+    await this.ensureAppRoot();
+    const unique = [...new Set(hashes)];
+    const found = new Map<string, DriveFile>();
+    for (let start = 0; start < unique.length; start += 50) {
+      const names = unique.slice(start, start + 50);
+      const accepted = new Set(names);
+      const query = `trashed = false and '${escapeQuery(this.objectsFolderId!)}' in parents and (${names.map(hash => `name = '${hash}'`).join(' or ')})`;
+      let pageToken: string | undefined;
+      do {
+        const token = await this.getValidToken();
+        const params = new URLSearchParams({ q: query, spaces: this.storageSpace, pageSize: '1000', fields: 'nextPageToken,incompleteSearch,files(id,name,size,md5Checksum,version,modifiedTime,mimeType)' });
+        if (pageToken) params.set('pageToken', pageToken);
+        const response = await this.request('Manifest object metadata', `${this.apiBaseUrl}/files?${params}`, { headers: { Authorization: `Bearer ${token}` } });
+        if (!response.ok) await this.handleHttpError(response, 'Manifest object metadata');
+        const page = await response.json() as { files?: DriveFile[]; nextPageToken?: string; incompleteSearch?: boolean };
+        if (page.incompleteSearch) throw new CloudOperationError('sync', { stage: 'manifest-validation', reason: 'object-search-incomplete', retryable: true });
+        for (const file of page.files ?? []) {
+          if (!accepted.has(file.name) || !Number.isSafeInteger(Number(file.size)) || Number(file.size) <= 0) continue;
+          const previous = found.get(file.name);
+          if (!previous || file.id < previous.id) found.set(file.name, file);
+        }
+        pageToken = page.nextPageToken;
+      } while (pageToken);
+    }
+    for (const [hash, file] of found) this.objectFiles.set(hash, file);
+    return [...found].map(([hash, file]) => ({ hash, size: Number(file.size) }));
   }
 
   async listRemoteWorkspaces(): Promise<RemoteWorkspaceSummary[]> {
@@ -611,6 +658,7 @@ export class GoogleDriveSyncProvider implements CloudSyncProvider {
   }
 
   clearCaches(): void {
+    this.smallObjectReads.clear();
     this.validTokenPromise = null;
     this.tokenRefreshPromise = null;
     this.rootPromise = null;

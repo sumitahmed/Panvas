@@ -1198,6 +1198,41 @@
   padding: 4px 4px max(4px, env(safe-area-inset-bottom));
   border-top: 1px solid rgb(var(--border-default));
   background: rgb(var(--bg-elevated));
+  padding-left: max(4px, env(safe-area-inset-left));
+  padding-right: max(4px, env(safe-area-inset-right));
+}
+.panvas-anchored-overlay {
+  --panvas-overlay-safe-top: env(safe-area-inset-top, 0px);
+  --panvas-overlay-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --panvas-overlay-safe-left: env(safe-area-inset-left, 0px);
+  --panvas-overlay-safe-right: env(safe-area-inset-right, 0px);
+}
+.panvas-anchored-overlay > * { max-width: 100%; min-width: 0; }
+.panvas-more-menu { max-height: inherit; overflow-y: auto; overscroll-behavior: contain; }
+@media (max-width: 1023px) {
+  .panvas-more-menu { max-height: min(32rem, var(--panvas-overlay-max-height, 100dvh)); }
+  .panvas-more-menu > .bg-panvas-border-subtle { margin-block: 0; }
+  .panvas-more-menu .panvas-icon-control,
+  .panvas-utility-menu .panvas-icon-control { min-height: 40px; min-width: 40px; }
+  .panvas-utility-panel button { min-height: 40px; }
+}
+.panvas-compact-toolbar { width: 100%; max-width: 100%; gap: 0; padding-inline: 4px; }
+.panvas-compact-toolbar > button { min-width: 0; max-width: 44px; flex: 1 1 0; }
+.panvas-pdf-fullpage-controls {
+  top: max(8px, env(safe-area-inset-top)); right: max(8px, env(safe-area-inset-right));
+  max-width: calc(100% - 16px);
+}
+.panvas-pdf-fullpage-controls button { min-height: 44px; }
+.panvas-pdf-docked-viewport {
+  padding-left: max(8px, env(safe-area-inset-left)); padding-right: max(8px, env(safe-area-inset-right));
+  padding-top: max(8px, env(safe-area-inset-top));
+}
+.panvas-pdf-controls-sheet {
+  position: fixed; inset: auto 0 var(--panvas-tool-dock-inset, var(--panvas-keyboard-inset, 0px)); z-index: 100;
+  max-height: min(76dvh, calc(var(--panvas-visual-height, 100dvh) - var(--panvas-tool-dock-height, 0px) - env(safe-area-inset-top, 0px) - 24px));
+  overflow: auto; padding: 8px 8px max(12px, env(safe-area-inset-bottom));
+  border: 1px solid rgb(var(--border-default)); border-radius: 16px 16px 0 0;
+  background: rgb(var(--bg-elevated));
 }
 .panvas-sheet-close {
   display: block; margin-left: auto; padding: 10px 16px; min-height: 44px;
@@ -1224,9 +1259,9 @@
   }
   .panvas-mobile-sheet,
   .panvas-app-shell .panvas-overlay:not(.panvas-tooltip) {
-    position: fixed; inset: auto 0 var(--panvas-keyboard-inset, 0px);
+    position: fixed; inset: auto 0 var(--panvas-tool-dock-inset, var(--panvas-keyboard-inset, 0px));
     width: 100%; max-width: 100%; min-width: 0;
-    max-height: min(76dvh, calc(var(--panvas-visual-height, 100dvh) - 56px));
+    max-height: min(76dvh, calc(var(--panvas-visual-height, 100dvh) - var(--panvas-tool-dock-height, 0px) - env(safe-area-inset-top, 0px) - 24px));
     overflow: auto; overscroll-behavior: contain;
     transform: none; margin: 0; padding-bottom: max(12px, env(safe-area-inset-bottom));
     border-radius: 16px 16px 0 0; border: 1px solid rgb(var(--border-default));
@@ -1239,9 +1274,9 @@
   .panvas-view-inspector button { min-height: 40px; }
   .panvas-mobile-sheet select, .panvas-mobile-sheet input:not([type='range']),
   .panvas-properties-panel select { min-height: 40px; }
-  .panvas-properties-panel, .panvas-view-inspector {
-    bottom: var(--panvas-keyboard-inset, 0px); max-width: 100%;
-    max-height: calc(var(--panvas-visual-height, 100dvh) - 56px);
+  .panvas-app-shell :is(.panvas-properties-panel, .panvas-view-inspector) {
+    bottom: var(--panvas-tool-dock-inset, var(--panvas-keyboard-inset, 0px)); max-width: 100%;
+    max-height: calc(var(--panvas-visual-height, 100dvh) - var(--panvas-tool-dock-height, 0px) - env(safe-area-inset-top, 0px) - 24px);
   }
   .panvas-dialog input, .panvas-dialog textarea { font-size: 16px; }
   .panvas-layer-modal { height: var(--panvas-visual-height, 100dvh); }
@@ -1250,6 +1285,18 @@
 }
 
 @media (min-width: 600px) and (max-width: 1023px) {
+  .panvas-app-shell[data-touch-input='true'] .panvas-view-inspector {
+    position: fixed; top: auto; right: max(12px, env(safe-area-inset-right, 0px));
+    bottom: var(--panvas-tool-dock-inset, var(--panvas-keyboard-inset, 0px));
+    height: auto; max-width: calc(100% - 24px);
+    max-height: calc(var(--panvas-visual-height, 100dvh) - var(--panvas-tool-dock-height, 0px) - env(safe-area-inset-top, 0px) - 24px);
+  }
+  .panvas-app-shell[data-touch-input='true'] .panvas-pdf-sidebar {
+    position: fixed; top: auto; left: max(12px, env(safe-area-inset-left, 0px));
+    bottom: var(--panvas-tool-dock-inset, var(--panvas-keyboard-inset, 0px));
+    height: calc(var(--panvas-visual-height, 100dvh) - var(--panvas-tool-dock-height, 0px) - env(safe-area-inset-top, 0px) - 24px);
+    max-height: calc(var(--panvas-visual-height, 100dvh) - var(--panvas-tool-dock-height, 0px) - env(safe-area-inset-top, 0px) - 24px);
+  }
   .panvas-notebook-chrome {
     position: relative; inset: auto; flex-shrink: 0; padding: 8px; gap: 8px;
     min-height: 76px; background: rgb(var(--bg-primary));

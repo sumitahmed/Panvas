@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   resolveToolbarLayout,
   resolveFullscreenToolbarLayout,
+  resolveMobileQuickTools,
   TOOLBAR_COMPACT_BREAKPOINT,
   TOOLBAR_FULL_BREAKPOINT,
   TOOLBAR_MEDIUM_BREAKPOINT,
@@ -20,6 +21,18 @@ import {
 } from '../src/components/notebook/engine/ViewportManager.ts';
 
 const ALL_GROUPS = [...TOOLBAR_GROUP_ORDER];
+
+test('mobile quick tools keep Hand direct and fit each narrow width', () => {
+  for (const width of [132, 176, 220, 280, 308, 352, 360, 375, 390, 412, 430]) {
+    const tools = resolveMobileQuickTools(width);
+    assert.ok(tools.includes('hand'));
+    assert.ok(tools.includes('pen'));
+    assert.equal(new Set(tools).size, tools.length);
+    assert.ok((tools.length + (tools.includes('history') ? 1 : 0) + 1) * 44 <= width);
+  }
+  assert.deepEqual(resolveMobileQuickTools(360), ['history', 'pen', 'select', 'hand', 'eraser', 'text']);
+  assert.deepEqual(resolveMobileQuickTools(220), ['pen', 'select', 'hand', 'eraser']);
+});
 // Smallest width at which the fit check can still show every group:
 // chrome + overflow button + all group widths.
 const FULL_FIT_WIDTH =

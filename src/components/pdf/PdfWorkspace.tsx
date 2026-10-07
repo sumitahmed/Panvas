@@ -1,12 +1,15 @@
 import React, { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from 'react';
+import { flushSync } from 'react-dom';
 import { Bookmark, BookOpen, CalendarClock, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Download, FileText, Hand, Maximize2, MessageCircle, Minus, PanelLeftClose, PanelLeftOpen, PanelRight, Plus, Redo2, Undo2 } from 'lucide-react';
 import { PdfThumbnailSidebar } from './PdfThumbnailSidebar';
 import { PdfPageRenderer } from './PdfPageRenderer';
+import { PdfStaticAnnotationLayer } from './PdfStaticAnnotationLayer';
 import { usePdfViewportZoom } from './usePdfViewportZoom';
 import { resolveDocumentToolCursor } from '@/components/notebook/documentToolCursor';
 import { usePdfDocument } from '@/hooks/usePdfDocument';
 import type { NotebookPage, PdfPageState, PdfPageRotation } from '@/types/notebook';
 import { NotebookEngine } from '@/components/notebook/engine/NotebookEngine';
+import type { ImageManager } from '@/components/notebook/engine/ImageManager';
 import { createEmptyDrawingData, type DrawingData, type ViewportState, type TextObject } from '@/components/notebook/engine/drawingTypes';
 import { useWorkspaceStore } from '@/stores/workspaceStore';
 import { useLayoutStore } from '@/stores/layoutStore';
@@ -20,6 +23,7 @@ import { useUIStore } from '@/stores/uiStore';
 import { useAuthStore } from '@/stores/authStore';
 import { exportAnnotatedPdf } from '@/services/pdf/exportAnnotatedPdf';
 import { NotebookPageUtilities } from '@/components/notebook/NotebookPageUtilities';
+import { NotebookWorkspaceControls } from '@/components/notebook/NotebookWorkspaceControls';
 import { PresentationOverlay } from '@/components/workspace/PresentationOverlay';
 import { WorkspaceViewInspectorPanel } from '@/components/workspace/WorkspaceViewControls';
 import { canvasRepository } from '@/repositories/CanvasRepository';
@@ -32,6 +36,7 @@ import { NoteSpaceControl } from '@/components/notebook/NoteSpaceControl';
 import { resolveActivePdfPage } from './pdfNavigation';
 import { attachTwoFingerViewportGesture } from '@/components/notebook/engine/touchViewportGesture';
 import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
+import { useHasTouchInput } from '@/hooks/useHasTouchInput';
 import { useFullDarkView } from '@/hooks/useFullDarkView';
 import { fullDarkSurfaceColor } from '@/lib/fullDarkView';
 
@@ -42,16 +47,30 @@ interface PdfPageDescriptor {
   drawing: DrawingData;
 }
 const settledPdfScale = (current: number, next: number) => Math.abs(current - next) < 1e-7 ? current : next;
+// Five pages in each direction cover fast flicks and reversals. The previous
+// editing owner may sit outside this window until its gesture/scroll settles.
+const PDF_RESIDENT_PAGE_RADIUS = 5;
 
 export function PdfWorkspace({ page }: { page?: NotebookPage }) {
   const isPhone = useIsMobileViewport();
+  const compactViewport = useIsMobileViewport(1023);
+  const hasTouchInput = useHasTouchInput();
   const fullDarkView = useFullDarkView();
   const [mobileControlsOpen, setMobileControlsOpen] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
+  const [visiblePage, setVisiblePage] = useState(1);
+  const [residentCenter, setResidentCenter] = useState(1);
+  const residentCenterRef = useRef(1);
+  const visiblePageRef = useRef(visiblePage);
+  visiblePageRef.current = visiblePage;
+  const currentPageRef = useRef(currentPage);
+  currentPageRef.current = currentPage;
+  const hydratingScene = useRef(false);
   
   const { pdfDocument, numPages, isLoading, error } = usePdfDocument(page?.pdfDataId);
   const { workspaces, notebooks, loadWorkspaceContents, setActivePage } = useWorkspaceStore();
   const { notebookModeLevel, setNotebookModeLevel, workspaceViewMode, setWorkspaceViewMode, paneLayout } = useLayoutStore();
+  const useToolDock = isPhone || (compactViewport && hasTouchInput);
   const { isPropertiesPanelOpen, togglePropertiesPanel } = useUIStore();
   
   const notebook = page ? notebooks.find(item => item.id === page.notebookId) : undefined;
@@ -59,6 +78,12 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
 
   // Engine setup
   const notebookEngine = useMemo(() => new NotebookEngine(), []);
+  const staticPageImages = useRef(new Map<number, ImageManager>());
+  const registerStaticImages = useCallback((sourcePage: number, images: ImageManager | null) => {
+    if (images) staticPageImages.current.set(sourcePage, images);
+    else staticPageImages.current.delete(sourcePage);
+  }, []);
+  useEffect(() => () => notebookEngine.destroy(), [notebookEngine]);
   useLayoutEffect(() => { notebookEngine.drawing.setFullDarkView(fullDarkView); }, [notebookEngine, fullDarkView]);
   const [rasterScale, setRasterScale] = useState(1);
   const annotationGestureActive = useRef(false);
@@ -75,16 +100,27 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
   const [sourcePaperDimensions, setSourcePaperDimensions] = useState({ width: 794, height: 1123 });
   const [dimensionsSourceId, setDimensionsSourceId] = useState<string | undefined>();
   const [pageDescriptors, setPageDescriptors] = useState<Record<number, PdfPageDescriptor>>({});
+  const descriptorsRef = useRef(pageDescriptors);
+  descriptorsRef.current = pageDescriptors;
   const [isExporting, setIsExporting] = useState(false);
   const userId = useAuthStore(state => state.user?.id ?? null);
   const pdfPageState = useMemo(() => normalizePdfPageState(page?.pdfPageState, numPages), [numPages, page?.pdfPageState]);
   const currentRotation = pdfPageState.rotations[currentPage] ?? 0;
-  const currentOrderIndex = Math.max(0, pdfPageState.pageOrder.indexOf(currentPage));
+  const currentOrderIndex = Math.max(0, pdfPageState.pageOrder.indexOf(visiblePage));
+  const residentOrderIndex = Math.max(0, pdfPageState.pageOrder.indexOf(residentCenter));
+  const retainNearbyPages = useCallback((sourcePage: number) => {
+    // Keep two pages of slack before sliding the window. Boundary oscillation
+    // must not repeatedly evict/rebuild its outer raster and image previews.
+    if (Math.abs(pdfPageState.pageOrder.indexOf(sourcePage) - pdfPageState.pageOrder.indexOf(residentCenterRef.current)) <= 2) return;
+    residentCenterRef.current = sourcePage;
+    setResidentCenter(sourcePage);
+  }, [pdfPageState.pageOrder]);
   const currentSource = pageDescriptors[currentPage]?.source ?? sourcePaperDimensions;
   const currentNoteSpace = activeSceneReady ? noteSpace : pageDescriptors[currentPage]?.noteSpace ?? noteSpace;
   const primaryGeometry = useMemo(() => pdfSurroundingGeometry(currentSource, currentRotation, currentNoteSpace), [currentSource, currentRotation, currentNoteSpace]);
   const paperDimensions = primaryGeometry.visual;
   useEffect(() => notebookEngine.onPropertiesChange(props => {
+    if (hydratingScene.current) return;
     const nextNoteSpace = resolvePageNoteSpace(props);
     setNoteSpace(nextNoteSpace);
     setPageDescriptors(current => current[currentPage]
@@ -118,8 +154,18 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
 
   
   // Sidebar toggle
-  const [isSidebarOpen, setIsSidebarOpen] = useState(() => !isPhone);
-  useEffect(() => { if (isPhone) setIsSidebarOpen(false); }, [isPhone]);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(() => !useToolDock);
+  useEffect(() => { if (useToolDock) setIsSidebarOpen(false); }, [useToolDock]);
+  const previousPdfSidebar = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (notebookModeLevel === 2) {
+      previousPdfSidebar.current = isSidebarOpen;
+      setIsSidebarOpen(false);
+    } else if (previousPdfSidebar.current !== null) {
+      setIsSidebarOpen(previousPdfSidebar.current);
+      previousPdfSidebar.current = null;
+    }
+  }, [notebookModeLevel]);
 
   useEffect(() => {
     if (workspaceViewMode !== 'edit') {
@@ -149,6 +195,9 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
   // from the previous document is not meaningful for the newly selected document.
   useEffect(() => {
     setCurrentPage(1);
+    setVisiblePage(1);
+    residentCenterRef.current = 1;
+    setResidentCenter(1);
     commandedPageRef.current = null;
     setDimensionsSourceId(undefined);
     setPageDescriptors({});
@@ -187,10 +236,20 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
     setDimensionsSourceId(page?.pdfDataId);
   }, [currentPage, page?.pdfDataId, pageDescriptors]);
 
+  const activatePage = useCallback((sourcePage: number) => {
+    const target = Math.max(1, Math.min(numPages || 1, sourcePage));
+    const images = staticPageImages.current.get(target);
+    const fileIds = (descriptorsRef.current[target]?.drawing.objects ?? []).flatMap(object => object.type === 'image' ? [object.fileId] : []);
+    if (images) notebookEngine.images.adoptDecodedImages(images, fileIds);
+    retainNearbyPages(target);
+    setVisiblePage(target);
+    setCurrentPage(target);
+  }, [numPages, notebookEngine, retainNearbyPages]);
+
   const navigateToPage = useCallback((sourcePage: number) => {
     const target = Math.max(1, Math.min(numPages || 1, sourcePage));
     commandedPageRef.current = target;
-    setCurrentPage(target);
+    activatePage(target);
     requestAnimationFrame(() => {
       const scroller = documentScrollRef.current;
       const element = pageElementRefs.current.get(target);
@@ -202,7 +261,7 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
       }
       requestAnimationFrame(() => { commandedPageRef.current = null; });
     });
-  }, [numPages]);
+  }, [numPages, activatePage]);
 
 
   useEffect(() => {
@@ -214,6 +273,7 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
       const target = Math.min(numPages, requested);
       commandedPageRef.current = target;
       setCurrentPage(target);
+      setVisiblePage(target);
     }
   }, [numPages, page?.id]);
 
@@ -246,12 +306,14 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
   useEffect(() => {
     const unsubViewport = notebookEngine.viewport.subscribe(setViewport);
     const unsubDrawing = notebookEngine.input.onDrawingChange(() => {
+      if (hydratingScene.current) return;
       setTextObjects([...notebookEngine.texts.getTexts()]);
       setPageDescriptors(current => current[currentPage]
         ? { ...current, [currentPage]: { ...current[currentPage], drawing: notebookEngine.getDrawingData() } }
         : current);
     });
     const unsubHistory = notebookEngine.history.subscribe(() => {
+      if (hydratingScene.current) return;
       setTextObjects([...notebookEngine.texts.getTexts()]);
       setPageDescriptors(current => current[currentPage]
         ? { ...current, [currentPage]: { ...current[currentPage], drawing: notebookEngine.getDrawingData() } }
@@ -325,36 +387,62 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
     fittedDocumentRef.current = fitKey;
   }, [documentSessionId, dimensionsSourceId, page?.pdfDataId, isSidebarOpen, sidebarWidth, containerSize.width, paperDimensions.width, notebookEngine, isPhone]);
 
-  // Native document scrolling keeps every page in one stable flow. Only the
-  // active-page marker changes as the viewport crosses a page boundary.
+  // Cache document geometry on layout changes, not on each native scroll rAF.
+  const pageFrames = useRef<Array<{ page: number; top: number; bottom: number }>>([]);
+  const refreshVisiblePage = useRef<(() => void) | null>(null);
+  const frameGeometry = pdfPageState.pageOrder.map(sourcePage => {
+    const descriptor = pageDescriptors[sourcePage];
+    if (!descriptor) return '';
+    const geometry = pdfSurroundingGeometry(descriptor.source, pdfPageState.rotations[sourcePage] ?? 0, descriptor.noteSpace);
+    return `${sourcePage}:${geometry.visual.width}:${geometry.visual.height}`;
+  }).join('|');
+  useLayoutEffect(() => {
+    const scroller = documentScrollRef.current;
+    if (!scroller) return;
+    const bounds = scroller.getBoundingClientRect();
+    pageFrames.current = pdfPageState.pageOrder.flatMap(sourcePage => {
+      const element = pageElementRefs.current.get(sourcePage);
+      if (!element) return [];
+      const rect = element.getBoundingClientRect();
+      const top = scroller.scrollTop + rect.top - bounds.top;
+      return [{ page: sourcePage, top, bottom: top + rect.height }];
+    });
+    refreshVisiblePage.current?.();
+  }, [frameGeometry, viewport.scale, containerSize.width, containerSize.height, paneLayout, geometryReady, isPhone, useToolDock]);
+
+  // Page indication is cheap. Retain editing ownership until scrolling and
+  // pointer gestures settle, then load exactly the latest visible page.
   useEffect(() => {
     const scroller = documentScrollRef.current;
     if (!scroller) return;
     let scrollTimer: ReturnType<typeof setTimeout> | null = null;
+    const promoteVisiblePage = () => {
+      scrollTimer = null;
+      if (notebookEngine.input.navigationGestures.active || annotationGestureActive.current || isZooming()) {
+        scrollTimer = setTimeout(promoteVisiblePage, 180);
+        return;
+      }
+      if (visiblePageRef.current !== currentPageRef.current) {
+        activatePage(visiblePageRef.current);
+      }
+    };
     const resolveVisiblePage = () => {
       scrollFrameRef.current = null;
-      if (commandedPageRef.current || notebookEngine.input.navigationGestures.active) return;
+      if (commandedPageRef.current) return;
       const top = scroller.scrollTop;
       const bottom = top + scroller.clientHeight;
-      const scrollerBounds = scroller.getBoundingClientRect();
-      const frames = pdfPageState.pageOrder.flatMap(sourcePage => {
-        const element = pageElementRefs.current.get(sourcePage);
-        if (!element) return [];
-        const bounds = element.getBoundingClientRect();
-        const frameTop = scroller.scrollTop + bounds.top - scrollerBounds.top;
-        return [{ page: sourcePage, top: frameTop, bottom: frameTop + bounds.height }];
-      });
-      const resolved = resolveActivePdfPage(frames, top, bottom, currentPage);
-      if (resolved && resolved !== currentPage) setCurrentPage(resolved);
+      const resolved = resolveActivePdfPage(pageFrames.current, top, bottom, visiblePageRef.current);
+      if (resolved) retainNearbyPages(resolved);
+      if (resolved && resolved !== visiblePageRef.current) { visiblePageRef.current = resolved; setVisiblePage(resolved); }
     };
     const handleScroll = () => {
-      if (notebookEngine.input.navigationGestures.active) return;
       if (scrollTimer !== null) clearTimeout(scrollTimer);
       if (isZooming()) {
         scrollTimer = setTimeout(handleScroll, 180);
         return;
       }
       if (scrollFrameRef.current === null) scrollFrameRef.current = requestAnimationFrame(resolveVisiblePage);
+      scrollTimer = setTimeout(promoteVisiblePage, 180);
     };
     const handleWheel = (event: WheelEvent) => {
       if (!event.ctrlKey && !event.metaKey) return;
@@ -364,16 +452,19 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
     };
     scroller.addEventListener('scroll', handleScroll, { passive: true });
     scroller.addEventListener('wheel', handleWheel, { passive: false });
+    refreshVisiblePage.current = handleScroll;
     const unsubscribeIdle = notebookEngine.input.navigationGestures.onIdle(handleScroll);
     handleScroll();
     return () => {
       scroller.removeEventListener('scroll', handleScroll);
       scroller.removeEventListener('wheel', handleWheel);
+      refreshVisiblePage.current = null;
       unsubscribeIdle();
       if (scrollTimer !== null) clearTimeout(scrollTimer);
       if (scrollFrameRef.current !== null) cancelAnimationFrame(scrollFrameRef.current);
+      scrollFrameRef.current = null;
     };
-  }, [currentPage, notebookEngine, pdfPageState.pageOrder, getZoomScale, setZoomStable, isZooming, geometryReady]);
+  }, [notebookEngine, activatePage, retainNearbyPages, pdfPageState.pageOrder, getZoomScale, setZoomStable, isZooming, geometryReady]);
 
 
 
@@ -488,20 +579,23 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
   }, [currentOrderIndex, currentPage, navigateToPage, notebookEngine, notebookModeLevel, pdfPageState.pageOrder, setNotebookModeLevel, setWorkspaceViewMode, setZoomStable, workspaceViewMode]);
 
   // Load and Save PDF Page Data
-  useEffect(() => {
+  useLayoutEffect(() => {
     let cancelled = false;
     async function loadPageData() {
       if (!workspace || !notebook || !page) return;
       const pdfPageId = pdfAnnotationStorageId(page.id, currentPage);
-      const drawingData = await notebookRepository.loadDrawingData(workspace.id, notebook.id, pdfPageId);
+      const drawingData = descriptorsRef.current[currentPage]?.drawing
+        ?? await notebookRepository.loadDrawingData(workspace.id, notebook.id, pdfPageId);
       if (cancelled) return;
-      notebookEngine.setDrawingData(drawingData || createEmptyDrawingData(), pdfPageId);
+      hydratingScene.current = true;
+      try { notebookEngine.setDrawingData(drawingData || createEmptyDrawingData(), pdfPageId); }
+      finally { hydratingScene.current = false; }
       setTextObjects([...notebookEngine.texts.getTexts()]);
       setLoadedAnnotationId(pdfPageId);
     }
     void loadPageData();
     return () => { cancelled = true; };
-  }, [workspace?.id, notebook?.id, page?.id, currentPage, notebookEngine]);
+  }, [workspace?.id, notebook?.id, page?.id, currentPage, notebookEngine, geometryReady]);
 
   // Input stays attached while the document's DOM frame zooms. Raster detail
   // catches up after navigation settles, without losing pointer capture.
@@ -549,12 +643,13 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
 
     let drawingSaveTimeout: NodeJS.Timeout | null = null;
     let hasPendingSave = false;
+    let pendingData: DrawingData | null = null;
 
     const flushSave = () => {
-      if (hasPendingSave) {
+      if (hasPendingSave && pendingData) {
         const pdfPageId = pdfAnnotationStorageId(page.id, currentPage);
         useCanvasStore.getState().setSaveStatus('saving');
-        void pageAudioPersistence.saveDrawing({ workspaceId: workspace.id, notebookId: notebook.id, pageId: pdfPageId }, notebookEngine.getDrawingData(), {
+        void pageAudioPersistence.saveDrawing({ workspaceId: workspace.id, notebookId: notebook.id, pageId: pdfPageId }, pendingData, {
           pdfOwnerPageId: page.id,
           pdfSourcePage: currentPage,
         })
@@ -565,6 +660,7 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
             useUIStore.getState().showToast('PDF annotations could not be saved.', 'error');
           });
         hasPendingSave = false;
+        pendingData = null;
         if (drawingSaveTimeout) {
           clearTimeout(drawingSaveTimeout);
           drawingSaveTimeout = null;
@@ -573,14 +669,16 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
     };
 
     const scheduleSave = () => {
+      if (hydratingScene.current || notebookEngine.getDrawingOwnership().pageId !== pdfAnnotationStorageId(page.id, currentPage)) return;
       hasPendingSave = true;
+      pendingData = notebookEngine.getDrawingData();
       if (drawingSaveTimeout) clearTimeout(drawingSaveTimeout);
       
       drawingSaveTimeout = setTimeout(() => {
         flushSave();
       }, 1000);
     };
-    const unsubHistory = notebookEngine.history.subscribe(scheduleSave);
+    const unsubHistory = notebookEngine.history.subscribe((_canUndo, _canRedo, source) => { if (source === 'user') scheduleSave(); });
     const unsubDrawing = notebookEngine.input.onDrawingChange(scheduleSave);
 
     return () => {
@@ -660,6 +758,7 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
   }, [loadWorkspaceContents, notebook, page, pdfDocument, setActivePage, userId, workspace]);
 
   const handleLayersChange = useCallback(() => {
+    if (hydratingScene.current) return;
     setTextObjects([...notebookEngine.texts.getTexts()]);
     if (!workspace || !notebook || !page) return;
     void pageAudioPersistence.saveDrawing(
@@ -710,14 +809,13 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
       className="relative flex h-full w-full flex-col overflow-hidden bg-panvas-bg-secondary select-none"
       ref={containerRef}
     >
-      {isPhone && workspaceViewMode !== 'present' && <div className="panvas-mobile-document-header">
+      {!useToolDock && workspaceViewMode !== 'present' && notebookModeLevel === 2 && <div className="panvas-pdf-fullpage-controls panvas-layer-toolbar panvas-floating-surface absolute z-40 flex items-center gap-1 p-1">
         <button type="button" aria-label="PDF pages" className="panvas-icon-control" onClick={() => setIsSidebarOpen(value => !value)}><PanelLeftOpen size={18} /></button>
-        <button type="button" className="flex-1 text-xs" onClick={() => setMobileControlsOpen(value => !value)} aria-label="PDF page controls">{currentOrderIndex + 1} / {numPages}</button>
-        <button type="button" className="px-2 text-xs" aria-label="Fit PDF width" onClick={() => setZoomStable((containerSize.width - 16) / paperDimensions.width)}>Fit width</button>
+        <button type="button" className="min-w-0 whitespace-nowrap px-2 text-xs" onClick={() => setMobileControlsOpen(value => !value)} aria-label="PDF page controls">{currentOrderIndex + 1} / {numPages}</button>
         <button type="button" aria-label="Open page and view inspector" className="panvas-icon-control" onClick={togglePropertiesPanel}><PanelRight size={18} /></button>
-        <NotebookPageUtilities engine={notebookEngine} workspaceId={workspace?.id} notebookId={notebook?.id} ownerId={page ? pdfAnnotationStorageId(page.id, currentPage) : undefined} editable={workspaceViewMode === 'edit'} onPageDataPersisted={handlePageAudioPersisted} onChange={handleLayersChange} compact />
+        <NotebookWorkspaceControls focusOnly embedded />
       </div>}
-      {isPhone && mobileControlsOpen && <div className="panvas-mobile-sheet panvas-overlay">
+      {useToolDock && mobileControlsOpen && <div className="panvas-pdf-controls-sheet panvas-mobile-sheet panvas-overlay">
         <button type="button" className="panvas-sheet-close" onClick={() => setMobileControlsOpen(false)}>Done</button>
         <BottomNavigation page={currentOrderIndex + 1} totalPages={numPages} onPageChange={orderPage => navigateToPage(pdfPageState.pageOrder[orderPage - 1] ?? currentPage)} engine={notebookEngine} zoom={viewport.scale} onZoom={setZoomStable} onExport={handleExport} isExporting={isExporting} />
       </div>}
@@ -727,12 +825,12 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
         {/* Left: Sidebar */}
         {workspaceViewMode !== 'present' && <div
           ref={sidebarRef}
-          className={`panvas-floating-surface pointer-events-auto h-full max-h-[calc(100vh-2rem)] w-48 overflow-y-auto xl:w-64 ${isPhone ? 'panvas-mobile-sheet panvas-overlay' : ''} ${!isSidebarOpen ? 'hidden' : ''}`}
+          className={`panvas-pdf-sidebar panvas-floating-surface pointer-events-auto h-full max-h-[calc(100vh-2rem)] w-48 overflow-y-auto xl:w-64 ${isPhone ? 'panvas-mobile-sheet panvas-overlay' : ''} ${!isSidebarOpen ? 'hidden' : ''}`}
         >
           <PdfThumbnailSidebar 
             pdfDocument={pdfDocument} 
             numPages={numPages} 
-            currentPage={currentPage} 
+            currentPage={visiblePage}
             onPageChange={sourcePage => { navigateToPage(sourcePage); if (isPhone) setIsSidebarOpen(false); }}
             isSidebarOpen={isSidebarOpen}
             setIsSidebarOpen={setIsSidebarOpen}
@@ -746,7 +844,7 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
         </div>}
 
         {/* Bug 1: Persistent Reopen Button when sidebar is closed */}
-        {!isPhone && !isSidebarOpen && workspaceViewMode !== 'present' && (
+        {!useToolDock && !isSidebarOpen && workspaceViewMode !== 'present' && (
           <div className="absolute left-4 top-4 pointer-events-auto">
             <button 
               type="button"
@@ -761,7 +859,7 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
         )}
         
         {/* Center: Top Toolbar */}
-        {!isPhone && <div className="flex-1 flex flex-col justify-between items-center min-w-0 px-4 h-full">
+        {!useToolDock && <div className="flex-1 flex flex-col justify-between items-center min-w-0 px-4 h-full">
           {/* Top: Notebook Floating Toolbar */}
           <div className="pointer-events-auto mt-2 w-full flex justify-center">
             {workspaceViewMode === 'edit' && <NotebookFloatingToolbar
@@ -776,7 +874,7 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
 
         }
         {/* Dock controls in the reserved bottom chrome band. */}
-        {!isPhone && workspaceViewMode !== 'present' && !isPdfInteractionActive && (
+        {!useToolDock && workspaceViewMode !== 'present' && !isPdfInteractionActive && (
           <div className="pointer-events-auto absolute bottom-3 left-1/2 z-30 flex -translate-x-1/2 items-end gap-1">
             {showBottomNavigation && <BottomNavigation
               page={currentOrderIndex + 1}
@@ -801,7 +899,7 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
           </div>
         )}
 
-        {!isPhone && workspaceViewMode !== 'present' && <div className="pointer-events-auto mt-2 flex self-start items-start gap-1.5">
+        {!useToolDock && workspaceViewMode !== 'present' && <div className="pointer-events-auto mt-2 flex self-start items-start gap-1.5">
           <NotebookPageUtilities engine={notebookEngine} workspaceId={workspace?.id} notebookId={notebook?.id} ownerId={page ? pdfAnnotationStorageId(page.id, currentPage) : undefined} editable={workspaceViewMode === 'edit'} onPageDataPersisted={handlePageAudioPersisted} onChange={handleLayersChange} compact={containerSize.width < 900} />
           <button
             type="button"
@@ -813,10 +911,11 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
           >
             <PanelRight size={16} />
           </button>
+          {notebookModeLevel !== 2 && <NotebookWorkspaceControls focusOnly embedded />}
         </div>}
       </div>
 
-      <div ref={documentScrollRef} data-panvas-scroll-viewport style={{ overflowAnchor: 'none' }} className={isPhone ? 'relative min-h-0 flex-1 overflow-auto p-2' : 'absolute inset-0 overflow-auto px-8 pb-28 pt-28'} aria-label="PDF document pages">
+      <div ref={documentScrollRef} data-panvas-scroll-viewport style={{ overflowAnchor: 'none' }} className={useToolDock ? 'panvas-pdf-docked-viewport relative min-h-0 flex-1 overflow-auto p-2' : 'absolute inset-0 overflow-auto px-8 pb-28 pt-28'} aria-label="PDF document pages">
         <div className="mx-auto flex min-w-max flex-col items-center gap-8" style={{ width: 'max-content', paddingInline: containerSize.width / 2, paddingBlock: containerSize.height / 2 }}>
           {!geometryReady && <div className="flex min-h-[40vh] items-center justify-center text-sm text-panvas-text-tertiary">Preparing stable page layout…</div>}
           {geometryReady && (!isPhone && paneLayout === 'two-page'
@@ -836,11 +935,20 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
                   key={sourcePage}
                   ref={element => { if (element) pageElementRefs.current.set(sourcePage, element); else pageElementRefs.current.delete(sourcePage); }}
                   data-pdf-source-page={sourcePage}
-                  onPointerDownCapture={() => { if (!active) navigateToPage(sourcePage); }}
+                  onPointerDownCapture={event => {
+                    if (active || annotationGestureActive.current || notebookEngine.input.navigationGestures.active || isZooming()) return;
+                    // A native Hand flick must not snap the page to its top or
+                    // transfer an editing runtime while the finger is scrolling.
+                    if (event.pointerType === 'touch' && toolState.mode === 'hand') return;
+                    flushSync(() => activatePage(sourcePage));
+                    // The original target was the static surface. Route this
+                    // first event to the newly mounted owner so no stroke is lost.
+                    notebookEngine.input.routeOverlayPointerDown(event.nativeEvent);
+                  }}
                   className={`relative shrink-0 bg-white shadow-2xl ${active ? 'ring-2 ring-panvas-accent-blue/35' : ''}`}
                   style={{ width: geometry.visual.width * viewport.scale, height: geometry.visual.height * viewport.scale, backgroundColor: fullDarkView ? fullDarkSurfaceColor('#ffffff') : '#ffffff' }}
                 >
-                  <LazyPdfPageContent active={active}>
+                  <LazyPdfPageContent resident={active || Math.abs(pdfPageState.pageOrder.indexOf(sourcePage) - residentOrderIndex) <= PDF_RESIDENT_PAGE_RADIUS}>
                     <div className="absolute" style={{ left: geometry.pdf.x * viewport.scale, top: geometry.pdf.y * viewport.scale, width: geometry.pdf.width * viewport.scale, height: geometry.pdf.height * viewport.scale }}>
                       <div style={{ width: geometry.pdf.width * rasterScale, height: geometry.pdf.height * rasterScale, transform: `scale(${viewport.scale / rasterScale})`, transformOrigin: 'top left' }}>
                         <PdfPageRenderer pdfDocument={pdfDocument} pageNumber={sourcePage} scale={rasterScale} rotation={rotation} />
@@ -867,7 +975,7 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
                         />
                       ))}
                     </>}
-                    {(!active || !activeSceneReady) && <PdfStaticAnnotationLayer drawing={descriptor.drawing} geometry={geometry} rotation={rotation} scale={viewport.scale} rasterScale={rasterScale} />}
+                    <PdfStaticAnnotationLayer drawing={descriptor.drawing} geometry={geometry} rotation={rotation} scale={viewport.scale} rasterScale={rasterScale} sourcePage={sourcePage} decodedSource={notebookEngine.images} onImagesReady={registerStaticImages} hidden={active && activeSceneReady} />
                   </LazyPdfPageContent>
                   {geometry.noteSpace.top + geometry.noteSpace.right + geometry.noteSpace.bottom + geometry.noteSpace.left > 0 && <div className="pointer-events-none absolute border border-panvas-border-subtle" style={{ left: geometry.pdf.x * viewport.scale, top: geometry.pdf.y * viewport.scale, width: geometry.pdf.width * viewport.scale, height: geometry.pdf.height * viewport.scale }} />}
                 </div>;
@@ -876,79 +984,25 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
           ))}
         </div>
       </div>
-      {isPhone && workspaceViewMode === 'edit' && <div className="panvas-mobile-tool-dock"><NotebookFloatingToolbar engine={notebookEngine} editor={activeEditor} saveKey={page ? pdfAnnotationStorageId(page.id, currentPage) : undefined} workspaceId={workspace?.id} /></div>}
+      {useToolDock && workspaceViewMode === 'edit' && <div className="panvas-mobile-tool-dock"><NotebookFloatingToolbar
+        engine={notebookEngine} editor={activeEditor} saveKey={page ? pdfAnnotationStorageId(page.id, currentPage) : undefined} workspaceId={workspace?.id}
+        overflowActions={<>
+          <NotebookWorkspaceControls focusOnly embedded showLabel />
+          <button type="button" className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-panvas-bg-hover focus-ring" aria-label="PDF pages" onClick={() => setIsSidebarOpen(value => !value)}><PanelLeftOpen size={18} />PDF pages</button>
+          <button type="button" className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-panvas-bg-hover focus-ring" aria-label="PDF page controls" onClick={() => setMobileControlsOpen(true)}><BookOpen size={18} />Page {currentOrderIndex + 1} of {numPages} · Zoom and export</button>
+          <button type="button" className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-panvas-bg-hover focus-ring" aria-label="Fit PDF width" onClick={() => setZoomStable((containerSize.width - 16) / paperDimensions.width)}><Maximize2 size={18} />Fit width</button>
+          <button type="button" className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-panvas-bg-hover focus-ring" aria-label="Open page and view inspector" onClick={togglePropertiesPanel}><PanelRight size={18} />Page and view</button>
+        </>}
+        pageUtilities={<NotebookPageUtilities engine={notebookEngine} workspaceId={workspace?.id} notebookId={notebook?.id} ownerId={page ? pdfAnnotationStorageId(page.id, currentPage) : undefined} editable onPageDataPersisted={handlePageAudioPersisted} onChange={handleLayersChange} compact />}
+      /></div>}
       {isPropertiesPanelOpen && workspaceViewMode !== 'present' && <WorkspaceViewInspectorPanel onClose={togglePropertiesPanel}><PdfNoteSpaceControl engine={notebookEngine} /></WorkspaceViewInspectorPanel>}
       {workspaceViewMode === 'present' && <PresentationOverlay />}
     </main>
   );
 }
 
-function PdfStaticAnnotationLayer({ drawing, geometry, rotation, scale, rasterScale }: {
-  drawing: DrawingData;
-  geometry: ReturnType<typeof pdfSurroundingGeometry>;
-  rotation: PdfPageRotation;
-  scale: number;
-  rasterScale: number;
-}) {
-  const engine = useMemo(() => new NotebookEngine(), []);
-  const fullDarkView = useFullDarkView();
-  useLayoutEffect(() => { engine.drawing.setFullDarkView(fullDarkView); }, [engine, fullDarkView]);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const textObjects = (drawing.objects ?? []).filter((object): object is TextObject => object.type === 'text');
-  const visibleLayers = new Set((drawing.layers ?? []).filter(layer => layer.visible).map(layer => layer.id));
-
-  useLayoutEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    engine.viewport.setRenderTransform({ pan: false, scale: false });
-    engine.drawing.setScaleMultiplier(rasterScale);
-    engine.mount(canvas, geometry.visual.width, geometry.visual.height);
-    return () => engine.unmount();
-  }, [engine]);
-  useLayoutEffect(() => {
-    engine.viewport.setPageCoordinateTransform(rotation, geometry.sheet.width, geometry.sheet.height, geometry.offset.x, geometry.offset.y);
-    engine.drawing.setScaleMultiplier(rasterScale);
-    engine.resize(geometry.visual.width, geometry.visual.height);
-    engine.setDrawingData(drawing);
-  }, [drawing, engine, geometry.offset.x, geometry.offset.y, geometry.sheet.height, geometry.sheet.width, geometry.visual.height, geometry.visual.width, rotation, rasterScale]);
-
-  return <div className="pointer-events-none absolute inset-0" aria-hidden="true">
-    <div className="absolute left-0 top-0" style={{ width: geometry.visual.width, height: geometry.visual.height, transform: `scale(${scale})`, transformOrigin: 'top left' }}><canvas ref={canvasRef} className="panvas-colored-content absolute inset-0 h-full w-full" /></div>
-    {textObjects.filter(object => visibleLayers.size === 0 || visibleLayers.has(object.layerId ?? 'layer-default')).map(object => (
-      <FloatingTextEditor
-        key={object.id}
-        object={object}
-        engine={engine}
-        scale={scale}
-        pdfPlacement={{ rotation, sourceDimensions: geometry.sheet, sourceOffset: geometry.offset }}
-        toolMode="hand"
-        onFocus={() => undefined}
-        onBlur={() => undefined}
-      />
-    ))}
-  </div>;
-}
-
-function LazyPdfPageContent({ active, children }: { active: boolean; children: React.ReactNode }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [nearViewport, setNearViewport] = useState(active);
-  useEffect(() => {
-    if (active) {
-      setNearViewport(true);
-      return;
-    }
-    const element = ref.current;
-    if (!element || typeof IntersectionObserver === 'undefined') {
-      setNearViewport(true);
-      return;
-    }
-    const observer = new IntersectionObserver(entries => {
-      if (entries.some(entry => entry.isIntersecting)) setNearViewport(true);
-    }, { rootMargin: '900px 0px' });
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [active]);
-  return <div ref={ref} className="absolute inset-0">{(active || nearViewport) ? children : null}</div>;
+function LazyPdfPageContent({ resident, children }: { resident: boolean; children: React.ReactNode }) {
+  return <div className="absolute inset-0">{resident ? children : null}</div>;
 }
 
 function BottomNavigation({ 

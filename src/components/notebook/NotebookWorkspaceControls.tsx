@@ -3,7 +3,7 @@ import { PanelLeft, PanelRight, Maximize2, Minimize2 } from 'lucide-react';
 import { useUIStore } from '@/stores/uiStore';
 import { useLayoutStore } from '@/stores/layoutStore';
 
-export const NotebookWorkspaceControls: React.FC<{ focusOnly?: boolean; embedded?: boolean }> = ({ focusOnly = false, embedded = false }) => {
+export const NotebookWorkspaceControls: React.FC<{ focusOnly?: boolean; embedded?: boolean; showLabel?: boolean }> = ({ focusOnly = false, embedded = false, showLabel = false }) => {
   const { notebookModeLevel, setNotebookModeLevel, toggleNotebookPane, isNotebookPaneVisible, previousPanelState, setPreviousPanelState } = useLayoutStore();
   const { isSidebarOpen, toggleSidebar, togglePropertiesPanel, isPropertiesPanelOpen } = useUIStore();
 
@@ -43,13 +43,13 @@ export const NotebookWorkspaceControls: React.FC<{ focusOnly?: boolean; embedded
   const isLeftPanelActive = notebookModeLevel === 0 ? isSidebarOpen : isNotebookPaneVisible;
 
   return (
-    <div className={`flex items-center gap-1.5 text-panvas-text-primary select-none w-max max-[599px]:gap-1 ${embedded ? 'p-1' : 'panvas-workspace-controls panvas-floating-surface p-1.5 max-[599px]:p-1'}`} role="toolbar" aria-label="Notebook workspace controls">
+    <div className={`flex items-center gap-1.5 text-panvas-text-primary select-none ${showLabel ? 'w-full' : 'w-max'} max-[599px]:gap-1 ${embedded ? (showLabel ? '' : 'p-1') : 'panvas-workspace-controls panvas-floating-surface p-1.5 max-[599px]:p-1'}`} role="toolbar" aria-label="Notebook workspace controls">
       {/* Full Page View */}
       <button
         type="button"
         onClick={handleToggleFocus}
         aria-pressed={notebookModeLevel === 2}
-        className={`panvas-icon-control shrink-0 focus-ring ${
+        className={`${showLabel ? 'flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm' : 'panvas-icon-control shrink-0'} focus-ring ${
           notebookModeLevel === 2 
             ? 'bg-panvas-bg-hover text-panvas-text-primary' 
             : 'text-panvas-text-secondary hover:text-panvas-text-primary hover:bg-panvas-bg-hover'
@@ -58,6 +58,7 @@ export const NotebookWorkspaceControls: React.FC<{ focusOnly?: boolean; embedded
         aria-label={notebookModeLevel === 2 ? "Exit Full Page View" : "Enter Full Page View"}
       >
         {notebookModeLevel === 2 ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+        {showLabel && <span>{notebookModeLevel === 2 ? 'Exit Full Page' : 'Full Page'}</span>}
       </button>
 
       {!focusOnly && <>

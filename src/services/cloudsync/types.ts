@@ -196,6 +196,7 @@ export type CloudSyncStatus =
   | 'disconnected'
   | 'connecting'
   | 'connected'
+  | 'token-needed'
   | 'syncing'
   | 'synced'
   | 'synced-review'

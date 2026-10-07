@@ -47,6 +47,15 @@ test('CloudSyncPanel never exposes technical diagnostics in any build', async ()
   assert.doesNotMatch(panel, /console\.error\('\[CloudSyncPanel\] Account migration failed/);
 });
 
+test('existing local token-needed and Resume sync work remains available', async () => {
+  const [types, panel] = await Promise.all([
+    readFile('src/services/cloudsync/types.ts', 'utf8'),
+    readFile('src/components/library/CloudSyncPanel.tsx', 'utf8'),
+  ]);
+  assert.match(types, /\| 'token-needed'/);
+  assert.match(panel, /'token-needed': 'Resume sync'/);
+});
+
 test('public Cloud Sync copy is concise while recovery choices remain explicit', () => {
   assert.equal(publicCloudMessage('conflict'), 'This workspace changed both here and in Google Drive. Choose which version to keep. Your local work is safe.');
   assert.equal(publicCloudMessage('review'), 'Some changes need review. Your work was preserved.');

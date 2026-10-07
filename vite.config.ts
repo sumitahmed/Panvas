@@ -139,6 +139,9 @@ export default defineConfig(({ command, mode }) => {
   server: {
     port: 3000,
     open: true,
+    allowedHosts: [
+    'core-temple-mails-poster.trycloudflare.com',
+  ],
     watch: {
       ignored: ['**/src/Background Images/**'],
     },

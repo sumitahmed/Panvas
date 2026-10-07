@@ -2,7 +2,7 @@
 // Panvas — Notebook Tool Properties Panel
 // ============================================
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useRef } from 'react';
 import type { ViewportManager } from './engine/ViewportManager';
 import { 
   type PageOrientationOption, 
@@ -20,6 +20,7 @@ import type { NotebookPropertyBatchSnapshot } from '@/types/notebook';
 import { WorkspaceViewInspector } from '@/components/workspace/WorkspaceViewControls';
 import { NoteSpaceControl } from './NoteSpaceControl';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
+import { OverlayManager } from '@/components/ui/OverlayManager';
 
 interface NotebookToolPropertiesPanelProps {
   viewportEngine: ViewportManager;
@@ -83,15 +84,6 @@ export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelPr
   const [lastBatch, setLastBatch] = useState<NotebookPropertyBatchSnapshot | null>(null);
   const [isApplying, setIsApplying] = useState(false);
   const [isScopeConfirmationOpen, setIsScopeConfirmationOpen] = useState(false);
-
-  useEffect(() => {
-    if (!isLineColorOpen) return;
-    const closeOnOutsidePointer = (event: PointerEvent) => {
-      if (!lineColorPanelRef.current?.contains(event.target as Node)) setIsLineColorOpen(false);
-    };
-    document.addEventListener('pointerdown', closeOnOutsidePointer);
-    return () => document.removeEventListener('pointerdown', closeOnOutsidePointer);
-  }, [isLineColorOpen]);
 
   const handleUpdate = (updates: Partial<PageProperties>) => {
     if (applyToAllPages) {
@@ -396,7 +388,8 @@ export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelPr
                     </button>
                   </div>
                 </div>
-                {isLineColorOpen && <div role="dialog" aria-label="Line color choices" className="panvas-overlay absolute right-0 top-full z-30 mt-2 w-52 rounded-xl border border-panvas-border-strong bg-panvas-bg-elevated p-2.5 shadow-2xl">
+                <OverlayManager isOpen={isLineColorOpen} onClose={() => setIsLineColorOpen(false)} anchorRef={lineColorPanelRef} placement="bottom-end" asSheet>
+                <div role="dialog" aria-label="Line color choices" className="panvas-utility-panel w-52 rounded-xl border border-panvas-border-strong bg-panvas-bg-elevated p-2.5 shadow-2xl">
                   <div className="mb-2 flex items-center justify-between">
                     <span className="text-[11px] font-medium text-panvas-text-primary">Line color</span>
                     <span className="text-[10px] text-panvas-text-tertiary">Applies instantly</span>
@@ -425,7 +418,8 @@ export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelPr
                       className="panvas-ink-palette h-6 w-8 cursor-pointer rounded border-0 bg-transparent p-0"
                     />
                   </label>
-                </div>}
+                </div>
+                </OverlayManager>
               </div>;
             })()}
           </div>

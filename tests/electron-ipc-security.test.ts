@@ -16,6 +16,7 @@ const CLOUDSYNC_CHANNELS = [
   'cloudsync:driveV2:readRootJson', 'cloudsync:driveV2:writeRootJson', 'cloudsync:driveV2:readWorkspaceJson',
   'cloudsync:driveV2:writeWorkspaceJson', 'cloudsync:driveV2:getObject', 'cloudsync:driveV2:putObjectIfAbsent',
   'cloudsync:driveV2:getMetadata',
+  'cloudsync:driveV2:getMetadataBatch',
 ] as const;
 
 function rendererEvent(url: string, parent: unknown = null) {

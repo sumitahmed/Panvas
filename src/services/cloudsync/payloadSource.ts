@@ -83,6 +83,8 @@ const isEmptyArray = (value: unknown): boolean => Array.isArray(value) && value.
 
 /** Returns a semantic identity only for an untouched, deterministic system bootstrap record. */
 export function semanticSystemBootstrapBytes(entityType: SyncEntityKind, entityId: string, bytes: Uint8Array): Uint8Array | null {
+  if (!((entityType === 'workspace' && entityId === SYSTEM_DEFAULT_WORKSPACE_ID)
+    || ((entityType === 'canvasFile' || entityType === 'canvasScene') && entityId === SYSTEM_WELCOME_CANVAS_ID))) return null;
   let value: Record<string, unknown>;
   try {
     const parsed = JSON.parse(new TextDecoder().decode(bytes));

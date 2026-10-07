@@ -6,7 +6,7 @@ import { canvasRepository } from '@/repositories/CanvasRepository';
 import { useAuthStore } from '@/stores/authStore';
 import { useUIStore } from '@/stores/uiStore';
 import { generateId } from '@/lib/utils/id';
-import { useDismissibleLayer } from '@/components/ui/useDismissibleLayer';
+import { OverlayManager } from '@/components/ui/OverlayManager';
 import {
   AudioPlaybackController,
   audioNoteTitle,
@@ -56,7 +56,6 @@ export function NotebookAudioControl({ engine, owner, canRecord = true, onPageDa
   const userId = useAuthStore(state => state.user?.id ?? null);
   const showToast = useUIStore(state => state.showToast);
 
-  useDismissibleLayer(isOpen, controlRef, () => setIsOpen(false));
   useEffect(() => engine.audio.subscribe(() => setRevision(value => value + 1)), [engine]);
 
   useEffect(() => {
@@ -226,7 +225,8 @@ export function NotebookAudioControl({ engine, owner, canRecord = true, onPageDa
     <div ref={controlRef} className="relative pointer-events-auto">
       <button type="button" onClick={() => setIsOpen(value => !value)} className={`panvas-icon-control focus-ring ${isOpen || recordingState !== 'idle' ? 'bg-panvas-accent-rose/15 text-panvas-accent-rose' : ''}`} title="Voice notes" aria-label="Voice notes" aria-expanded={isOpen}><Mic size={16} /></button>
       <input ref={fileRef} type="file" accept="audio/*" className="hidden" disabled={!canRecord} onChange={event => { const file = event.target.files?.[0]; if (file) void importAudio(file).catch(error => showToast(error instanceof Error ? error.message : 'Audio import failed.', 'error')); event.target.value = ''; }} />
-      {isOpen && <div className="panvas-overlay panvas-floating-surface absolute right-0 top-11 w-80 max-w-[calc(100vw-1.5rem)] p-3">
+      <OverlayManager isOpen={isOpen} onClose={() => setIsOpen(false)} anchorRef={controlRef} placement="bottom-start">
+      <div role="dialog" aria-label="Voice notes" className="panvas-utility-panel panvas-floating-surface w-80 p-3">
         <div className="mb-3 flex items-center justify-between gap-2">
           <div><div className="text-xs font-semibold text-panvas-text-primary">Voice notes</div><div className="text-2xs text-panvas-text-tertiary">Local recordings attached to this page</div></div>
           {canRecord && <div className="flex gap-1">
@@ -256,7 +256,8 @@ export function NotebookAudioControl({ engine, owner, canRecord = true, onPageDa
             </div>;
           })}
         </div>
-      </div>}
+      </div>
+      </OverlayManager>
     </div>
   );
 }

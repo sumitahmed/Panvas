@@ -17,4 +17,5 @@ export class GoogleDriveSyncV2Provider implements SyncV2Provider {
   getObject(hash: string) { return this.drive.getObject('v2', hash); }
   putObjectIfAbsent(hash: string, bytes: Uint8Array) { return this.drive.putObjectIfAbsent('v2', { hash, bytes }); }
   getObjectMetadata(hash: string) { return this.drive.getMetadata('v2', hash); }
+  getObjectMetadataBatch(hashes: readonly string[]) { return this.drive.getMetadataBatch(hashes); }
 }

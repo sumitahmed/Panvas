@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createHash } from 'node:crypto';
 import { runCloudSyncV2 } from '../src/services/cloudsync/v2/engine.ts';
 import { GoogleDriveSyncV2Provider } from '../src/services/cloudsync/v2/googleDriveV2Provider.ts';
 import { sha256Bytes } from '../src/services/cloudsync/hash.ts';
@@ -148,6 +149,90 @@ test('duplicate-sensitive same-hash concurrency measurement', async t => {
   t.diagnostic(JSON.stringify({ physicalObjectCreates: drive.counts().objectCreates, uploadRequests: drive.requests.filter(r => r.method === 'POST').length }));
   assert.equal(drive.counts().objectCreates, 1);
   assert.equal(drive.requests.filter(r => r.method === 'POST').length, 1);
+});
+
+test('deterministic 40 MiB workspace cycles retain concurrency and avoid unchanged transfers', async t => {
+  const drive = new FakeCloudDrive(), replica = representativeReplica(), remote = provider(drive);
+  for (let index = 0; index < 4; index++) replica.add('asset', `large-${index}`, `page-${index}`, encodeAssetEnvelope({ id: `large-${index}`, ownerId: `page-${index}`, fileName: `large-${index}.png`, mimeType: 'image/png', assetKind: 'image', createdAt: 1, userId: null }, new Uint8Array(10 * 1024 * 1024).fill(index + 11)));
+  const digest = globalThis.crypto.subtle.digest.bind(globalThis.crypto.subtle);
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis.crypto.subtle, 'digest');
+  let hashes = 0;
+  Object.defineProperty(globalThis.crypto.subtle, 'digest', { configurable: true, value: (...args: Parameters<SubtleCrypto['digest']>) => { hashes++; return digest(...args); } });
+  try {
+    for (const name of ['initial-40MiB', 'noop-1-40MiB', 'noop-2-40MiB', 'small-edit-40MiB']) {
+      if (name.startsWith('small')) replica.edit(4);
+      drive.resetCounts(); remote.getDriveProvider().resetRequestMetrics(); replica.resetCounts(); hashes = 0;
+      const result = await run(remote, replica);
+      assert.equal(result.status, 'synced', JSON.stringify(result));
+      const counts = { ...drive.counts(), ...remote.getDriveProvider().getRequestMetrics(), scans: replica.scans, serialized: replica.serialized, hashes, uploaded: result.uploaded, downloaded: result.downloaded,
+        listCalls: drive.requests.filter(r => r.url.pathname === '/drive/v3/files' && r.method === 'GET').length,
+        identityRequests: drive.requests.filter(r => r.url.pathname.includes('userinfo')).length,
+        manifestReads: drive.requests.filter(r => r.name === 'manifest.json' && r.url.searchParams.get('alt') === 'media').length,
+        manifestWrites: drive.requests.filter(r => r.name === 'manifest.json' && ['POST','PATCH'].includes(r.method)).length,
+      };
+      t.diagnostic(`${name}: ${JSON.stringify(counts)}`);
+      assert.equal(counts.scans, 1, 'one snapshot per logical cycle');
+      assert.equal(counts.identityRequests, 0, 'sync reuses connected account identity');
+      if (name.startsWith('noop')) {
+        assert.equal(result.uploaded + result.downloaded, 0); assert.equal(counts.jsonWrites, 0);
+        if (!process.env.PANVAS_RECORD_BASELINE) { assert.ok(counts.requests <= 11); assert.ok(hashes <= 1); }
+      }
+      if (name.startsWith('noop-2') && !process.env.PANVAS_RECORD_BASELINE) { assert.equal(hashes, 0); assert.equal(counts.downloads, 0); }
+      if (name.startsWith('small')) { assert.equal(result.uploaded, 1); if (!process.env.PANVAS_RECORD_BASELINE) { assert.ok(hashes <= 2); assert.ok(counts.requests <= 20); } }
+      if (name.startsWith('initial')) assert.equal(counts.maxUploads, 4);
+    }
+    assert.equal(drive.duplicates().length, 0);
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis.crypto.subtle, 'digest', descriptor);
+    else Reflect.deleteProperty(globalThis.crypto.subtle, 'digest');
+  }
+});
+
+test('small immutable read cache uses fresh metadata and never hides same-size root corruption', async () => {
+  const drive = new FakeCloudDrive(), replica = representativeReplica(), remote = provider(drive);
+  assert.equal((await run(remote, replica)).status, 'synced');
+  assert.equal((await run(remote, replica)).status, 'synced');
+  const root = [...drive.files.values()].find(file => file.content && new TextDecoder().decode(file.content) === JSON.stringify({ id: 'ws-measure', name: 'Measured workspace' }))!;
+  assert.ok(root);
+  const corrupted = root.content!.slice(); corrupted[corrupted.length - 3] ^= 1;
+  root.content = corrupted;
+  root.md5Checksum = createHash('md5').update(corrupted).digest('hex'); root.version = '2';
+  const baseline = structuredClone(replica.baseline.get('ws-measure'));
+  drive.resetCounts();
+  const result = await run(remote, replica);
+  assert.notEqual(result.status, 'synced');
+  assert.equal(drive.counts().downloads, 1, 'changed fresh metadata forces exact-byte integrity check');
+  assert.equal(replica.applied, 0, 'corrupt root never applies new children');
+  assert.deepEqual(replica.baseline.get('ws-measure'), baseline);
+});
+
+test('batch metadata handles pagination, duplicates, incomplete searches and fresh additions', async () => {
+  const drive = new FakeCloudDrive(), remote = provider(drive);
+  await remote.readProfile();
+  const objectFolder = [...drive.files.values()].find(file => file.name === 'objects')!;
+  const bytes = encode({ batch: 1 }), hash = await sha256Bytes(bytes);
+  drive.add(hash, objectFolder.id, bytes, 'z-object'); drive.add(hash, objectFolder.id, bytes, 'a-object');
+  let pages = 0;
+  const paged = new GoogleDriveSyncV2Provider({ tokenProvider: async () => 'fake-token', fetchFn: async (input, init) => {
+    const url = new URL(String(input));
+    if (url.pathname === '/drive/v3/files' && url.searchParams.get('q')?.includes(`name = '${hash}'`)) { url.searchParams.set('pageSize', '1'); pages++; }
+    return drive.fetch(url, init);
+  } });
+  assert.deepEqual(await paged.getObjectMetadataBatch!([hash]), [{ hash, size: bytes.length }]);
+  assert.equal(pages, 2, 'all pages are checked before canonical duplicate selection');
+  assert.deepEqual(await paged.getObject(hash), bytes);
+  const download = drive.requests.findLast(request => request.url.searchParams.get('alt') === 'media' && request.name === hash)!;
+  assert.ok(download.url.pathname.endsWith('/a-object'));
+  const missing = await sha256Bytes(encode({ batch: 2 }));
+  assert.deepEqual(await remote.getObjectMetadataBatch!([missing]), []);
+  drive.add(missing, objectFolder.id, encode({ batch: 2 }));
+  assert.equal((await remote.getObjectMetadataBatch!([missing])).length, 1, 'absence is not cached');
+  const incomplete = new GoogleDriveSyncV2Provider({ tokenProvider: async () => 'fake-token', fetchFn: async (input, init) => {
+    const url = new URL(String(input));
+    if (url.pathname === '/drive/v3/files' && url.searchParams.get('q')?.includes(`name = '${hash}'`)) return Response.json({ files: [], incompleteSearch: true });
+    return drive.fetch(input, init);
+  } });
+  await assert.rejects(() => incomplete.getObjectMetadataBatch!([hash]));
 });
 
 test('combined browser scan shares exact bytes and preserves both ownership graphs', async () => {

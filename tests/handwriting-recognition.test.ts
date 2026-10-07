@@ -1175,7 +1175,8 @@ test('auto placement is page-coordinate based and preference persistence keeps f
   const handwritingToolBranch = toolbar.match(/if \(toolId === 'handwriting-to-text'\) \{([\s\S]*?)\n    \} else if \(toolId === 'select'\)/)?.[1] ?? '';
   assert.match(handwritingToolBranch, /engine\.tools\.setDrawingTool\(toolState\.drawingTool === 'pencil' \? 'pencil' : 'pen'\)/);
   assert.doesNotMatch(handwritingToolBranch, /selection|setMode\('select'\)/);
-  assert.match(toolbar, /showHandwritingSettings = !isPhone && toolState\.handwritingToTextEnabled\s*&& toolState\.mode === 'draw'/);
+  assert.match(toolbar, /showHandwritingSettings = !compactTools && toolState\.handwritingToTextEnabled\s*&& toolState\.mode === 'draw'/);
+  assert.match(toolbar, /compactTools && toolState\.handwritingToTextEnabled && <HandwritingSettingsStrip\s+settings=\{handwritingSettings\}\s+onChange=\{updateHandwritingSettings\}/);
   assert.doesNotMatch(toolbar, /setHandwritingToTextTool/);
   assert.doesNotMatch(toolbar, /activeTool === 'handwriting-to-text'/);
   assert.match(toolbar, /recentColors=\{settings\.recentColors\}/);

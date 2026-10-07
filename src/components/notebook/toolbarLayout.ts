@@ -3,7 +3,7 @@
 // ============================================
 // Pure width-to-groups mapping for NotebookFloatingToolbar, kept free of React
 // so the breakpoints can be unit-tested (tests/toolbar-layout.test.ts).
-// Contract source: docs/08_IMPLEMENTATION_ROADMAP.md section 7.
+// Responsive layout contracts are covered by tests/toolbar-layout.test.ts.
 //
 // Direct writing ends with Select and Hand. Pencil and utilities use More.
 
@@ -87,6 +87,21 @@ export interface ToolbarLayout {
   overflow: readonly ToolbarGroupId[];
   /** Minimum-viable layout for narrow widths (< 560px). */
   compact: boolean;
+}
+
+export type MobileQuickTool = 'history' | 'pen' | 'select' | 'hand' | 'eraser' | 'text';
+
+/** Eight 44px touch controls fit the 360px dock. Below that, keep navigation
+ * and writing direct and move lower-priority controls to the existing More. */
+export function resolveMobileQuickTools(width: number | null): readonly MobileQuickTool[] {
+  const candidates: MobileQuickTool[][] = [
+    ['history', 'pen', 'select', 'hand', 'eraser', 'text'],
+    ['history', 'pen', 'select', 'hand', 'eraser'],
+    ['pen', 'select', 'hand', 'eraser'],
+    ['pen', 'hand', 'eraser'],
+    ['pen', 'hand'],
+  ];
+  return candidates.find(tools => (tools.length + (tools.includes('history') ? 1 : 0) + 1) * 44 <= (width ?? 360)) ?? candidates[candidates.length - 1];
 }
 
 /** Keep a most-recent-first, case-insensitive color history for one tool. */

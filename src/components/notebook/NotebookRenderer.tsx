@@ -1,5 +1,6 @@
 import type { ImageManager } from './engine/ImageManager';
 import React, { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from 'react';
+import { flushSync } from 'react-dom';
 import { NotebookEngine } from './engine/NotebookEngine';
 import type { ViewportState } from './engine/drawingTypes';
 import { useUIStore } from '@/stores/uiStore';
@@ -276,11 +277,14 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   const [debouncedScale, setDebouncedScale] = useState(1.0);
 
   useEffect(() => {
-    const handler = setTimeout(() => {
-      setDebouncedScale(viewport.scale);
-    }, 150);
-    return () => clearTimeout(handler);
-  }, [viewport.scale]);
+    const gestures = notebookEngine.input.navigationGestures;
+    const updateRasterScale = () => {
+      if (!gestures.active) setDebouncedScale(notebookEngine.viewport.getState().scale);
+    };
+    const handler = setTimeout(updateRasterScale, 150);
+    const unsubscribe = gestures.onIdle(updateRasterScale);
+    return () => { clearTimeout(handler); unsubscribe(); };
+  }, [notebookEngine, viewport.scale]);
 
   useEffect(() => {
     if (workspaceViewMode !== 'edit') {
@@ -876,7 +880,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     return attachTwoFingerViewportGesture({
       target: container,
       getScale: () => notebookEngine.viewport.getState().scale,
-      setScale: scale => notebookEngine.viewport.setZoom(scale),
+      setScale: scale => flushSync(() => notebookEngine.viewport.setZoom(scale)),
       cancelActivePointerInteraction: () => notebookEngine.input.cancelActivePointerInteraction(),
       navigationGestures,
       subscribeCancellation: cancel => notebookEngine.tools.subscribe(state => {
@@ -2452,6 +2456,9 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   // width, so narrow desktop split panes keep the desktop/tablet contract.
   const reservedPropertiesWidth = isPropertiesPanelOpen && workspaceViewMode !== 'present' && !isMobileViewport ? 288 : 0;
   const isConstrainedHeader = containerSize.width > 0 && containerSize.width - reservedPropertiesWidth < 560;
+  const landscapePageUtilities = !isMobileViewport && hasTouchInput && isCompactWorkspace
+    ? <NotebookPageUtilities engine={notebookEngine} workspaceId={workspace?.id} notebookId={notebook?.id} ownerId={focusedPage?.id} editable={workspaceViewMode === 'edit'} onPageDataPersisted={handlePageAudioPersisted} onVoiceDelete={handleDeleteVoiceNote} onVoiceRename={handleRenameVoiceNote} onChange={handleLayersChange} onExportPage={() => void handleExportPagePdf()} onExportNotebook={() => void handleExportNotebookPdf()} onPrintPage={() => void handlePrintPage()} onPrintNotebook={() => void handlePrintNotebook()} isExporting={isExportingPdf} embedded />
+    : undefined;
 
   return (
     <React.Profiler id="NotebookSurface" onRender={gate0OnRender}>
@@ -2499,7 +2506,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         ) : (
           <div ref={fullscreenToolbarHostRef} className="panvas-fullscreen-toolbar-host absolute left-3 right-3 top-3 z-40 flex min-w-0 justify-center overflow-visible pointer-events-none">
             <div className="panvas-layer-toolbar panvas-floating-surface flex w-fit max-w-full items-center gap-1 overflow-visible rounded-2xl p-1 pointer-events-auto" role="toolbar" aria-label="Fullscreen notebook tools">
-              {workspaceViewMode === 'edit' && <NotebookFloatingToolbar editor={activeEditor} engine={notebookEngine} workspaceId={workspace?.id} hasSelectedStrokes={notebookEngine.selection.hasSelectedStrokes()} onConvertHandwriting={openHandwritingConversion} embedded hideCollapseButton fullscreenToolOnly availableWidth={fullscreenToolbarHostWidth === null ? null : Math.max(0, fullscreenToolbarHostWidth - 104)} />}
+              {workspaceViewMode === 'edit' && <NotebookFloatingToolbar editor={activeEditor} engine={notebookEngine} workspaceId={workspace?.id} hasSelectedStrokes={notebookEngine.selection.hasSelectedStrokes()} onConvertHandwriting={openHandwritingConversion} pageUtilities={landscapePageUtilities} embedded hideCollapseButton fullscreenToolOnly availableWidth={fullscreenToolbarHostWidth === null ? null : Math.max(0, fullscreenToolbarHostWidth - 104)} />}
               <button type="button" onClick={() => setToolbarCollapsed(true)} className="panvas-icon-control shrink-0 focus-ring" title="Hide fullscreen tools" aria-label="Hide fullscreen tools">
                 <PanelTopOpen size={16} className="rotate-180" />
               </button>
@@ -2521,7 +2528,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         )}
 
         <div className="pointer-events-none flex-1 flex justify-center items-start min-w-0">
-          {workspaceViewMode === 'edit' && <NotebookFloatingToolbar editor={activeEditor} engine={notebookEngine} workspaceId={workspace?.id} hasSelectedStrokes={notebookEngine.selection.hasSelectedStrokes()} onConvertHandwriting={openHandwritingConversion} />}
+          {workspaceViewMode === 'edit' && <NotebookFloatingToolbar editor={activeEditor} engine={notebookEngine} workspaceId={workspace?.id} hasSelectedStrokes={notebookEngine.selection.hasSelectedStrokes()} onConvertHandwriting={openHandwritingConversion} pageUtilities={landscapePageUtilities} />}
         </div>
 
         <div className={`pointer-events-auto flex flex-shrink-0 items-end gap-2 ${isConstrainedHeader ? 'flex-col gap-1' : 'items-start'}`}>

@@ -214,4 +214,9 @@ export function registerCloudSyncHandlers(registrar: IpcHandleRegistrar) {
   registerPrivilegedHandler('cloudsync:driveV2:getMetadata', (hash: unknown) => safeDriveCall('v2-object-metadata', async () => {
     assertObjectHash(hash); return driveV2Provider.getMetadata('v2', hash);
   }));
+  registerPrivilegedHandler('cloudsync:driveV2:getMetadataBatch', (hashes: unknown) => safeDriveCall('v2-object-metadata', async () => {
+    if (!Array.isArray(hashes) || hashes.length > 100_000) throw new Error('Invalid V2 metadata query.');
+    hashes.forEach(hash => assertObjectHash(hash));
+    return driveV2Provider.getMetadataBatch(hashes);
+  }));
 }

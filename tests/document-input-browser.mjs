@@ -332,7 +332,8 @@ try {
     return raster.width === Math.floor(595 * devicePixelRatio * e.viewport.getState().scale);
   });
   const settled = await page.evaluate(() => window.__documentWork.report());
-  assert.ok((settled.pdfRasterStarts ?? 0) <= 2, 'only settled visible PDF rasters restart');
+  const residentRasters = await page.locator('[data-pdf-source-page] [data-pdf-raster]').count();
+  assert.ok((settled.pdfRasterStarts ?? 0) <= residentRasters, 'each retained PDF raster restarts at most once after the wheel burst');
   assert.equal(settled.engineMounts ?? 0, 0);
   pass('one update for a 12-event burst; final PDF raster regains full bounded detail');
   // Real Hand drags must scroll the document, without changing the unused camera offset.

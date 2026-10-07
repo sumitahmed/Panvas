@@ -238,7 +238,7 @@ export interface ToolState {
 
 /** Default tool state. */
 export const DEFAULT_TOOL_STATE: ToolState = {
-  mode: 'text',
+  mode: 'hand',
   drawingTool: 'pen',
   handwritingToTextEnabled: false,
   handwritingInkColor: '#20242a',

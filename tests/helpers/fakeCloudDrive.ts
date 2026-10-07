@@ -16,6 +16,8 @@ export interface DriveRequest {
   method: string;
   url: URL;
   name?: string;
+  uploadedBytes?: number;
+  downloadedBytes?: number;
 }
 
 /** File IDs are the keys: Drive deliberately permits duplicate names/parents. */
@@ -68,6 +70,8 @@ export class FakeCloudDrive {
     const isObject = (request: DriveRequest) => /^[a-f0-9]{64}$/.test(request.name ?? '');
     return {
       requests: this.requests.length,
+      bytesUploaded: this.requests.reduce((sum, request) => sum + (request.uploadedBytes ?? 0), 0),
+      bytesDownloaded: this.requests.reduce((sum, request) => sum + (request.downloadedBytes ?? 0), 0),
       metadata: this.requests.filter(r => r.method === 'GET' && /^\/drive\/v3\/files\/[^/]+$/.test(r.url.pathname) && r.url.searchParams.has('fields') && !r.url.pathname.endsWith('generateIds')).length,
       objectMetadata: this.requests.filter(r => isObject(r) && r.method === 'GET' && r.url.searchParams.has('fields')).length,
       objectLists: this.requests.filter(r => r.method === 'GET' && r.url.pathname === '/drive/v3/files' && !r.url.searchParams.get('q')?.includes('name =') && !r.url.searchParams.get('q')?.includes('mimeType =')).length,
@@ -98,10 +102,10 @@ export class FakeCloudDrive {
     if (url.pathname === '/drive/v3/files/generateIds') return Response.json({ ids: [`file-${this.nextId++}`] });
     if (url.pathname === '/drive/v3/files' && method === 'GET') {
       const q = url.searchParams.get('q') ?? '';
-      const name = /name\s*=\s*'([^']+)'/.exec(q)?.[1];
+      const names = [...q.matchAll(/name\s*=\s*'([^']+)'/g)].map(match => match[1]);
       const parent = /'([^']+)'\s*in\s*parents/.exec(q)?.[1];
       const mime = /mimeType\s*=\s*'([^']+)'/.exec(q)?.[1];
-      const matches = [...this.files.values()].filter(f => !f.trashed && (!name || name === f.name) && (!parent || f.parents.includes(parent)) && (!mime || mime === f.mimeType));
+      const matches = [...this.files.values()].filter(f => !f.trashed && (!names.length || names.includes(f.name)) && (!parent || f.parents.includes(parent)) && (!mime || mime === f.mimeType));
       // Reverse insertion order makes accidental last-wins canonical selection visible.
       matches.reverse();
       const offset = Number(url.searchParams.get('pageToken') ?? 0);
@@ -132,6 +136,7 @@ export class FakeCloudDrive {
       const contentStart = body.indexOf('\r\n\r\n', metadataEnd) + 4;
       const contentEnd = body.lastIndexOf('\r\n--');
       const bytes = body.subarray(contentStart, contentEnd);
+      request.uploadedBytes = bytes.byteLength;
       this.activeUploads++; this.maxUploads = Math.max(this.maxUploads, this.activeUploads);
       try {
         await new Promise<void>(resolve => setImmediate(resolve));
@@ -146,6 +151,7 @@ export class FakeCloudDrive {
       const session = this.sessions.get(fileId);
       if (!session) return new Response(null, { status: 404 });
       request.name = session.name;
+      request.uploadedBytes = (init.body as Uint8Array).byteLength;
       this.activeUploads++; this.maxUploads = Math.max(this.maxUploads, this.activeUploads);
       try {
         await new Promise<void>(resolve => setImmediate(resolve));
@@ -160,6 +166,7 @@ export class FakeCloudDrive {
     if (url.pathname.startsWith('/upload/drive/v3/files/') && method === 'PATCH') {
       if (!file || file.trashed) return new Response(null, { status: 404 });
       this.setContent(file, new TextEncoder().encode(String(init.body)));
+      request.uploadedBytes = file.content!.byteLength;
       file.version = String(Number(file.version) + 1);
       return lostResponse(Response.json(this.metadata(file)));
     }
@@ -167,6 +174,7 @@ export class FakeCloudDrive {
       if (!file || file.trashed) return new Response(null, { status: 404 });
       if (url.searchParams.get('alt') !== 'media') return Response.json(this.metadata(file));
       if (!file.content) return new Response(null, { status: 404 });
+      request.downloadedBytes = file.content.byteLength;
       const isObject = /^[a-f0-9]{64}$/.test(file.name);
       if (isObject) { this.activeDownloads++; this.maxDownloads = Math.max(this.maxDownloads, this.activeDownloads); }
       try {

@@ -134,6 +134,8 @@ export interface SyncV2Provider {
   getObject(hash: string): Promise<Uint8Array>;
   putObjectIfAbsent(hash: string, bytes: Uint8Array): Promise<'uploaded' | 'present'>;
   getObjectMetadata(hash: string): Promise<{ size: number } | null>;
+  /** Fresh, positive object proofs for the hashes in this cycle, never a durable absence cache. */
+  getObjectMetadataBatch?(hashes: readonly string[]): Promise<Array<{ hash: string; size: number }>>;
 }
 
 export interface SyncV2LocalSource {

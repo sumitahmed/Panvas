@@ -160,11 +160,15 @@ test('all four context-menu commands reload canonical repositories before resolv
 });
 
 test('page utility export menu is explicit-click, keyboard dismissible, and touch reachable', async () => {
-  const source = await readSource('src/components/notebook/NotebookPageUtilities.tsx');
+  const [source, overlay] = await Promise.all([
+    readSource('src/components/notebook/NotebookPageUtilities.tsx'),
+    readSource('src/components/ui/OverlayManager.tsx'),
+  ]);
   assert.match(source, /onClick=\{\(\) => setIsPdfMenuOpen/);
   assert.match(source, /aria-expanded=\{isPdfMenuOpen\}/);
-  assert.match(source, /event\.key === 'Escape'/);
-  assert.match(source, /pointerdown/);
+  assert.match(source, /<OverlayManager isOpen=\{isPdfMenuOpen\} onClose=\{\(\) => setIsPdfMenuOpen\(false\)\} anchorRef=\{pdfMenuRef\}/);
+  assert.match(overlay, /e\.key === 'Escape'[\s\S]*?onClose\(\)/);
+  assert.match(overlay, /document\.addEventListener\('mousedown', handleClickOutside\)/);
   assert.doesNotMatch(source, /group-hover:visible|group-focus-within:visible/);
 });
 

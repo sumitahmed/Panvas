@@ -138,6 +138,7 @@ export interface PanvasDomainAPI {
       getMetadata: (workspaceId: string, hash: string) => Promise<CloudDriveResult<{ size: number } | null>>;
     };
     driveV2: {
+      getMetadataBatch: (hashes: readonly string[]) => Promise<CloudDriveResult<Array<{ hash: string; size: number }>>>;
       readRootJson: <T>(name: string) => Promise<CloudDriveResult<{ value: T | null; etag: string | null }>>;
       writeRootJson: (name: string, value: unknown, ifMatch: string | null) => Promise<CloudDriveResult<{ etag: string }>>;
       readWorkspaceJson: <T>(workspaceId: string, name: string) => Promise<CloudDriveResult<{ value: T | null; etag: string | null }>>;

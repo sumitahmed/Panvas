@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, ChevronDown } from 'lucide-react';
-import { createPortal } from 'react-dom';
+import { OverlayManager } from '@/components/ui/OverlayManager';
 import {
   PANVAS_TEXT_FONT_FAMILIES,
   TEXT_FONT_GROUPS,
@@ -23,7 +23,6 @@ export function TextFontPicker({ value, onChange, ariaLabel = 'Text font', class
   );
   const rootRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const [position, setPosition] = useState({ left: 0, top: 0 });
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const current = value || 'Inter, sans-serif';
 
@@ -34,22 +33,6 @@ export function TextFontPicker({ value, onChange, ariaLabel = 'Text font', class
     });
     return () => { active = false; };
   }, []);
-
-  useEffect(() => {
-    if (!open) return undefined;
-    const place = () => {
-      const rect = rootRef.current?.getBoundingClientRect();
-      if (rect) setPosition({ left: Math.max(12, Math.min(rect.left, window.innerWidth - 248)), top: Math.max(12, Math.min(rect.bottom + 6, window.innerHeight - 300)) });
-    };
-    place();
-    window.addEventListener('resize', place);
-    window.addEventListener('scroll', place, true);
-    const close = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node) && !listRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener('pointerdown', close);
-    return () => { document.removeEventListener('pointerdown', close); window.removeEventListener('resize', place); window.removeEventListener('scroll', place, true); };
-  }, [open]);
 
   // Keep the catalog stable while faces load. Filtering failed faces reduced
   // an offline/error state to a misleading three-font list.
@@ -84,7 +67,8 @@ export function TextFontPicker({ value, onChange, ariaLabel = 'Text font', class
       </span>
       <ChevronDown size={13} className={`shrink-0 text-panvas-text-tertiary transition-transform ${open ? 'rotate-180' : ''}`} />
     </button>
-    {open && createPortal(<div ref={listRef} role="listbox" aria-label={ariaLabel} onMouseDown={event => event.stopPropagation()} onPointerDown={event => event.stopPropagation()} className="panvas-overlay panvas-layer-system fixed max-h-72 w-[236px] overflow-y-auto rounded-lg border border-panvas-border-strong bg-panvas-bg-primary p-1.5 shadow-xl" style={{ ...position, fontFamily: UI_FONT_FAMILY }}>
+    <OverlayManager isOpen={open} onClose={() => setOpen(false)} anchorRef={rootRef} placement="bottom-start" offset={{ x: 0, y: 6 }}>
+    <div ref={listRef} role="listbox" aria-label={ariaLabel} onMouseDown={event => event.stopPropagation()} onPointerDown={event => event.stopPropagation()} className="max-h-72 w-[236px] overflow-y-auto overscroll-contain rounded-lg border border-panvas-border-strong bg-panvas-bg-primary p-1.5 shadow-xl" style={{ maxHeight: 'min(18rem, var(--panvas-overlay-max-height, 18rem))', fontFamily: UI_FONT_FAMILY }}>
       {TEXT_FONT_GROUPS.map(group => {
         const fonts = group.fonts.filter(font => visibleFonts.includes(font));
         if (fonts.length === 0) return null;
@@ -130,6 +114,7 @@ export function TextFontPicker({ value, onChange, ariaLabel = 'Text font', class
           })}
         </div>;
       })}
-    </div>, document.body)}
+    </div>
+    </OverlayManager>
   </div>;
 }

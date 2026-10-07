@@ -86,10 +86,14 @@ test('workspace preflight and conflict choices across native filesystem and Chro
           const { syncV2LocalSource, syncV2LocalAdapter } = await import('/src/services/cloudsync/v2/localAdapter.ts');
           const { LocalStorageSyncV2BaselineStore } = await import('/src/services/cloudsync/v2/baselineStore.ts');
           const { dexieSyncV2ConflictStore } = await import('/src/services/cloudsync/v2/conflictStore.ts');
-          const provider = new Proxy({}, { get: (_, method) => async (...args) => {
-            if (method === 'putObjectIfAbsent') args[1] = [...args[1]];
-            const value = await window.flowDrive(method, args);
-            return method === 'getObject' ? new Uint8Array(value) : value;
+          const provider = new Proxy({}, { get: (_, method) => {
+            // This fixture deliberately exercises the single-object fallback.
+            if (method === 'getObjectMetadataBatch') return undefined;
+            return async (...args) => {
+              if (method === 'putObjectIfAbsent') args[1] = [...args[1]];
+              const value = await window.flowDrive(method, args);
+              return method === 'getObject' ? new Uint8Array(value) : value;
+            };
           } });
           const applied = [];
           const originalApply = syncV2LocalAdapter.applyRecord;

@@ -209,7 +209,9 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
   // tearing down the page subtree. StrictMode and HMR both re-init the editor and arm it.
   // Blur when not in text mode
   useEffect(() => {
-    editor?.setEditable(isTextTool && engine.texts.isEditable(object));
+    // Tool/ownership changes alter interaction, not document content. TipTap's
+    // default update notification would otherwise save every newly mounted page.
+    editor?.setEditable(isTextTool && engine.texts.isEditable(object), false);
     if (!isTextTool && editor && editor.isFocused) {
       editor.commands.blur();
     }

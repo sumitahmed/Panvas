@@ -134,6 +134,7 @@ contextBridge.exposeInMainWorld('panvas', {
       getObject: (_workspaceId: string, hash: string) => ipcRenderer.invoke('cloudsync:driveV2:getObject', hash),
       putObjectIfAbsent: (_workspaceId: string, upload: import('../src/services/cloudsync/types').ObjectUpload) => ipcRenderer.invoke('cloudsync:driveV2:putObjectIfAbsent', upload),
       getMetadata: (_workspaceId: string, hash: string) => ipcRenderer.invoke('cloudsync:driveV2:getMetadata', hash),
+      getMetadataBatch: (hashes: readonly string[]) => ipcRenderer.invoke('cloudsync:driveV2:getMetadataBatch', hashes),
     },
     applyRemoteRecord: (workspaceId: string, record: { kind: import('../src/services/cloudsync/types').SyncEntityKind; id: string; parentId?: string | null; payload: unknown; tombstone: boolean }) => ipcRenderer.invoke('cloudsync:applyRemoteRecord', workspaceId, record),
     applyRemoteRecords: (workspaceId: string, records: Array<{ kind: import('../src/services/cloudsync/types').SyncEntityKind; id: string; parentId?: string | null; payload: unknown; tombstone: boolean }>) => ipcRenderer.invoke('cloudsync:applyRemoteRecords', workspaceId, records) as Promise<

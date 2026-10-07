@@ -28,6 +28,7 @@ const STATUS_LABELS: Record<CloudSyncStatus, string> = {
   disconnected: 'Not connected',
   connecting: 'Connecting…',
   connected: 'Connected',
+  'token-needed': 'Resume sync',
   syncing: 'Syncing…',
   synced: 'Synced',
   'synced-review': 'Review changes',

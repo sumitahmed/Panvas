@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { createContext, useContext, useEffect, useId, useLayoutEffect, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
 
@@ -10,6 +10,18 @@ interface OverlayManagerProps {
   placement?: 'bottom-start' | 'bottom-end' | 'top-start' | 'top-end';
   offset?: { x: number; y: number };
   asSheet?: boolean;
+}
+
+const ParentOverlayContext = createContext<string | null>(null);
+
+function isInOverlay(target: EventTarget | null, overlayId: string): boolean {
+  let overlay = target instanceof Element ? target.closest<HTMLElement>('[data-panvas-overlay-id]') : null;
+  while (overlay) {
+    if (overlay.dataset.panvasOverlayId === overlayId) return true;
+    const parentId = overlay.dataset.panvasOverlayParent;
+    overlay = parentId ? document.querySelector<HTMLElement>(`[data-panvas-overlay-id="${CSS.escape(parentId)}"]`) : null;
+  }
+  return false;
 }
 
 export function OverlayManager({ 
@@ -24,9 +36,11 @@ export function OverlayManager({
   const isPhone = useIsMobileViewport();
   const shouldUseSheet = isPhone && asSheet;
   const overlayRef = useRef<HTMLDivElement>(null);
-  const [position, setPosition] = useState({ top: -9999, left: -9999 });
+  const overlayId = useId();
+  const parentOverlayId = useContext(ParentOverlayContext);
+  const [position, setPosition] = useState({ top: -9999, left: -9999, maxWidth: 0, maxHeight: 0 });
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!isOpen) return;
 
     const updatePosition = () => {
@@ -35,58 +49,67 @@ export function OverlayManager({
       if (!anchor || !overlay) return;
       
       const anchorRect = anchor.getBoundingClientRect();
-      const overlayRect = overlay.getBoundingClientRect();
-      const viewportWidth = window.innerWidth;
-      const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+      const viewport = window.visualViewport;
       const viewportPadding = 12;
-
-      let top = 0;
-      let left = 0;
-
-      const overlayHeight = Math.min(overlayRect.height, viewportHeight - viewportPadding * 2);
-      const overlayWidth = Math.min(overlayRect.width, viewportWidth - viewportPadding * 2);
-      const spaceBelow = viewportHeight - anchorRect.bottom - offset.y - viewportPadding;
-      const spaceAbove = anchorRect.top - offset.y - viewportPadding;
+      const safeStyle = getComputedStyle(overlay);
+      const safe = (edge: string) => parseFloat(safeStyle.getPropertyValue(`--panvas-overlay-safe-${edge}`)) || 0;
+      const viewportLeft = (viewport?.offsetLeft ?? 0) + safe('left') + viewportPadding;
+      const viewportTop = (viewport?.offsetTop ?? 0) + safe('top') + viewportPadding;
+      const viewportRight = (viewport?.offsetLeft ?? 0) + (viewport?.width ?? window.innerWidth) - safe('right') - viewportPadding;
+      let viewportBottom = (viewport?.offsetTop ?? 0) + (viewport?.height ?? window.innerHeight) - safe('bottom') - viewportPadding;
+      const dock = document.querySelector<HTMLElement>('.panvas-mobile-tool-dock');
+      if (dock && dock.getBoundingClientRect().height > 0) viewportBottom = Math.min(viewportBottom, dock.getBoundingClientRect().top - 8);
+      const maxWidth = Math.max(0, viewportRight - viewportLeft);
+      overlay.style.maxWidth = `${maxWidth}px`;
+      const overlayRect = overlay.getBoundingClientRect();
+      const content = overlay.firstElementChild as HTMLElement | null;
+      const naturalHeight = Math.max(overlay.scrollHeight, content ? content.scrollHeight + content.offsetHeight - content.clientHeight : 0);
+      const anchorTop = Math.max(viewportTop, Math.min(anchorRect.top, viewportBottom));
+      const anchorBottom = Math.max(viewportTop, Math.min(anchorRect.bottom, viewportBottom));
+      const spaceBelow = Math.max(0, viewportBottom - anchorBottom - offset.y);
+      const spaceAbove = Math.max(0, anchorTop - offset.y - viewportTop);
       const prefersBottom = placement.startsWith('bottom');
       const shouldOpenBelow = prefersBottom
-        ? spaceBelow >= overlayHeight || spaceBelow >= spaceAbove
-        : !(spaceAbove >= overlayHeight || spaceAbove > spaceBelow);
-
-      // Choose the side with enough room where possible. For panels taller
-      // than either side, prefer the larger side and clamp them to the
-      // viewport. This prevents settings panels from flipping above the page
-      // and becoming inaccessible when opened near the top of a document.
-      if (shouldOpenBelow) {
-        top = anchorRect.bottom + offset.y;
-      } else {
-        top = anchorRect.top - overlayRect.height - offset.y;
-      }
-      top = Math.max(viewportPadding, Math.min(top, viewportHeight - overlayHeight - viewportPadding));
+        ? spaceBelow >= naturalHeight || spaceBelow >= spaceAbove
+        : !(spaceAbove >= naturalHeight || spaceAbove > spaceBelow);
+      const maxHeight = shouldUseSheet ? Math.max(0, viewportBottom - viewportTop) : shouldOpenBelow ? spaceBelow : spaceAbove;
+      // Constrain the rendered panel itself before positioning it. Clamping
+      // only the positioning math leaves tall children behind the tool dock.
+      overlay.style.maxHeight = `${maxHeight}px`;
+      overlay.style.setProperty('--panvas-overlay-max-height', `${maxHeight}px`);
+      const overlayHeight = overlay.getBoundingClientRect().height;
+      const top = shouldUseSheet ? viewportBottom - overlayHeight : shouldOpenBelow ? anchorBottom + offset.y : anchorTop - overlayHeight - offset.y;
 
       // Horizontal placement
-      if (placement.endsWith('start')) {
-        left = anchorRect.left + offset.x;
-      } else {
-        left = anchorRect.right - overlayRect.width + offset.x;
-      }
-      left = Math.max(viewportPadding, Math.min(left, viewportWidth - overlayWidth - viewportPadding));
-
-      setPosition({ top, left });
+      const preferredLeft = placement.endsWith('start') ? anchorRect.left + offset.x : anchorRect.right - overlayRect.width + offset.x;
+      const left = Math.max(viewportLeft, Math.min(preferredLeft, viewportRight - overlayRect.width));
+      setPosition(previous => previous.top === top && previous.left === left && previous.maxWidth === maxWidth && previous.maxHeight === maxHeight ? previous : { top, left, maxWidth, maxHeight });
     };
 
-    // Need a micro-delay for first render dimensions
-    requestAnimationFrame(updatePosition);
+    updatePosition();
     const resizeObserver = new ResizeObserver(updatePosition);
     if (overlayRef.current) resizeObserver.observe(overlayRef.current);
+    if (anchorRef.current) resizeObserver.observe(anchorRef.current);
+    const dock = document.querySelector('.panvas-mobile-tool-dock');
+    if (dock) resizeObserver.observe(dock);
+    const onScroll = (event: Event) => {
+      // Internal menu scrolling must not reposition its own panel.
+      if (event.target instanceof Node && overlayRef.current?.contains(event.target)) return;
+      updatePosition();
+    };
     window.addEventListener('resize', updatePosition);
-    window.addEventListener('scroll', updatePosition, true);
+    window.addEventListener('scroll', onScroll, true);
+    window.visualViewport?.addEventListener('resize', updatePosition);
+    window.visualViewport?.addEventListener('scroll', updatePosition);
 
     return () => {
       window.removeEventListener('resize', updatePosition);
-      window.removeEventListener('scroll', updatePosition, true);
+      window.removeEventListener('scroll', onScroll, true);
+      window.visualViewport?.removeEventListener('resize', updatePosition);
+      window.visualViewport?.removeEventListener('scroll', updatePosition);
       resizeObserver.disconnect();
     };
-  }, [isOpen, anchorRef, placement, offset.x, offset.y]);
+  }, [isOpen, anchorRef, placement, offset.x, offset.y, shouldUseSheet]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -95,6 +118,7 @@ export function OverlayManager({
       if (
         overlayRef.current &&
         !overlayRef.current.contains(e.target as Node) &&
+        !isInOverlay(e.target, overlayId) &&
         anchorRef.current &&
         !anchorRef.current.contains(e.target as Node)
       ) {
@@ -114,25 +138,30 @@ export function OverlayManager({
       document.removeEventListener('mousedown', handleClickOutside);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [isOpen, onClose, anchorRef]);
+  }, [isOpen, onClose, anchorRef, overlayId]);
 
   if (!isOpen) return null;
 
   return createPortal(
     <div
       ref={overlayRef}
-      className={`panvas-overlay fixed overflow-auto ${shouldUseSheet ? 'panvas-mobile-sheet' : ''}`}
-      style={shouldUseSheet ? { bottom: 'var(--panvas-keyboard-inset, 0px)' } : {
+      data-panvas-overlay-id={overlayId}
+      data-panvas-overlay-parent={parentOverlayId ?? undefined}
+      className={`panvas-overlay panvas-anchored-overlay fixed overflow-auto overscroll-contain ${shouldUseSheet ? 'panvas-mobile-sheet' : ''}`}
+      style={{
         top: position.top,
         left: position.left,
-        maxWidth: 'calc(100vw - 24px)',
-        maxHeight: 'calc(100vh - 24px)',
+        bottom: 'auto',
+        maxWidth: position.top === -9999 ? 'calc(100dvw - 24px)' : position.maxWidth,
+        maxHeight: position.top === -9999 ? 'calc(100dvh - 24px)' : position.maxHeight,
         visibility: position.top === -9999 ? 'hidden' : 'visible',
         zIndex: 60,
       }}
     >
-      {shouldUseSheet && <button type="button" onClick={onClose} className="panvas-sheet-close" aria-label="Close panel">Done</button>}
-      {children}
+      <ParentOverlayContext.Provider value={overlayId}>
+        {shouldUseSheet && <button type="button" onClick={onClose} className="panvas-sheet-close" aria-label="Close panel">Done</button>}
+        {children}
+      </ParentOverlayContext.Provider>
     </div>,
     document.body
   );

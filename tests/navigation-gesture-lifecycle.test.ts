@@ -95,6 +95,39 @@ function withDom(run: () => void) {
   }
 }
 
+test('pinch coalesces a pointer pair and applies its final layout before releasing ownership', () => withDom(() => {
+  const priorFrame = Object.getOwnPropertyDescriptor(globalThis, 'requestAnimationFrame');
+  const priorCancel = Object.getOwnPropertyDescriptor(globalThis, 'cancelAnimationFrame');
+  let queued: (() => void) | null = null;
+  Object.defineProperty(globalThis, 'requestAnimationFrame', { configurable: true, value: (callback: () => void) => { queued = callback; return 1; } });
+  Object.defineProperty(globalThis, 'cancelAnimationFrame', { configurable: true, value: () => { queued = null; } });
+  const target = new Surface();
+  const lifecycle = new NavigationGestureLifecycle();
+  const updates: number[] = [];
+  const detach = attachTwoFingerViewportGesture({ target: target as any, getScale: () => 1,
+    setScale: scale => { assert.ok(lifecycle.active); updates.push(scale); },
+    cancelActivePointerInteraction() {}, navigationGestures: lifecycle });
+  try {
+    pointer(target, 'pointerdown', 1, 400); pointer(target, 'pointerdown', 2, 400);
+    pointer(target, 'pointermove', 1, 350); pointer(target, 'pointermove', 2, 450);
+    assert.equal(updates.length, 0, 'both fingers wait for the same frame');
+    queued!();
+    assert.equal(updates.length, 1);
+    const firstScroll = target.scrollTop;
+    pointer(target, 'pointermove', 1, 300); pointer(target, 'pointermove', 2, 500);
+    let idle = 0;
+    lifecycle.onIdle(() => { idle++; assert.equal(updates.length, 2); assert.notEqual(target.scrollTop, firstScroll); });
+    pointer(target, 'pointerup', 1); pointer(target, 'pointerup', 2);
+    assert.equal(idle, 1);
+    assert.equal(queued, null, 'release cancels the stale scheduled frame');
+  } finally {
+    detach();
+    for (const [name, descriptor] of [['requestAnimationFrame', priorFrame], ['cancelAnimationFrame', priorCancel]] as const) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor); else delete (globalThis as any)[name];
+    }
+  }
+}));
+
 for (const termination of ['pointerup', 'pointercancel', 'lostpointercapture', 'blur', 'tool', 'teardown'] as const) {
   test(`promoted two-finger navigation terminates exactly once on ${termination}`, () => withDom(() => {
     const { input, canvas } = harness();
