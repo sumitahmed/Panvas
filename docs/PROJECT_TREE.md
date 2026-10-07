@@ -9,7 +9,7 @@ Panvas/
 ├── tests/            Node, browser, and Electron verification suites
 ├── public/           Static web assets and marketing media
 ├── scripts/          Build, release, checksum, and audit helpers
-├── docs/             Canonical docs and historical handover archive
+├── docs/             User and contributor documentation
 ├── .github/          Issue and pull-request templates
 ├── package.json      Scripts and dependency declarations
 ├── vite.config.ts    Renderer/Electron build configuration

@@ -1,6 +1,6 @@
 # Panvas architecture
 
-This is the canonical high-level architecture for Panvas v0.1.0. It describes the current source tree; plans and handover notes in `docs/panvas-handover/` are historical unless this index says otherwise.
+This overview describes the current runtime profiles and contributor boundaries.
 
 ## Runtime profiles
 
@@ -20,7 +20,7 @@ flowchart LR
 
 - **Windows Electron:** the main process owns filesystem and native operations. The default workspace root is `Documents/Panvas`; a user-selected storage root is persisted in Electron settings.
 - **Web:** the repository layer uses origin-scoped Dexie/IndexedDB. Browser quota and site-data policies apply.
-- **Cloud Sync:** Google Drive support is present behind explicit build-time feature flags and is disabled by default in v0.1.0. It is a backup/synchronization layer, not the local source of truth.
+- **Cloud Sync:** Google Drive support is present behind explicit build-time feature flags ; the example environment leaves it disabled. It is a backup/synchronization layer, not the local source of truth.
 
 ## Renderer and domain layers
 
@@ -75,7 +75,7 @@ Browser persistence uses the Dexie schema in `src/database/schema.ts`. Browser a
 
 ## Recognition and PDFs
 
-Handwriting recognition selects Windows Ink in a Windows Electron session, then a browser-native handwriting API when available. The local neural fallback infrastructure exists for evaluation but its runtime switch is off in v0.1.0; unsupported providers preserve raw ink.
+Handwriting recognition selects Windows Ink in a Windows Electron session, then a browser-native handwriting API when available. The local neural fallback infrastructure exists for evaluation but its runtime switch is off; unsupported providers preserve raw ink.
 
 PDF.js renders imported documents and `pdf-lib` supports annotated-PDF export. Both operate in the renderer/service layer; native filesystem access for desktop assets still crosses IPC.
 

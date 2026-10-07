@@ -1,6 +1,6 @@
 # Local development
 
-The repository-level [CONTRIBUTING.md](../CONTRIBUTING.md) is the canonical setup and review guide. This page is a quick reference for running the current v0.1.0 tree.
+The repository-level [CONTRIBUTING.md](../CONTRIBUTING.md) is the canonical setup and review guide. This page is a quick reference for running the current tree.
 
 ## Prerequisites
 
@@ -15,7 +15,7 @@ git clone https://github.com/sumitahmed/Panvas.git
 cd Panvas
 npm ci
 
-# Browser workspace: http://localhost:5173/app
+# Browser workspace: http://localhost:3000/app
 npm run dev
 
 # Electron desktop shell (builds before launch)
@@ -36,4 +36,4 @@ npm run build
 npm run check:release
 ```
 
-Focused suites and browser/Electron harnesses are documented in [TESTING.md](TESTING.md). There is no `electron:dev` script in the v0.1.0 package manifest; use `npm start` for Electron.
+Focused suites and browser/Electron harnesses are documented in [TESTING.md](TESTING.md). There is no `electron:dev` script in the package manifest; use `npm start` for Electron.

@@ -30,12 +30,11 @@ Copy `.env.example` to a local `.env` only when a feature explicitly needs confi
 | `scripts/` | Release and audit helpers |
 | `docs/` | Canonical contributor and system documentation |
 
-Read [docs/README.md](docs/README.md) for the canonical documentation map. The `docs/panvas-handover/` directory is an archive of implementation history, not a replacement for current source or canonical docs.
 
 ## Development commands
 
 ```bash
-# Browser/Vite development server; open http://localhost:5173/app
+# Browser/Vite development server; open http://localhost:3000/app
 npm run dev
 
 # Electron desktop shell (prestart runs the build first)

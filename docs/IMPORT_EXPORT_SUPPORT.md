@@ -1,6 +1,6 @@
 # Import and export support
 
-This page describes the current v0.1.0 import/export surface. It is deliberately explicit about fidelity: exports report approximated or unsupported objects instead of silently claiming a perfect copy.
+This page describes the current import/export surface. It is deliberately explicit about fidelity: exports report approximated or unsupported objects instead of silently claiming a perfect copy.
 
 ## PDF import
 

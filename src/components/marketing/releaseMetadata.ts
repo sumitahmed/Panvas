@@ -1,6 +1,6 @@
 // ============================================
 // Panvas — Release & Distribution Metadata
-// Canonical typed release parameters matching release.md
+// Canonical typed release parameters for public download surfaces
 // ============================================
 
 export interface WindowsReleaseMetadata {

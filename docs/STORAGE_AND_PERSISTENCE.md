@@ -49,7 +49,7 @@ Electron may import legacy Dexie records into filesystem storage after startup. 
 
 ## Optional cloud layer
 
-Google Drive sync is disabled by default by `VITE_ENABLE_CLOUD_SYNC=false` and `VITE_PANVAS_SYNC_V2=false`. When explicitly enabled and configured, it operates as an asynchronous remote layer; local records and local recovery remain the authority. See [CLOUD_SYNC_V0_1_ARCHITECTURE.md](CLOUD_SYNC_V0_1_ARCHITECTURE.md) and [CLOUD_SYNC_DEVICE_RESET.md](CLOUD_SYNC_DEVICE_RESET.md).
+The example environment disables Google Drive sync with `VITE_ENABLE_CLOUD_SYNC=false` and `VITE_PANVAS_SYNC_V2=false`. When explicitly enabled and configured, it operates as an asynchronous remote layer; local records and local recovery remain the authority. See [CLOUD_SYNC_V0_1_ARCHITECTURE.md](CLOUD_SYNC_V0_1_ARCHITECTURE.md) and [CLOUD_SYNC_DEVICE_RESET.md](CLOUD_SYNC_DEVICE_RESET.md).
 
 ## Contributor rules
 

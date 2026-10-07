@@ -6,6 +6,8 @@ Panvas uses the Node test runner for most unit and integration coverage. A small
 
 Run these before opening a pull request or publishing a release:
 
+Run `npm run build` first on a fresh checkout. The disposable Electron single-instance test launches the built app and requires current `dist-electron/` output.
+
 ```bash
 npm run typecheck
 npm test
@@ -43,6 +45,12 @@ Browser harnesses expect a local Vite server and may use a real browser profile.
 - For storage changes, cover both Electron and browser adapters when the contract is shared.
 - For UI changes, cover keyboard and narrow-window behavior where applicable and attach a screenshot or short recording to the pull request when visual review matters.
 
-## Current verification record
+## PDF and mobile regressions
 
-On 2026-09-14, the working tree's release pass completed `npm test` with 588 tests discovered, 587 passing, 1 skipped, and no failures. A focused notebook-scroll run passed 6/6. Re-run the commands locally because counts and coverage change as tests evolve.
+```bash
+npm run test:mobile-overlays
+npm run test:pdf-mobile
+npm run test:panvas-performance
+```
+
+These harnesses start isolated test servers. PDF continuity and performance checks run in Chromium and Electron; mobile overlays exercise the real browser app across portrait and landscape sizes. Generated captures and reports go to ignored `artifacts/` directories.

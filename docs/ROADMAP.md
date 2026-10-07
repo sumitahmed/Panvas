@@ -2,9 +2,9 @@
 
 This roadmap describes direction, not commitments. It contains no promised dates. A feature is current only when it is present in the source and covered by the release documentation.
 
-## v0.1.0 - Current
+## v0.1.x - Current
 
-The initial public release focuses on a useful local workspace:
+The current release focuses on a useful local workspace:
 
 - workspace, folder, notebook, section, and page organization;
 - vector notebook ink, page appearance controls, rich text, sticky notes, layers, images, voice notes, and local search;
@@ -14,7 +14,7 @@ The initial public release focuses on a useful local workspace:
 - browser-local storage and a web build;
 - trash, restore, and workspace backup flows.
 
-Cloud Sync code exists but is release-gated and disabled by default in the ordinary v0.1.0 build. It should not be treated as a generally available hosted service.
+Google Drive sync is an optional configured integration. Local editing does not require a provider account.
 
 ## v0.1.x - Maintenance
 
@@ -37,4 +37,4 @@ These are ideas for later design and review, not scheduled releases:
 - improved handwriting recognition and optional on-device intelligence;
 - additional platform targets.
 
-Future work must preserve local ownership, explicit migration paths, and the Electron security boundary. See [docs/CONTRIBUTOR_ROADMAP.md](CONTRIBUTOR_ROADMAP.md) for contribution-sized areas and [docs/panvas-handover/](panvas-handover/) for historical context only.
+Future work must preserve local ownership, explicit migration paths, and the Electron security boundary. See [docs/CONTRIBUTOR_ROADMAP.md](CONTRIBUTOR_ROADMAP.md) for contribution-sized areas.

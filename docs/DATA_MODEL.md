@@ -1,6 +1,6 @@
 # Panvas data model
 
-This is the canonical v0.1.0 overview of Panvas entities. TypeScript definitions in `src/types/` and the database schema are the source of truth when this document and code differ.
+This is the entity overview of Panvas entities. TypeScript definitions in `src/types/` and the database schema are the source of truth when this document and code differ.
 
 ## Hierarchy
 

@@ -25,11 +25,11 @@ Never send passwords, OAuth tokens, private keys, API keys, private notes, perso
 
 We will acknowledge and triage reports as promptly as practical. Please allow time for validation, a fix, and coordinated disclosure before publishing details.
 
-## Security boundaries in v0.1.0
+## Security boundaries
 
 The Windows build separates the Chromium renderer from privileged filesystem and native operations. The current Electron configuration enables `contextIsolation`, disables `nodeIntegration`, enables the renderer sandbox, and exposes a narrow `window.panvas` preload bridge. IPC handlers validate the trusted top-level renderer and validate operation inputs before filesystem work.
 
-The browser build is origin-scoped. Browser storage and any enabled network integrations remain subject to the browser, operating system, and provider security models. Cloud Sync is disabled by default in the ordinary v0.1.0 build; enabling it requires explicit build-time configuration and Google OAuth setup.
+The browser build is origin-scoped. Browser storage and any enabled network integrations remain subject to the browser, operating system, and provider security models. Cloud Sync requires explicit build-time configuration and Google OAuth setup; the example environment leaves it disabled.
 
 These controls reduce risk but are not a security guarantee. Keep your operating system updated, download releases only from the project release page, verify release checksums, and maintain independent backups of important work.
 

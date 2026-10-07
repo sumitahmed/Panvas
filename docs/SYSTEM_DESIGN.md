@@ -1,6 +1,6 @@
 # Panvas system design
 
-This document records the design decisions that shape the v0.1.0 codebase. It is narrower than the architecture overview: it explains the boundaries contributors should preserve.
+This document records the design decisions that shape the current codebase. It is narrower than the architecture overview: it explains the boundaries contributors should preserve.
 
 ## Design principles
 

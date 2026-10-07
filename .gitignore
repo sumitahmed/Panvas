@@ -91,3 +91,7 @@ PROGRESS.md
 release.md
 media-master/
 
+
+# Local agent instructions and generated viewport captures
+/.agents/
+/tests/screenshots/

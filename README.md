@@ -102,7 +102,7 @@ cd Panvas
 npm ci
 
 # 3. Start local development
-# Web / Vite dev server (open http://localhost:5173/app)
+# Web / Vite dev server (open http://localhost:3000/app)
 npm run dev
 
 # Desktop / Electron app

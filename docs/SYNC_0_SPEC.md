@@ -1,14 +1,6 @@
-# Panvas Sync-0 Contract and Legacy Audit
+# Legacy sync transport contract
 
-Status: implementation contract reconciled 2026-08-30. Google Drive sync exists for Electron and browser/PWA. Electron OAuth and real object/manifest creation have manual evidence; stable Electron second-sync and browser/PWA cross-device runtime behavior remain pending user verification. This document does not certify Supabase as a user-data sync backend.
-
-## 2026-08-30 focused reconciliation
-
-- A manifest read-back may acknowledge local publishes, but those same-cycle records must not be returned for local download/re-application. Records authored elsewhere remain eligible when their remote state is genuinely newer or different.
-- Remote application is phased: workspace → folder → notebook → section → page/canvas metadata → page content/drawing/canvas scene → custom blocks → assets. A phase completes before the next starts; bounded concurrency is allowed only within a phase.
-- A valid empty workspace is not a zero-entity scan: its workspace root is the canonical one-record baseline. `initial-scan-empty` means the requested canonical workspace root was unavailable and remains a failure.
-- Account-level success requires every selected workspace to finish without errors, conflicts, or unresolved journal entries.
-- Browser/PWA OAuth uses Google Identity Services `initTokenClient` and `requestAccessToken` with only the public `VITE_PANVAS_GOOGLE_WEB_CLIENT_ID`. No desktop client-ID fallback, browser client secret, refresh token, or persistent browser token storage is allowed.
+This contract explains the legacy provider-neutral transport. The renderer-side Supabase engine remains **legacy/quarantined**. For the current Google Drive v2 protocol, see [CLOUD_SYNC_V0_1_ARCHITECTURE.md](CLOUD_SYNC_V0_1_ARCHITECTURE.md).
 
 ## Boundary and selected architecture
 
@@ -18,7 +10,7 @@ Electron keeps refresh/access tokens in the main process and OS-protected storag
 
 No Electron provider token, refresh token, client secret, raw path, or unrestricted filesystem operation may cross the preload boundary. Electron remote application uses only a validated record capability. In browser builds there is no client secret or refresh token; the short-lived access token is memory-only and provider requests remain constrained to the Google Drive adapter.
 
-The renderer-side Supabase data-sync engine is **legacy/quarantined** and is not the Google Drive transport. `VITE_ENABLE_CLOUD_SYNC` remains a release gate; manual Electron/browser acceptance is still required before enabling it for a release candidate.
+The renderer-side Supabase data-sync engine is **legacy/quarantined** and is not the Google Drive transport. `VITE_ENABLE_CLOUD_SYNC` remains a release gate; enablement requires provider configuration and validation.
 
 ## Canonical local sources
 
@@ -90,41 +82,7 @@ Automatic hard deletion is out of scope for v1. Tombstones and referenced object
 ## Privacy, recovery, and diagnostics
 
 - Transport uses provider HTTPS and provider-at-rest protection. End-to-end encryption is not claimed in v1; adding it requires a key-recovery/product decision.
-- Sync logs contain operation IDs, entity kinds, hashes, redacted provider error classes, attempts, and timings—never note text, binary contents, tokens, email addresses, or absolute local paths.
+- Sync logs contain operation IDs, entity kinds, hashes, redacted provider error classes, attempts, and timingsâ€”never note text, binary contents, tokens, email addresses, or absolute local paths.
 - Telemetry remains off unless independently opted in; sync correctness never depends on telemetry.
 - Initial restore downloads to a staging area, validates schema/IDs/parents/hashes and size limits, writes a local backup, then imports atomically. An existing local workspace with the same ID becomes a visible reconciliation case, never an overwrite.
 - Disconnecting or losing authorization stops network work only. Local data remains usable and exportable.
-
-## Legacy implementation audit
-
-| Area | Current evidence | Verdict required before enablement |
-| --- | --- | --- |
-| Entity coverage | `SyncQueueItem` supports only workspace, folder, canvasFile and canvasData | Add notebooks, sections, pages, page content/drawings, custom blocks/settings, all binary references/objects, and every tombstone |
-| Native Electron writes | repositories return through `window.panvas` before adding Dexie outbox entries | Journal canonical main-process filesystem commits; do not depend on renderer Dexie |
-| Local adoption | the former canvas-only purge was removed; existing-user adoption now stops when an unclaimed system workspace exists | Add an explicit merge/adopt/keep-local UI that evaluates every entity family |
-| Auth/RLS failures | the former local-delete branch was removed; rejection now fails the queued operation and preserves local rows | Retain this invariant in main-process provider tests |
-| Conflict ordering | pull compares remote `updated_at` with client `updatedAt` | Replace client-clock LWW with manifest revision plus ETag/`ifMatch` |
-| Canvas merge | element versions are merged, but app state/files/custom-block enqueue and delete semantics are incomplete | Treat v1 scene as opaque or prove a complete element/tombstone merge suite |
-| Deletes | soft deletes cover only three metadata tables; legacy hard remote DELETE calls are now blocked | Add durable tombstones for every record and the acknowledged compaction protocol |
-| Binary assets | PDF/image/audio stores have no remote manifest, hash, retry, or garbage-collection protocol | Upload immutable hashed objects before record references and verify downloads |
-| Credentials | Supabase PKCE sessions currently persist in renderer storage | Move Windows provider tokens to main/OS secure storage; keep renderer token-free |
-| RLS/schema | only four tables and one scene bucket exist; migrations overlap and omit the final entity set | Replace with one idempotent schema, ownership-preserving foreign keys, complete RLS/storage policies, and adversarial tests |
-
-The existing RLS predicates correctly attempt per-row `auth.uid() = user_id`, but they do not establish ownership consistency through every parent/child relationship, cover the final entity set, or make the migration set safely repeatable. They are insufficient evidence for production isolation.
-
-## Acceptance suite before OneDrive enablement
-
-All results must be produced with the feature disabled first, then in an isolated test tenant/account:
-
-1. Enable, disable, sign out, and provider outage leave canonical local data unchanged and usable.
-2. Two clean devices converge for every record family and all supported binary assets.
-3. Concurrent edit/edit and delete/edit create visible, recoverable conflicts with deterministic resolution.
-4. Interrupted asset upload never publishes a dangling reference; retry is idempotent.
-5. A stale manifest `ifMatch` write is rejected and cannot overwrite newer remote state.
-6. Corrupt, oversized, wrong-owner, wrong-parent, and hash-mismatched remote records are quarantined without local mutation.
-7. Trash/restore and offline permanent-delete attempts cannot resurrect or silently erase content.
-8. Account switching and RLS denial preserve local records and isolate remote accounts.
-9. Fresh-device restore and restore-from-backup reproduce the canonical workspace, including pages, annotations, Elements, and assets.
-10. Renderer inspection proves no token, provider endpoint/client, raw path, Node primitive, or unrestricted write capability.
-
-Only after this suite passes may `VITE_ENABLE_CLOUD_SYNC=true` be used in a release candidate. Google Drive, Dropbox, and Box must reuse the same adapter/manifest contract rather than introduce provider-specific document models.

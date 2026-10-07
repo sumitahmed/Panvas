@@ -1,10 +1,10 @@
 # Known limitations
 
-This list describes the current v0.1.0 scope. It is intentionally short; a behavior belongs here only when it is a known product or distribution constraint.
+This list describes the current release scope. It is intentionally short; a behavior belongs here only when it is a known product or distribution constraint.
 
 ## Windows distribution
 
-- `Panvas-0.1.0-Setup.exe` is unsigned. Windows SmartScreen may show an unrecognized-app warning on first launch.
+- The Windows installer is unsigned. Windows SmartScreen may show an unrecognized-app warning on first launch.
 - Verify the installer against the `SHA256SUMS.txt` manifest supplied with the same GitHub Release. Do not use a hash copied from another page or mirror.
 
 ## Browser storage and compatibility
@@ -15,7 +15,7 @@ This list describes the current v0.1.0 scope. It is intentionally short; a behav
 ## Handwriting-to-text
 
 - Windows recognition uses the Windows Ink bridge when available. The web build uses the browser-native handwriting API only where that API is present. Unsupported environments preserve the original ink but do not convert it.
-- The experimental local neural recognition fallback is disabled in v0.1.0 because it has not met the project's accuracy bar.
+- The experimental local neural recognition fallback is disabled because it has not met the project's accuracy bar.
 
 ## PDFs and large documents
 
@@ -23,11 +23,11 @@ This list describes the current v0.1.0 scope. It is intentionally short; a behav
 
 ## Cloud Sync
 
-- Google Drive Cloud Sync is release-gated and disabled by default (`VITE_ENABLE_CLOUD_SYNC=false` and `VITE_PANVAS_SYNC_V2=false`). It is not required for local editing, and local storage remains authoritative.
+- Google Drive Cloud Sync is controlled by build-time flags, disabled in the example environment (`VITE_ENABLE_CLOUD_SYNC=false` and `VITE_PANVAS_SYNC_V2=false`). It is not required for local editing, and local storage remains authoritative.
 
 ## Scope boundaries
 
 - The web build is local to its browser origin; it is not a hosted Panvas workspace or a cross-device service by default.
-- v0.1.0 is an initial public release. It is not a guarantee of zero defects, universal browser support, or permanent data compatibility. Keep independent backups of important work.
+- Panvas is below 1.0. It is not a guarantee of zero defects, universal browser support, or permanent data compatibility. Keep independent backups of important work.
 
 Report reproducible issues with the [bug report template](https://github.com/sumitahmed/Panvas/issues/new?template=bug_report.md). Remove secrets, private notes, personal files, and credentials from all reports.

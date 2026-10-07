@@ -1,6 +1,6 @@
 // ============================================
 // Panvas — Marketing Design Tokens & Data
-// Canonical terminology matching release.md
+// Shared terminology for public marketing surfaces
 // ============================================
 
 import React from 'react';

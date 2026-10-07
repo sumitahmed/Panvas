@@ -1,8 +1,8 @@
-# Cloud Sync v0.1.0
+# Google Drive Cloud Sync
 
 > **Release-gated implementation.** Both cloud flags are false in `.env.example`; local editing does not depend on this feature.
 
-This document records the current Google Drive sync boundary. It is not a promise that Cloud Sync is enabled in the public v0.1.0 build.
+This document records the current Google Drive sync boundary. Availability depends on the build configuration and Google OAuth setup.
 
 ## Scope
 
@@ -54,7 +54,7 @@ Electron OAuth tokens stay in the main process; browser GIS tokens are memory-on
 
 ## Limitations
 
-- Cloud Sync is disabled by default (`VITE_ENABLE_CLOUD_SYNC=false`, `VITE_PANVAS_SYNC_V2=false`).
+- The example environment disables Cloud Sync (`VITE_ENABLE_CLOUD_SYNC=false`, `VITE_PANVAS_SYNC_V2=false`).
 - OneDrive is not implemented.
 - Genuine simultaneous edits require an explicit conflict decision.
 - A remote graph or object that cannot be proven is kept for recovery and may require later repair.
