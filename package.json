@@ -2,7 +2,7 @@
   "name": "panvas",
   "private": true,
   "license": "MIT",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Panvas — A visual thinking workspace for engineers, researchers, and technical students",
   "main": "dist-electron/main.js",
   "type": "module",
