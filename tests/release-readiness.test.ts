@@ -115,10 +115,6 @@ test('public Windows download metadata and CTAs use the current release', async 
 test('published Windows artifact metadata includes its hash, byte size and release notes', async () => {
   const { PANVAS_RELEASE } = await import('../src/components/marketing/releaseMetadata.ts');
   const windows = PANVAS_RELEASE.windows;
-  if (!windows.checksumSha256) {
-    assert.equal(windows.installerSize, 'See GitHub release');
-    return;
-  }
   assert.match(windows.checksumSha256, /^[0-9a-f]{64}$/);
   assert.match(windows.installerSize, /^[1-9][0-9,]* bytes$/);
   const bytes = Number(windows.installerSize.replaceAll(',', '').replace(' bytes', ''));

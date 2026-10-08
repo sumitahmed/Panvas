@@ -7,7 +7,7 @@
 > **Local-first visual workspace for notes, handwriting, PDFs, and spatial thinking.**
 
 <p align="center">
-  <a href="https://github.com/sumitahmed/Panvas/releases/download/v0.1.5/Panvas-0.1.5-Setup.exe">
+  <a href="https://github.com/sumitahmed/Panvas/releases/download/v0.1.6/Panvas-0.1.6-Setup.exe">
     <img src="https://img.shields.io/badge/Download-Windows_x64-243c4a?style=flat&logo=windows" alt="Download for Windows" />
   </a>
   <a href="https://panvas.vercel.app/app">
@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v0.1.5-blue.svg" alt="Version 0.1.5" />
+  <img src="https://img.shields.io/badge/version-v0.1.6-blue.svg" alt="Version 0.1.6" />
   <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" />
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Web-lightgrey.svg" alt="Platforms" />
   <img src="https://img.shields.io/badge/storage-Local--First-orange.svg" alt="Local First" />
@@ -65,13 +65,13 @@ Panvas bridges structured notebooks and infinite canvases into a single, distrac
 ## Download
 
 ### Windows (Desktop)
-- **Panvas v0.1.5 (64-bit)**: Download [`Panvas-0.1.5-Setup.exe`](https://github.com/sumitahmed/Panvas/releases/download/v0.1.5/Panvas-0.1.5-Setup.exe) from the [GitHub Releases](https://github.com/sumitahmed/Panvas/releases) portal.
+- **Panvas v0.1.6 (64-bit)**: Download [`Panvas-0.1.6-Setup.exe`](https://github.com/sumitahmed/Panvas/releases/download/v0.1.6/Panvas-0.1.6-Setup.exe) from the [GitHub Releases](https://github.com/sumitahmed/Panvas/releases) portal.
 - **SHA-256 Checksum Verification**: Verify the downloaded installer against the official checksum published in `SHA256SUMS.txt`:
   ```powershell
-  Get-FileHash Panvas-0.1.5-Setup.exe -Algorithm SHA256
-  # SHA-256: ac7c4895fd66126c7b9c0c5bac78f86f727f43fc1a10405a462bcb12fef8511c
+  Get-FileHash Panvas-0.1.6-Setup.exe -Algorithm SHA256
+  # SHA-256: 53b52b765a6465fd601b11d55fde303af01b92620567bd34abf2d0d51e56b018
   ```
-  *Note: The v0.1.5 installer is unsigned while the code signing pipeline is established. If Windows SmartScreen prompts on launch, click "More info" → "Run anyway".*
+  *Note: The v0.1.6 installer is unsigned while the code signing pipeline is established. If Windows SmartScreen prompts on launch, click "More info" → "Run anyway".*
 
 ### Web
 - **Browser App**: Launch [panvas.vercel.app/app](https://panvas.vercel.app/app) to use Panvas directly in Chromium, Firefox, or Safari (stored in origin-scoped IndexedDB).
