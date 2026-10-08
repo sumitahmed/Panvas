@@ -89,12 +89,12 @@ export const FAQ_ITEMS: FaqItem[] = [
 
 export const TECHNICAL_MARKS = {
   coordinateTopLeft: '[0,0]',
-  versionTag: 'v0.1.6 // RELEASE',
+  versionTag: 'v0.1.7 // RELEASE',
   sectionH1: 'SEC-H1',
   sectionH2: 'SEC-H2',
   gridAlpha: 'GRID-α',
   storageAuthority: 'LOCAL FILESYSTEM & DEXIE IDB',
-  engineVersion: 'PANVAS CORE V0.1.6',
+  engineVersion: 'PANVAS CORE V0.1.7',
 };
 
 export const MOTION_VARIANTS = {
