@@ -108,7 +108,14 @@ try {
     for(const pointerType of ['mouse','pen']){
       const start=await position(585,300),end=await page.evaluate(({extent})=>{const e=window.documentFixture.engine(),c=e.drawing.getCanvasElement(),b=c.getBoundingClientRect(),p=e.viewport.pageToCanvas(595+extent-5,300);return{x:b.left+p.x*b.width/c.clientWidth,y:b.top+p.y*b.height/c.clientHeight};},{extent});
       await strokeBetween(start,end,pointerType);
-      const last=await page.evaluate(()=>window.documentFixture.engine().drawing.getStrokes().at(-1).points.at(-1));assert.ok(Math.abs(last.x-(595+extent-5))<1&&Math.abs(last.y-300)<1,'captured PDF crossing stays canonical');
+      const endpoint=await page.evaluate(()=>{
+        const e=window.documentFixture.engine(),c=e.drawing.getCanvasElement(),b=c.getBoundingClientRect();
+        const raw=window.__panvasHandwritingTraces.at(-1).mapped.at(-1),final=e.drawing.getStrokes().at(-1).points.at(-1);
+        const a=e.viewport.pageToCanvas(raw.x,raw.y),z=e.viewport.pageToCanvas(final.x,final.y);
+        return{raw,tipErrorCss:Math.hypot((z.x-a.x)*b.width/c.clientWidth,(z.y-a.y)*b.height/c.clientHeight),limit:e.tools.getState().stabilization/50};
+      });
+      assert.ok(Math.abs(endpoint.raw.x-(595+extent-5))<1&&Math.abs(endpoint.raw.y-300)<1,'captured PDF crossing stays canonical');
+      assert.ok(endpoint.tipErrorCss<=endpoint.limit+.001,'visible stabilized tip stays within its selected CSS-pixel bound');
     }
   }
   pass(`${research.length} native PDF mouse/pen starts: 40/140/300px, all rotations, body and four Research Space sides`);

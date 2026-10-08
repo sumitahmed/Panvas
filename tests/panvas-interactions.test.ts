@@ -1090,13 +1090,13 @@ test('resizing clipped ink scales its ruler-protected region and undo restores i
   assert.deepEqual(stroke.inkClip?.[0]?.[0]?.[1], [100, 0]);
 });
 
-function createRulerInputHarness(rulerEnabled: boolean, strokePattern: 'solid' | 'dashed' | 'dotted' = 'solid') {
+function createRulerInputHarness(rulerEnabled: boolean, strokePattern: 'solid' | 'dashed' | 'dotted' = 'solid', stabilization = 0) {
   const ruler = new RulerManager();
   ruler.setEnabled(rulerEnabled);
   const strokes: Stroke[] = [];
   const historyCommands: any[] = [];
   let redraws = 0;
-  const toolState = { ...DEFAULT_TOOL_STATE, mode: 'draw' as const, rulerEnabled, stabilization: 0, strokePattern };
+  const toolState = { ...DEFAULT_TOOL_STATE, mode: 'draw' as const, rulerEnabled, stabilization, strokePattern };
   const drawing = {
     getRulerManager: () => ruler,
     canEditActiveLayer: () => true,
@@ -1321,6 +1321,21 @@ test('ruler constrains only stroke samples within the active edge threshold', ()
       { x: state.center.x + 30, y: topEdgeY - 48 },
     ],
   );
+});
+
+test('ruler edge samples and the freehand exit remain exact at every stabilization strength', () => {
+  for (const setting of [0, 25, 50, 75, 100]) {
+    const harness = createRulerInputHarness(true, 'solid', setting);
+    const state = harness.ruler.getState(), y = state.center.y - state.height / 2;
+    harness.pointer('Down', state.center.x - 120, y - 8);
+    harness.pointer('Move', state.center.x - 40, y - 4);
+    harness.pointer('Move', state.center.x + 30, y - 48);
+    harness.pointer('Up', state.center.x + 30, y - 48);
+    assert.deepEqual(harness.strokes[0].points.map(({ x, y }) => ({ x, y })), [
+      { x: state.center.x - 120, y }, { x: state.center.x - 40, y },
+      { x: state.center.x + 30, y: y - 48 },
+    ], `${setting}% cannot smooth a constrained ruler join`);
+  }
 });
 
 test('ruler geometry stays transient and disabling removes its interaction surface', () => {

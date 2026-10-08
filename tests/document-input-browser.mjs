@@ -169,7 +169,7 @@ try {
   assert.equal(ink.work.sceneSnapshots, 8, 'one scene snapshot per committed stroke');
   assert.equal(ink.work.redraws ?? 0, 0, 'focused page must not replay hidden committed scenes');
   assert.ok(ink.work.canvasResizes <= 48, 'idle expiry may release buffers between display-paced strokes');
-  assert.ok(ink.traces.every(trace => trace.counters.normalizedSamples === 121 && trace.counters.committedPoints === 121), 'all raw/move samples retained');
+  assert.ok(ink.traces.every(trace => trace.counters.normalizedSamples === 121 && trace.counters.committedPoints >= 121), 'all 121 physical samples retained; rendered curves may add interior points');
   pass('eight rapid pen strokes preserve samples without hidden full-scene replay');
   await page.waitForFunction(() => window.documentFixture.engine().drawing.spareWetInk === null);
   assert.equal(await page.locator('[data-panvas-wet-ink]').count(), 0, 'idle releases transient wet surfaces');

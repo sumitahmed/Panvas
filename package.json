@@ -24,6 +24,7 @@
     "test:notebook-performance": "node --test tests/notebook-performance.test.ts && node tests/notebook-performance-browser.mjs",
     "test:mobile-overlays": "node tests/mobile-overlay-browser.mjs",
     "test:pdf-mobile": "node tests/pdf-mobile-scroll-browser.mjs && node tests/pdf-mobile-scroll-browser.mjs --electron",
+    "test:ink-quality": "node --test tests/ink-input.test.ts tests/handwriting-fidelity.test.ts tests/handwriting-recognition.test.ts && node tests/ink-quality-browser.mjs && node tests/ink-quality-browser.mjs --electron && node tests/ink-quality-browser.mjs --electron --dpr=1.25 --quick && node tests/ink-quality-browser.mjs --dpr=2 --quick",
     "test:panvas-performance": "node tests/panvas-performance-browser.mjs && node tests/panvas-performance-browser.mjs --electron",
     "test:notebook-scroll": "node --test tests/notebook-scroll-render-regression.test.ts",
     "pretest": "node --test tests/navigation-gesture-lifecycle.test.ts tests/stage-c-performance.test.ts tests/eraser-scheduling.test.ts tests/handwriting-fidelity.test.ts && npm run test:package-a && npm run test:package-b && npm run test:package-c && npm run test:cloud-reliability",

@@ -23,6 +23,7 @@ import { constrainShapeDrag } from './shapeGeometry.ts';
 import type { RulerHit, RulerManager } from './RulerManager.ts';
 import type { LaserManager } from './LaserManager.ts';
 import { InkInputFilter, mapPointerPressure } from './inkInput.ts';
+import { InkCenterline } from './inkCenterline.ts';
 import { gate0Profiler, type Gate0Record } from '../../../dev/gate0Profiler.ts';
 import { EraserGesture } from './EraserGesture.ts';
 import { InkSamples } from './inkSamples.ts';
@@ -34,7 +35,7 @@ export type DrawingGestureListener = (active: boolean) => void;
 export type InkStrokeLifecycleEvent =
   | { type: 'start'; instrument: 'pen' | 'pencil' }
   | { type: 'cancel'; instrument: 'pen' | 'pencil' }
-  | { type: 'complete'; instrument: 'pen' | 'pencil'; stroke: Stroke };
+  | { type: 'complete'; instrument: 'pen' | 'pencil'; stroke: Stroke; physicalPoints: StrokePoint[] };
 
 const SELECTION_CURSORS = new Set([
   'default',
@@ -66,6 +67,9 @@ export class InputManager {
   private strokeStartTime: number = 0;
   private currentPoints: StrokePoint[] = [];
   private inkInputFilter = new InkInputFilter();
+  private inkCenterline = new InkCenterline();
+  private inkScreenScale = 1;
+  private inkRulerSnapped = false;
   /** Immutable owner of the active canvas gesture. Cleared on every finish. */
   private strokeModeAtStart: NotebookMode | null = null;
   private strokeContextAtStart: DrawingStrokeContext | null = null;
@@ -848,6 +852,12 @@ export class InputManager {
     this.strokeContextAtStart = resolveDrawingStrokeContext(toolState);
     this.strokeStartTime = Date.now();
     this.inkInputFilter.reset();
+    this.inkCenterline.reset();
+    this.inkRulerSnapped = false;
+    const origin = this.viewport.pageToCanvas(0, 0), axis = this.viewport.pageToCanvas(1, 0);
+    this.inkScreenScale = this.cachedCanvasRect && this.cachedCssWidth && this.cachedCssHeight
+      ? Math.hypot((axis.x - origin.x) * this.cachedCanvasRect.width / this.cachedCssWidth,
+        (axis.y - origin.y) * this.cachedCanvasRect.height / this.cachedCssHeight) : 1;
     this.currentPoints = [];
     this.inkRawPoints = [];
     this.acceptInkSamples(e);
@@ -929,20 +939,28 @@ export class InputManager {
     // order rather than dropping that history or inserting a backwards segment.
     if (result.rebuild) {
       this.inkInputFilter.reset();
+      this.inkCenterline.reset();
+      this.inkRulerSnapped = false;
       this.currentPoints = [];
       this.inkRawPoints = [];
     }
     const context = this.strokeContextAtStart!;
     for (let i = result.rebuild ? 0 : oldLength; i < stream.samples.length; i++) {
       const sample = stream.samples[i];
-      const raw = this.getRulerConstrainedPoint(sample);
+      const rulerSnap = this.rulerManager.snapPointToEdge(this.getCanvasPoint(sample));
+      const raw = rulerSnap.point;
       // Lift events commonly report zero pressure. Retain the last contact
       // pressure while preserving a distinct terminal XY/timestamp.
       if (e.type === 'pointerup' && sample.timeStamp === e.timeStamp && sample.pressure === 0
         && this.inkRawPoints.length) raw.pressure = this.inkRawPoints[this.inkRawPoints.length - 1].pressure;
       raw.t = sample.timeStamp - stream.startedAt;
       this.inkRawPoints.push(raw);
-      this.currentPoints.push(this.inkInputFilter.push(raw, context.stabilization));
+      // Ruler projection owns its edge and entry/exit joins. Restart freehand
+      // filtering at the join so interpolation cannot bow across the ruler.
+      const constrained = rulerSnap.isSnapped || this.inkRulerSnapped;
+      if (constrained) { this.inkInputFilter.reset(); this.inkCenterline.reset(); }
+      this.inkCenterline.append(this.inkInputFilter.push(raw, constrained ? 0 : context.stabilization, this.inkScreenScale), this.currentPoints, this.inkScreenScale);
+      this.inkRulerSnapped = rulerSnap.isSnapped;
       if (this.inkTrace) {
         this.inkTrace.counters.filterInputs = (this.inkTrace.counters.filterInputs ?? 0) + 1;
         this.inkTrace.counters.filteredOutputs = (this.inkTrace.counters.filteredOutputs ?? 0) + 1;
@@ -967,20 +985,13 @@ export class InputManager {
     this.inkRawPoints = [];
   }
 
-  private getRulerConstrainedPoint(e: Pick<PointerEvent, 'clientX' | 'clientY' | 'pointerType' | 'pressure'>): StrokePoint {
-    const point = this.getCanvasPoint(e);
-    return this.rulerManager.snapPointToEdge(point).point;
-  }
-
   private finishDrawing(e: PointerEvent): void {
     const traceStartedAt = this.inkTrace ? performance.now() : 0;
     if (e.type === 'pointerup') this.acceptInkSamples(e);
     const finalTip = this.inkRawPoints[this.inkRawPoints.length - 1];
     const filteredPoints = this.currentPoints;
-    // Exactly the same endpoint extension used by the live renderer. Do not feed
-    // the raw tip back through stabilization or change the filter's parameters.
-    if (finalTip && this.currentPoints.length && (this.currentPoints[this.currentPoints.length - 1].x !== finalTip.x
-      || this.currentPoints[this.currentPoints.length - 1].y !== finalTip.y)) this.currentPoints = [...this.currentPoints, { ...finalTip }];
+    // Commit precisely the displayed path. The bounded filtered tip is already
+    // visible; appending the physical tip only on lift would produce a snap.
     const finishStartedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
     this.isDrawing = false;
     this.setDrawingGestureActive(false);
@@ -1020,10 +1031,10 @@ export class InputManager {
         && gestureMode === 'draw'
         && toolState.scribbleToErase
         && (strokeContext.tool === 'pen' || strokeContext.tool === 'pencil')
-        && analyzeScribble(this.currentPoints).isScribble
+        && analyzeScribble(this.inkRawPoints).isScribble
       ) {
         const targets = findScribbleTargets(
-          this.currentPoints,
+          this.inkRawPoints,
           (x, y, radius) => this.drawingEngine.findStrokesNearPoint(x, y, radius),
           Math.max(3, strokeContext.thickness),
         );
@@ -1039,8 +1050,8 @@ export class InputManager {
         && gestureMode === 'draw'
         && toolState.circleToSelect
         && (strokeContext.tool === 'pen' || strokeContext.tool === 'pencil')
-        && analyzeCircleGesture(this.currentPoints).isCircle
-        && this.selectionEngine.selectWithinLoop(this.currentPoints) > 0
+        && analyzeCircleGesture(this.inkRawPoints).isCircle
+        && this.selectionEngine.selectWithinLoop(this.inkRawPoints) > 0
       ) {
         this.currentPoints = [];
         this.toolManager.setMode('select');
@@ -1048,14 +1059,14 @@ export class InputManager {
       }
 
       const recognizedLine = !strokeContext.recognitionEligible && gestureMode === 'draw' && toolState.straightLineRecognition
-        ? recognizeStraightLine(this.currentPoints, toolState.snapRecognizedLines)
+        ? recognizeStraightLine(this.inkRawPoints, toolState.snapRecognizedLines)
         : null;
       const recognizedShape = !recognizedLine?.isLine
         && gestureMode === 'draw'
         && !strokeContext.recognitionEligible
         && toolState.roughShapeRecognition
         && (strokeContext.tool === 'pen' || strokeContext.tool === 'pencil')
-        ? recognizeRoughShape(this.currentPoints, toolState.snapRecognizedShapes)
+        ? recognizeRoughShape(this.inkRawPoints, toolState.snapRecognizedShapes)
         : null;
 
       if (recognizedShape?.isShape && recognizedShape.shapeType) {
@@ -1139,6 +1150,7 @@ export class InputManager {
           type: 'complete',
           instrument: strokeContext.tool as 'pen' | 'pencil',
           stroke: structuredClone(stroke),
+          physicalPoints: this.inkRawPoints.map(point => ({ ...point })),
         });
       }
       gate0Profiler.finish(this.gate0InkGesture, {

@@ -137,7 +137,7 @@ export class NotebookEngine {
     this.unsubscribeHandwritingLifecycle = this.input.onInkStrokeLifecycle(event => {
       if (event.type === 'start') this.handwriting.beginStroke();
       else if (event.type === 'cancel') this.handwriting.cancelStroke();
-      else this.handwriting.completeStroke(event.stroke);
+      else this.handwriting.completeStroke(event.stroke, event.physicalPoints);
     });
     this.unsubscribeHandwritingTool = this.tools.subscribe(state => {
       this.handwriting.setActive(state.handwritingToTextEnabled);
@@ -171,7 +171,7 @@ export class NotebookEngine {
       this.unsubscribeHandwritingLifecycle = this.input.onInkStrokeLifecycle(event => {
         if (event.type === 'start') this.handwriting.beginStroke();
         else if (event.type === 'cancel') this.handwriting.cancelStroke();
-        else this.handwriting.completeStroke(event.stroke);
+        else this.handwriting.completeStroke(event.stroke, event.physicalPoints);
       });
     }
     if (!this.unsubscribeHandwritingTool) {

@@ -1,4 +1,4 @@
-import type { BoundingBox, Stroke } from '@/components/notebook/engine/drawingTypes';
+import type { BoundingBox, Stroke, StrokePoint } from '@/components/notebook/engine/drawingTypes';
 import {
   DEFAULT_HANDWRITING_TOOL_PREFERENCES,
   getHandwritingBounds,
@@ -42,6 +42,7 @@ interface SealedRecognitionBatch {
   readonly scope: number;
   readonly pageId: string | null;
   readonly strokes: Stroke[];
+  readonly recognitionStrokes: Stroke[];
   readonly sourceStrokeIds: string[];
   readonly sourceBounds: BoundingBox;
   readonly preferences: HandwritingToolPreferences;
@@ -152,6 +153,7 @@ export class RealTimeHandwritingSession {
   private active = false;
   private pointerDown = false;
   private pending: Stroke[] = [];
+  private physicalPoints = new Map<string, StrokePoint[]>();
   private timer: unknown = null;
   private scope = 0;
   private pageId: string | null = null;
@@ -261,7 +263,7 @@ export class RealTimeHandwritingSession {
     this.drainSealedBatches();
   }
 
-  completeStroke(stroke: Stroke): void {
+  completeStroke(stroke: Stroke, physicalPoints?: readonly StrokePoint[]): void {
     if (this.destroyed) return;
     this.pointerDown = false;
     if (!this.active) {
@@ -273,6 +275,7 @@ export class RealTimeHandwritingSession {
     if (this.pending.length > 0 && !shouldGroupHandwritingStrokes(this.pending, snapshot)) {
       this.sealPending();
     }
+    if (physicalPoints) this.physicalPoints.set(snapshot.id, physicalPoints.map(point => ({ ...point })));
     this.pending = uniqueOrderedStrokes([...this.pending, snapshot]);
     this.schedule();
     this.drainSealedBatches();
@@ -293,6 +296,7 @@ export class RealTimeHandwritingSession {
     this.pointerDown = false;
     this.clearTimer();
     this.pending = [];
+    this.physicalPoints.clear();
     this.sealedBatches = [];
   }
 
@@ -332,6 +336,11 @@ export class RealTimeHandwritingSession {
     if (this.pending.length === 0) return;
     const strokes = uniqueOrderedStrokes(this.pending);
     this.pending = [];
+    const recognitionStrokes = strokes.map(stroke => {
+      const points = this.physicalPoints.get(stroke.id);
+      this.physicalPoints.delete(stroke.id);
+      return points ? { ...stroke, points } : stroke;
+    });
     const sourceBounds = getHandwritingBounds(strokes);
     if (!sourceBounds) return;
     this.sealedBatches.push({
@@ -339,6 +348,7 @@ export class RealTimeHandwritingSession {
       scope: this.scope,
       pageId: this.pageId,
       strokes,
+      recognitionStrokes,
       sourceStrokeIds: strokes.map(stroke => stroke.id),
       sourceBounds: { ...sourceBounds },
       preferences: { ...this.preferences, recentColors: [...this.preferences.recentColors] },
@@ -369,7 +379,7 @@ export class RealTimeHandwritingSession {
     try {
       // The provider receives its own clone. It cannot mutate sealed ownership
       // or the exact source snapshot retained for validation and undo.
-      result = await this.provider.recognize(uniqueOrderedStrokes(batch.strokes), {
+      result = await this.provider.recognize(uniqueOrderedStrokes(batch.recognitionStrokes), {
         language: batch.preferences.language || undefined,
       });
     } catch (error) {

@@ -734,6 +734,39 @@ test('canonical input eligibility admits only Pen/Pencil strokes completed while
   assert.ok(provider.calls.flat().every(item => item.color === '#4a5b6c' && item.thickness === 3.6));
 });
 
+test('recognition receives captured physical points while conversion and stale checks retain exact visual ink', async () => {
+  const scheduler = new FakeScheduler();
+  const provider = new FakeProvider();
+  const visual = stroke('stabilized');
+  const physical = visual.points.map(point => ({ ...point, x: point.x + .8, y: point.y - .6 }));
+  const expectedPhysical = structuredClone(physical);
+  const expectedVisual = structuredClone(visual);
+  const checks: Stroke[][] = [], commits: Stroke[][] = [];
+  const session = new RealTimeHandwritingSession(provider, conversion => {
+    commits.push(conversion.strokes);
+    return true;
+  }, strokes => { checks.push(structuredClone(strokes)); return true; }, scheduler);
+  session.setActive(true);
+  session.beginStroke();
+  session.completeStroke(visual, physical);
+  visual.points[0].x = 999;
+  physical[0].x = 999;
+  scheduler.runAll();
+  await settleAsyncRecognition();
+  assert.deepEqual(provider.calls[0][0].points, expectedPhysical, 'provider input is neither stabilized nor caller-mutable');
+  assert.deepEqual(checks, [[expectedVisual]], 'ownership compares saved visual geometry');
+  assert.deepEqual(commits, [[expectedVisual]], 'undo restores exactly what was displayed');
+
+  session.completeStroke(stroke('discarded'), expectedPhysical);
+  session.setPageId('next-page');
+  session.completeStroke(stroke('next-page'));
+  scheduler.runAll();
+  await settleAsyncRecognition();
+  assert.equal(provider.calls.length, 2);
+  assert.deepEqual(provider.calls[1][0], stroke('next-page'), 'page invalidation discards transient capture');
+  session.destroy();
+});
+
 test('tool off never queues or recognizes strokes; active mode owns only newly completed strokes', async () => {
   const scheduler = new FakeScheduler();
   const provider = new FakeProvider();
