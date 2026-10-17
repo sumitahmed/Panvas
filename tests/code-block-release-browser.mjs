@@ -85,7 +85,7 @@ const sustained = async () => {
 };
 try {
   if(native) {
-    const env={...process.env,PANVAS_GATE0_PROFILE:'1',PANVAS_GATE0_USER_DATA:path.join(root,'profile'),PANVAS_GATE0_WORKSPACE_ROOT:path.join(root,'workspaces'),PANVAS_TEST_WINDOW:'1280x900'};
+    const env={...process.env,PANVAS_GATE0_PROFILE:'1',PANVAS_GATE0_USER_DATA:path.join(root,'profile'),PANVAS_GATE0_WORKSPACE_ROOT:path.join(root,'workspaces'),PANVAS_TEST_WINDOW:option('window')??'1280x900'};
     for(const name of ['ELECTRON_RUN_AS_NODE','NODE_TEST_CONTEXT','NODE_TEST_WORKER_ID','VITE_DEV_SERVER_URL'])delete env[name];
     if(option('executable'))env.VITE_DEV_SERVER_URL='http://127.0.0.1:1';
     app=await _electron.launch({executablePath:option('executable'),args:option('executable')?[`--user-data-dir=${path.join(root,'profile')}`]:[path.resolve('.')],env});
@@ -94,6 +94,7 @@ try {
     assert.ok(info.profile.startsWith(root+path.sep));assert.equal(info.version,JSON.parse(await readFile('package.json','utf8')).version);
     if(option('executable')){assert.equal(info.packaged,true);assert.ok(page.url().startsWith('file:'));}
     evidence.runtime=info;
+    evidence.viewport=await page.evaluate(()=>({width:innerWidth,height:innerHeight}));
     if(option('executable')){
       evidence.security=await (await app.browserWindow(page)).evaluate(async win=>{const p=win.webContents.getLastWebPreferences();win.webContents.openDevTools();await new Promise(resolve=>setTimeout(resolve,150));return {sandbox:p.sandbox,contextIsolation:p.contextIsolation,nodeIntegration:p.nodeIntegration,devToolsOpened:win.webContents.isDevToolsOpened()};});
       assert.deepEqual(evidence.security,{sandbox:true,contextIsolation:true,nodeIntegration:false,devToolsOpened:false});

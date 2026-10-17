@@ -26,6 +26,8 @@ Clean CI exposed two setup issues: electron-builder inferred a publisher during 
 
 The native two-instance lifecycle runs in a plain process so startup errors are reported directly rather than masked by Node's test-worker callback assertion. Workspace/profile isolation, owned-process teardown and all lock/exit assertions remain enforced. The complete local unit gate passes under the exact Node 24.21.0 Windows runtime used by CI. Rebuilt wrappers contain byte-identical `app.asar` and `Panvas.exe` payloads. The final portable's serial save/reopen UI run passed; one parallel reopen timeout is retained in local evidence rather than counted as a pass.
 
+The code-control test now closes the responsive Page Properties sheet through its existing visible Close button. The covered toolbar toggle remains the wide-layout alternative. Both source and packaged Electron passed the same seven code-control groups at the runner-sized viewport (measured 1026 x 770); no application layout or styling was changed.
+
 ## Security and practical limits
 
 - Fresh production npm audit: zero findings. Full audit: 16 development-tooling findings (5 high, 11 moderate), rooted in `braces`, `postcss-selector-parser` and `sprintf-js`. They affect build/development input processing; no forced major-version migration or audit suppression was applied. See the [advisory review](research/production-readiness-security-2026-10-17.md).
