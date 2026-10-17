@@ -24,6 +24,8 @@ One full backup harness attempt timed out waiting for native fixture startup whi
 
 The first hosted CI run exposed electron-builder's inferred CI publisher and a Windows Node test-process assertion in the single-instance harness. Packaging now explicitly uses `--publish never`; the dedicated release step owns uploads. The test now isolates its workspace as well as its profile, clears its losing timeout and waits for owned processes to exit before cleanup. Its seven assertions pass under the exact checksum-verified Node 24.21.0 Windows runtime used by CI. The application implementation and data formats were unchanged by these CI corrections.
 
+The hosted Node test-worker assertion recurred after the cleanup correction. The native lifecycle now runs in a plain child process, with the original lock/exit assertions retained; a child crash, failed assertion or timeout still fails the parent test. The complete unit gate passes with that arrangement on the exact CI Node runtime. The rebuilt setup/portable wrappers contain byte-identical `app.asar` and `Panvas.exe` payloads; the final portable's serial save/reopen UI run passed. One parallel portable reopen attempt timed out and is retained in local evidence rather than counted as a pass.
+
 ## Security and practical limits
 
 - Fresh production npm audit: zero findings. Full audit: 16 development-tooling findings (5 high, 11 moderate), rooted in `braces`, `postcss-selector-parser` and `sprintf-js`. They affect build/development input processing; no forced major-version migration or audit suppression was applied. See the [advisory review](research/production-readiness-security-2026-10-17.md).
