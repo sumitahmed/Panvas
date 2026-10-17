@@ -1,0 +1,17 @@
+# v0.1.9 verification - 2026-10-17
+
+The owner manually accepted the performance patch. Tag `v0.1.9` identifies source commit `dc72bd9bb89d839d6b2680c32149162772a2f2f6`.
+
+- `npm test`: 920 passed, one optional Windows recognition skip. The 29 release-unit tests and 149 focused performance/gesture/ink tests passed. Both TypeScript projects and native/web production builds passed.
+- [GitHub CI](https://github.com/sumitahmed/Panvas/actions/runs/39052827724): source/browser, Windows packaging/UI and Docker jobs passed from a fresh checkout.
+- Actual Chromium, packaged Electron and deployed web UI passed laser/drawing, toolbar, coordinates, selection, erasing, undo/redo and exact save/reopen checks on populated notebooks. With 4x CPU slowdown, laser frame p95 was 16.8 ms in Chromium/web and 17 ms in packaged Electron, with no historical stroke replay. These are synthetic host measurements, not physical input-to-display latency.
+- Trusted Chromium touch emulation passed pan, pinch anchoring, cancellation and 12 viewport transitions. The earlier extended 24-edit memory/persistence checks remain tied to byte-identical product source.
+- A real 0.1.8 to 0.1.9 NSIS upgrade ran in a temporary per-user installation with disposable data. Hierarchy, ink, formatted text, PDF annotations, image/PDF/audio bytes, settings and local/durable Drive sync metadata survived restart. All 26 existing workspace files remained byte-identical before opening. The existing all-user installation was preserved and the temporary registration was removed.
+- The actual portable EXE saved and reopened typed content after full native-process and wrapper shutdown. Renderer Node access was absent. Package audit found no private/development files or confidential credential matches; existing desktop public-client configuration was retained.
+- Docker production config/start/health/logs/stop and development typecheck/tests/restart/stop were checked using existing images, without a local rebuild. CI independently built and checked the production image. Documentation now passes the explicit example env file to follow-up Compose commands as well.
+
+Builds and native tests were repeated serially after concurrent generated-asset writes caused local file-watch locks and a native launch timeout. A stale source-text assertion was updated for the approved ref-based scene cache. Initial failures remain in local evidence; the final gates above passed without changing product behavior or weakening assertions.
+
+Windows binaries are unsigned. The production npm audit has zero findings; the full audit retains the previously documented 16 development-tool findings (5 high, 11 moderate). No dependency versions changed. Cold-page preparation and final stroke commits can still produce isolated long frames; software-rendering fallback and hours-long sessions are separate performance limits. Automated mobile coverage uses touch emulation; no physical phone or live authorized Drive account was available. User data was neither cleared nor migrated.
+
+The [public release](https://github.com/sumitahmed/Panvas/releases/tag/v0.1.9) contains the installer, portable EXE and checksum manifest. Anonymous full downloads of both executables matched the tested local bytes and SHA-256 hashes. All nine previous releases retained their existing asset IDs, names, sizes and digests. Website download metadata is updated only after those checks; the source tag and native binaries remain unchanged.

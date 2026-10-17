@@ -346,7 +346,7 @@ try {
     evidence.graphics = { renderer: graphics.auxAttributes?.glRenderer, devices: graphics.devices, features: graphics.featureStatus };
     page = await browser.newPage({ viewport: { width: 1580, height: 1062 }, hasTouch: process.argv.includes('--touch') || process.argv.includes('--mobile-only'), isMobile: process.argv.includes('--mobile-device') });
     await page.addInitScript(installReactProbe);
-    await page.goto(new URL('/app', option('base') ?? server.resolvedUrls.local[0]).href);
+    await page.goto(new URL('/app', option('base') ?? server.resolvedUrls.local[0]).href, { waitUntil: 'domcontentloaded', timeout: 60000 });
   }
   page.setDefaultTimeout(60000); page.on('pageerror', e => evidence.errors.push(e.message));
   evidence.runtime = await page.evaluate(() => ({ userAgent: navigator.userAgent, width: innerWidth, height: innerHeight, dpr: devicePixelRatio }));
