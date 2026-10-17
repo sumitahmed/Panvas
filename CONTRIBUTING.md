@@ -56,12 +56,12 @@ Docker Desktop must use Linux containers. See [DOCKER.md](docs/DOCKER.md) for pr
 
 ```bash
 docker compose --env-file .env.example -f compose.dev.yaml up --build -d --wait
-docker compose -f compose.dev.yaml logs -f web-dev
-docker compose -f compose.dev.yaml exec web-dev npm run typecheck
-docker compose -f compose.dev.yaml exec web-dev node --test tests/documentation-flow.test.ts tests/notebook-code-highlight.test.ts
-docker compose -f compose.dev.yaml restart web-dev
+docker compose --env-file .env.example -f compose.dev.yaml logs -f web-dev
+docker compose --env-file .env.example -f compose.dev.yaml exec web-dev npm run typecheck
+docker compose --env-file .env.example -f compose.dev.yaml exec web-dev node --test tests/documentation-flow.test.ts tests/notebook-code-highlight.test.ts
+docker compose --env-file .env.example -f compose.dev.yaml restart web-dev
 docker compose --env-file .env.example -f compose.dev.yaml up --build -d
-docker compose -f compose.dev.yaml down
+docker compose --env-file .env.example -f compose.dev.yaml down
 ```
 
 Source files are mounted read-only and Vite watches them; edit on the host. Rebuild after dependency/configuration changes. Linux dependencies belong to the image, not your Windows `node_modules`. No application data volume exists: web workspaces stay in browser IndexedDB. For a disposable test, use a fresh browser profile. Never clear a contributor's normal site data or run `docker system prune` as a project reset.

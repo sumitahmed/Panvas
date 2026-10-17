@@ -204,6 +204,7 @@ export class ImageManager {
   // Cleanup object URLs to prevent memory leaks when manager is destroyed
   destroy() {
     this.generation += 1;
+    this.redrawCallback = undefined;
     this.pending.clear();
     this.decodedListeners.clear();
     for (const url of this.objectUrls.values()) {

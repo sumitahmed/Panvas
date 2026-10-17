@@ -2,6 +2,13 @@
 
 All notable Panvas changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.1.9] - 2026-10-17
+
+- Fixed drawing and laser-pointer lag on populated notebook pages.
+- Fixed mobile viewport jitter and zoom-related instability.
+- Improved canvas rendering, navigation, and memory management.
+- Reduced unnecessary redraws and improved interaction responsiveness.
+
 ## [0.1.8] - 2026-10-17
 
 Documentation editor, notebook performance and release infrastructure updates.

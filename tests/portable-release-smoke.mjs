@@ -26,7 +26,14 @@ const launch=async()=>{
   evidence.appInfo=await page.evaluate(()=>window.panvas.appInfo());assert.equal(evidence.appInfo.version,version);
   const local=page.getByRole('button',{name:'Continue locally',exact:true});if(await local.isVisible())await local.click({force:true});
 };
-const close=async()=>{if(browser){await page.evaluate(()=>window.close()).catch(()=>{});await expect.poll(()=>browser.isConnected(),{timeout:25000}).toBe(false);browser=null;}ownedPid=null;};
+const close=async()=>{if(browser){
+  await page.evaluate(()=>window.close()).catch(()=>{});
+  await expect.poll(()=>browser.isConnected(),{timeout:25000}).toBe(false);browser=null;
+  // CDP disconnect precedes native shutdown and portable-wrapper cleanup.
+  // Relaunch only after both owned processes have actually exited.
+  await expect.poll(()=>{try{process.kill(ownedPid,0);return false;}catch(error){if(error.code==='ESRCH')return true;throw error;}},{timeout:30000}).toBe(true);
+  await expect.poll(()=>child.exitCode!==null||child.signalCode!==null,{timeout:30000}).toBe(true);
+}ownedPid=null;};
 try{
   await launch();
   await page.getByRole('button',{name:'New item',exact:true}).click();await page.getByRole('button',{name:'New Notebook',exact:true}).click();await page.locator('#create-dialog-input').fill('Portable acceptance');await page.getByRole('button',{name:'Create',exact:true}).click();await page.locator('#create-dialog-input').waitFor({state:'hidden'});await page.locator('aside').getByText('Portable acceptance',{exact:true}).click();

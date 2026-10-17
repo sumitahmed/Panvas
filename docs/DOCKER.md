@@ -10,15 +10,15 @@ Use Docker Engine/Desktop with Linux containers and Compose v2. Run from the rep
 docker compose --env-file .env.example config --quiet
 docker compose --env-file .env.example build
 docker compose --env-file .env.example up -d --wait
-docker compose ps
-docker compose logs --tail=100
+docker compose --env-file .env.example ps
+docker compose --env-file .env.example logs --tail=100
 ```
 
 Open `http://localhost:8080/app`; `/` serves the landing page, `/download` the existing published download metadata. `http://localhost:8080/healthz` checks the web server. A health check alone does not verify editing or persistence.
 
 ```sh
-docker compose restart web
-docker compose down
+docker compose --env-file .env.example restart web
+docker compose --env-file .env.example down
 ```
 
 The commands never remove volumes or user browser data. The default bind address is loopback. Set `PANVAS_WEB_PORT` to change the host port, or `PANVAS_BIND_ADDRESS` deliberately to expose it to a reverse proxy/network. No database ports or Docker socket are mounted.
@@ -51,11 +51,11 @@ The development Compose file is standalone, not an override:
 ```sh
 docker compose --env-file .env.example -f compose.dev.yaml config --quiet
 docker compose --env-file .env.example -f compose.dev.yaml up --build -d --wait
-docker compose -f compose.dev.yaml logs -f web-dev
-docker compose -f compose.dev.yaml exec web-dev npm run typecheck
-docker compose -f compose.dev.yaml exec web-dev node --test tests/documentation-flow.test.ts tests/notebook-code-highlight.test.ts
-docker compose -f compose.dev.yaml restart web-dev
-docker compose -f compose.dev.yaml down
+docker compose --env-file .env.example -f compose.dev.yaml logs -f web-dev
+docker compose --env-file .env.example -f compose.dev.yaml exec web-dev npm run typecheck
+docker compose --env-file .env.example -f compose.dev.yaml exec web-dev node --test tests/documentation-flow.test.ts tests/notebook-code-highlight.test.ts
+docker compose --env-file .env.example -f compose.dev.yaml restart web-dev
+docker compose --env-file .env.example -f compose.dev.yaml down
 ```
 
 Open `http://localhost:3000/app`. Edit host `src/`, `public/` and supported config files; Vite uses polling for Docker Desktop bind mounts. Dependency changes require `up --build`. The unprivileged development image includes dev tools; production does not. Native Electron, Windows Ink, native pickers and installer checks require Windows, not this container.
@@ -64,6 +64,6 @@ To reset a test, stop its containers and discard only the **disposable browser p
 
 ## Troubleshooting
 
-If `docker version` shows no server, start Docker Desktop and wait for the Linux engine. If the port is occupied, use another `PANVAS_WEB_PORT` and remember it creates another browser origin. If health fails, inspect `docker compose logs web`. If editing works but remote clipboard/audio does not, verify HTTPS and permissions. If an update shows old UI, reload and check the service worker before clearing any data; export a backup first.
+If `docker version` shows no server, start Docker Desktop and wait for the Linux engine. If the port is occupied, use another `PANVAS_WEB_PORT` and remember it creates another browser origin. If health fails, inspect `docker compose --env-file .env.example logs web`. If editing works but remote clipboard/audio does not, verify HTTPS and permissions. If an update shows old UI, reload and check the service worker before clearing any data; export a backup first.
 
 References: [Compose services](https://docs.docker.com/reference/compose-file/services/), [Compose build specification](https://docs.docker.com/reference/compose-file/build/), [Nginx unprivileged image](https://github.com/nginx/docker-nginx-unprivileged).

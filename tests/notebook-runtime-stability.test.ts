@@ -102,7 +102,7 @@ test('saved page shells have authoritative appearance before active or inactive 
 
 test('legacy pages use a neutral preparation shell until persisted drawing appearance is known', async () => {
   const renderer = await readFile(new URL('../src/components/notebook/NotebookRenderer.tsx', import.meta.url), 'utf8');
-  assert.match(renderer, /hasAuthoritativePageAppearance\(sectionPage, sectionDataCache\[sectionPage\.id\]\?\.properties\)/);
+  assert.match(renderer, /hasAuthoritativePageAppearance\(sectionPage, sectionDataCacheRef\.current\[sectionPage\.id\]\?\.properties\)/);
   assert.match(renderer, /!sectionAppearanceReady[\s\S]*Preparing notebook appearance/);
   assert.doesNotMatch(renderer, /Date\.now\(\).*key=|forceUpdate/);
 });

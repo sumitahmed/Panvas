@@ -130,8 +130,8 @@ Docker runs the web app. Electron remains a native Windows application. There is
 ```bash
 docker compose --env-file .env.example up --build -d --wait
 # Open http://localhost:8080/app (landing page: http://localhost:8080/)
-docker compose logs --tail=100
-docker compose down
+docker compose --env-file .env.example logs --tail=100
+docker compose --env-file .env.example down
 
 # Development with source hot reload on http://localhost:3000/app
 docker compose --env-file .env.example -f compose.dev.yaml up --build

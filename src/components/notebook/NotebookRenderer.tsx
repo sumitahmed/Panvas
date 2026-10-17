@@ -149,12 +149,19 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   // notification emitted across a resubscribe was silently dropped and never recovered.
   const toolState = useToolState(notebookEngine);
   const [pageProperties, setPageProperties] = useState(() => notebookEngine.getProperties());
-  const [sectionDataCache, setSectionDataCache] = useState<Record<string, DrawingData>>({});
+  // Stable callbacks can retain earlier render contexts through each other.
+  // Keep large scene payloads only in the live ref, not in those contexts;
+  // a scalar revision still publishes every required visual update.
+  const [sectionDataRevision, setSectionDataRevision] = useState(0);
   const sectionDataCacheRef = useRef<Record<string, DrawingData>>({});
+  const publishedSectionDataRef = useRef(sectionDataCacheRef.current);
   const updateSectionDataCache = useCallback((update: (current: Record<string, DrawingData>) => Record<string, DrawingData>, publish = true) => {
     const next = update(sectionDataCacheRef.current);
     sectionDataCacheRef.current = next;
-    if (publish) setSectionDataCache(next);
+    if (publish && next !== publishedSectionDataRef.current) {
+      publishedSectionDataRef.current = next;
+      setSectionDataRevision(revision => revision + 1);
+    }
   }, []);
   const focusedPageLoadGenerationRef = useRef(0);
   const loadedSceneRevisionRef = useRef<number | null>(null);
@@ -398,7 +405,12 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   const fittedScaleRef = useRef<number | null>(null);
   useEffect(() => {
     if (containerSize.width === 0 || paperDimensions.width === 0) return;
-    const fitKey = `${isMobileViewport}:${containerSize.width}:${paperDimensions.width}:${activeNotebookSectionId}`;
+    // ResizeObserver's content box also changes when scrollbars appear during
+    // zoom. That is not a viewport resize: refitting here fights the gesture
+    // and repeatedly adds/removes the scrollbar. Use the stable layout width
+    // to decide whether fitting is needed; retain the available width below.
+    const layoutWidth = containerRef.current?.offsetWidth ?? containerSize.width;
+    const fitKey = `${isMobileViewport}:${layoutWidth}:${paperDimensions.width}:${activeNotebookSectionId}`;
     const phoneResized = isMobileViewport && fittedViewportRef.current !== fitKey;
     const wasAutoFitted = fittedScaleRef.current !== null && Math.abs(notebookEngine.viewport.getState().scale - fittedScaleRef.current) < 0.001;
     const changedComposition = fittedViewportRef.current !== '' && !fittedViewportRef.current.startsWith(`${isMobileViewport}:`);
@@ -451,12 +463,12 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   // Two-page mode is a real spread (paired columns), not a global UI scale.
   const resolvedSectionProperties = useMemo(() => {
     return new Map(currentSectionPages.map(sectionPage => {
-      const cachedProperties = sectionDataCache[sectionPage.id]?.properties;
+      const cachedProperties = sectionDataCacheRef.current[sectionPage.id]?.properties;
       // On first load there is no cache yet, so persisted metadata remains the
       // source until the engine finishes loading.
       return [sectionPage.id, resolvePageRenderProperties(notebook, sectionPage, cachedProperties)] as const;
     }));
-  }, [currentSectionPages, notebook, sectionDataCache]);
+  }, [currentSectionPages, notebook, sectionDataRevision]);
 
   const [logicalScrollBases, setLogicalScrollBases] = useState<Record<string, number>>({});
   const rebaseLogicalScroll = useCallback((pageId: string, base: number, delta: number) => {
@@ -478,7 +490,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     spreadMode,
   ), [currentSectionPages, resolvedSectionProperties, spreadMode]);
   const sectionAppearanceReady = currentSectionPages.every(sectionPage =>
-    hasAuthoritativePageAppearance(sectionPage, sectionDataCache[sectionPage.id]?.properties),
+    hasAuthoritativePageAppearance(sectionPage, sectionDataCacheRef.current[sectionPage.id]?.properties),
   );
   useEffect(() => {
     const goToPosition = (event: Event) => {
@@ -987,7 +999,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     if (sectionDataCacheRef.current[targetPageId]) {
       handleActivatePageRef.current(targetPageId);
     }
-  }, [activePageId, focusedPageId, currentSectionPages, sectionDataCache]);
+  }, [activePageId, focusedPageId, currentSectionPages, sectionDataRevision]);
 
   const handlePagePropertiesUpdate = useCallback((updates: Partial<PagePropertySet>, sourceTextId?: string) => {
     if (updates.layoutMode && (workspaceViewMode !== 'edit' || focusedPage?.type === 'pdf')) return;
@@ -2682,7 +2694,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
               const renderData = resolveNotebookPageRenderData(
                 pos.id,
                 focusedPageId,
-                sectionDataCache,
+                sectionDataCacheRef.current,
                 undefined,
                 notebookEngine.getDrawingOwnership().pageId ?? '',
               );

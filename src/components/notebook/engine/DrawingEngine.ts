@@ -36,6 +36,8 @@ export class DrawingEngine {
   private layerManager: LayerManager;
   private rulerManager: RulerManager;
   private laserManager: LaserManager;
+  private laserCanvas: HTMLCanvasElement | null = null;
+  private laserContext: CanvasRenderingContext2D | null = null;
   private _scaleMultiplier = 1;
   private canvasCssWidth = 0;
   private canvasCssHeight = 0;
@@ -85,7 +87,7 @@ export class DrawingEngine {
     this.layerManager = layerManager;
     this.rulerManager = rulerManager;
     this.laserManager = laserManager;
-    this.laserManager.setRedrawCallback(() => this.redraw());
+    this.laserManager.setRedrawCallback(() => this.redrawLaserFrame());
   }
 
   setScaleMultiplier(mult: number) {
@@ -106,6 +108,7 @@ export class DrawingEngine {
 
   /** Bind to a canvas element. Call after mount. */
   setCanvas(canvas: HTMLCanvasElement, cssWidth: number, cssHeight: number): void {
+    this.releaseLaserSurface();
     this.releaseSpareWetInk();
     this.canvas = canvas;
     this.canvasCssWidth = cssWidth;
@@ -115,6 +118,7 @@ export class DrawingEngine {
 
   /** Detach from canvas element. */
   detachCanvas(): void {
+    this.releaseLaserSurface();
     // Clear the currently owned surface before releasing it. Page activation
     // can replace the engine scene before React commits the next page shell;
     // leaving these pixels alive would expose the outgoing scene for one
@@ -144,6 +148,7 @@ export class DrawingEngine {
   /** Resize the canvas (e.g., on window resize). */
   resize(cssWidth: number, cssHeight: number): void {
     if (!this.canvas) return;
+    this.releaseLaserSurface();
     this.releaseSpareWetInk();
     this.canvasCssWidth = cssWidth;
     this.canvasCssHeight = cssHeight;
@@ -324,6 +329,51 @@ export class DrawingEngine {
     this.renderLaserOverlay();
   }
 
+  private redrawLaserFrame(): void {
+    if (!this.ctx || !this.canvas) return;
+    // Like wet ink, a DOM-backed laser owns a temporary presentation surface.
+    // The committed scene stays untouched throughout motion and decay. Bare
+    // canvas/export callers keep their existing composite rendering path.
+    if (!this.canvas.parentElement || typeof document === 'undefined') {
+      this.redraw();
+      return;
+    }
+    if (!this.laserManager.getActiveTrail().length) {
+      this.releaseLaserSurface();
+      return;
+    }
+    if (!this.laserCanvas) {
+      const canvas = document.createElement('canvas');
+      canvas.width = this.canvas.width;
+      canvas.height = this.canvas.height;
+      canvas.setAttribute('aria-hidden', 'true');
+      canvas.dataset.panvasLaserOverlay = '';
+      Object.assign(canvas.style, { position: 'absolute', left: this.canvas.style.left || '0px',
+        top: this.canvas.style.top || '0px', width: this.canvas.style.width || '100%',
+        height: this.canvas.style.height || '100%', pointerEvents: 'none',
+        zIndex: getComputedStyle(this.canvas).zIndex });
+      this.laserContext = canvas.getContext('2d');
+      this.laserCanvas = canvas;
+      this.canvas.insertAdjacentElement('afterend', canvas);
+    }
+    const context = this.laserContext;
+    if (!context) return;
+    context.resetTransform();
+    context.clearRect(0, 0, this.laserCanvas.width, this.laserCanvas.height);
+    context.setTransform(this.ctx.getTransform());
+    this.viewport.applyTransform(context);
+    this.laserManager.render(context, this.viewport.getState().scale);
+  }
+
+  private releaseLaserSurface(): void {
+    if (this.laserCanvas) {
+      this.laserCanvas.remove();
+      this.laserCanvas.width = this.laserCanvas.height = 0;
+    }
+    this.laserCanvas = null;
+    this.laserContext = null;
+  }
+
   private renderRulerOverlay(): void {
     if (!this.ctx || !this.rulerManager.getState().enabled) return;
     const themeMode = typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
@@ -336,6 +386,10 @@ export class DrawingEngine {
   }
 
   private renderLaserOverlay(): void {
+    if (this.canvas?.parentElement) {
+      this.redrawLaserFrame();
+      return;
+    }
     if (!this.ctx || this.laserManager.getActiveTrail().length === 0) return;
     this.ctx.save();
     this.viewport.applyTransform(this.ctx);

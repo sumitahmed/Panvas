@@ -75,7 +75,8 @@ export class LaserManager {
     if (this.activeTrail.length > MAX_TRAIL_POINTS) {
       this.activeTrail.splice(0, this.activeTrail.length - MAX_TRAIL_POINTS);
     }
-    this.redrawCallback?.();
+    // Pointer/raw updates can arrive several times before paint. Keep every
+    // point, then present the trail once through the existing animation frame.
     this.ensureAnimation();
   }
 

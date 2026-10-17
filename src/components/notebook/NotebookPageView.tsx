@@ -205,7 +205,9 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
       const shapes = new ShapeManager(viewport, layers);
       const images = new ImageManager(viewport, layers);
       const drawing = new DrawingEngine(viewport, shapes, images, layers);
-      images.setRedrawCallback(() => drawing.redraw());
+      // Geometry caches outlive this component. A closure created here also
+      // retains the render/effect contexts and their old page payloads.
+      images.setRedrawCallback(drawing.redraw.bind(drawing));
       engine = { drawing, viewport, layers, images, shapes };
       staticEngineRef.current = engine;
       drawing.setFullDarkView(fullDarkView);

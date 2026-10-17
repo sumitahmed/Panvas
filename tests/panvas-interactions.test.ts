@@ -1396,6 +1396,13 @@ function createLaserScheduler() {
     setNow: (value: number) => { now = value; },
     getPendingCount: () => frames.size,
     getCancelledCount: () => cancelled.length,
+    runFrame: (time: number) => {
+      now = time;
+      const entry = frames.entries().next().value;
+      if (!entry) throw new Error('No laser animation frame pending');
+      frames.delete(entry[0]);
+      entry[1](time);
+    },
   };
 }
 
@@ -1419,6 +1426,23 @@ test('laser trail inserts page points and calculates timestamp-based decay', () 
   assert.equal(laser.getActiveTrail().length, 0);
   assert.equal(scheduler.getPendingCount(), 1);
   laser.clear();
+  assert.equal(scheduler.getPendingCount(), 0);
+});
+
+test('laser accepts a burst without synchronous paints and presents decay once per frame', () => {
+  const scheduler = createLaserScheduler();
+  const laser = new LaserManager(scheduler.options);
+  let paints = 0;
+  laser.setRedrawCallback(() => { paints++; });
+  for (let i = 0; i < 100; i++) laser.addPoint({ x: i, y: i / 2, pressure: .5, t: i });
+  assert.equal(laser.getActiveTrail().length, 100, 'all input samples remain available');
+  assert.equal(paints, 0, 'pointer dispatch does not synchronously repaint');
+  assert.equal(scheduler.getPendingCount(), 1);
+  scheduler.runFrame(16);
+  assert.equal(paints, 1);
+  assert.equal(laser.getActiveTrail().length, 100);
+  scheduler.runFrame(1100);
+  assert.equal(paints, 2, 'the last frame removes the expired trail');
   assert.equal(scheduler.getPendingCount(), 0);
 });
 
