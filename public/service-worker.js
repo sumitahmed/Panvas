@@ -19,7 +19,6 @@ if (self.location.hostname === 'localhost' || self.location.hostname === '127.0.
     event.respondWith(fetch(event.request));
   });
 } else {
-  const CACHE_NAME = 'panvas-shell-v2';
   const CACHE_NAME = 'panvas-shell-v3';
   const SHELL = ['./', './index.html', './excalidraw-config.js'];
 

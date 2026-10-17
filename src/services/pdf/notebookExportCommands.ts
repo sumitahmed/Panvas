@@ -6,6 +6,8 @@ import { workspaceRepository } from '@/repositories/WorkspaceRepository';
 import { resolvePageProperties } from '@/lib/pageProperties';
 import { currentPresentationTheme } from '@/lib/themePresentation';
 import { createEmptyDrawingData, type DrawingData } from '@/components/notebook/engine/drawingTypes';
+import type { Notebook, NotebookPage } from '@/types/notebook';
+import { exportAnnotatedPdf } from './exportAnnotatedPdf';
 import { exportNotebookPdf, orderNotebookPages, type NotebookPdfExportResult, type NotebookPdfPageInput, type NotebookPdfSectionInput } from './notebookPdfExport';
 import { deliverPreparedPdf, downloadPdfResult, preparePdfPrintDelivery } from './pdfDelivery';
 import {
@@ -37,17 +39,23 @@ async function generatePage(target: PageExportTarget, options: NotebookPdfComman
   const theme = currentPresentationTheme();
   const catalog = await loadCanonicalExportCatalog();
   const { page, notebook, workspaceId } = resolvePageExportTarget(catalog, target);
-  if (page.type === 'pdf') throw new Error('Imported PDF pages use the annotated PDF export action.');
+  const prepared = await preparePage(page, notebook, workspaceId, options);
+  const result = await exportNotebookPdf({ theme, pages: [prepared], loadImage: fileId => canvasRepository.getImage(fileId) });
+  return { result, fileName: page.title };
+}
+
+async function preparePage(page: NotebookPage, notebook: Notebook, workspaceId: string, options: NotebookPdfCommandOptions): Promise<NotebookPdfPageInput> {
   const drawing = options.drawingOverrides?.[page.id]
     ?? await notebookRepository.loadDrawingData(workspaceId, notebook.id, page.id) as DrawingData
     ?? createEmptyDrawingData();
   const properties = resolvePageProperties(notebook, page, drawing.properties);
-  const result = await exportNotebookPdf({
-    theme,
-    pages: [{ id: page.id, title: page.title, properties, drawing: { ...drawing, properties } }],
-    loadImage: fileId => canvasRepository.getImage(fileId),
-  });
-  return { result, fileName: page.title };
+  return { id: page.id, title: page.title, properties, drawing: { ...drawing, properties }, ...(page.type === 'pdf' ? {
+    loadImportedPdf: async () => {
+      if (!page.pdfDataId) throw new Error('The imported PDF source reference is missing.');
+      return exportAnnotatedPdf({ userId: useAuthStore.getState().user?.id ?? null, workspaceId, notebookId: notebook.id, pageId: page.id,
+        pdfDataId: page.pdfDataId, fileName: page.title, pageState: page.pdfPageState });
+    },
+  } : {}) };
 }
 
 async function generateNotebook(target: NotebookExportTarget, options: NotebookPdfCommandOptions = {}) {
@@ -57,15 +65,10 @@ async function generateNotebook(target: NotebookExportTarget, options: NotebookP
   const sections = catalog.notebookSections.filter(section => section.notebookId === notebook.id);
   const sectionIds = new Set(sections.map(section => section.id));
   const ordered = orderNotebookPages(sections, catalog.notebookPages.filter(page => sectionIds.has(page.sectionId)));
-  const skippedPdfPages = ordered.filter(page => page.type === 'pdf');
   const inputsBySection = new Map<string, NotebookPdfPageInput[]>();
-  for (const page of ordered.filter(item => item.type !== 'pdf')) {
-    const drawing = options.drawingOverrides?.[page.id]
-      ?? await notebookRepository.loadDrawingData(workspaceId, notebook.id, page.id) as DrawingData
-      ?? createEmptyDrawingData();
-    const properties = resolvePageProperties(notebook, page, drawing.properties);
+  for (const page of ordered) {
     const inputs = inputsBySection.get(page.sectionId) ?? [];
-    inputs.push({ id: page.id, title: page.title, properties, drawing: { ...drawing, properties } });
+    inputs.push(await preparePage(page, notebook, workspaceId, options));
     inputsBySection.set(page.sectionId, inputs);
   }
   const sectionInputs: NotebookPdfSectionInput[] = sections
@@ -83,13 +86,6 @@ async function generateNotebook(target: NotebookExportTarget, options: NotebookP
     cover: { notebookName: notebook.name, cover: notebook.cover },
     loadImage: fileId => canvasRepository.getImage(fileId),
   });
-  if (skippedPdfPages.length) {
-    result.unsupportedObjects += skippedPdfPages.length;
-    result.warnings.push({
-      code: 'pdf-owned-pages-skipped',
-      message: `${skippedPdfPages.length} imported PDF page record(s) were skipped by standard notebook export.`,
-    });
-  }
   return { result, fileName: notebook.name };
 }
 
@@ -101,27 +97,13 @@ async function generateSection(target: SectionExportTarget, options: NotebookPdf
     [section],
     catalog.notebookPages.filter(page => page.sectionId === section.id),
   );
-  const skippedPdfPages = ordered.filter(page => page.type === 'pdf');
   const pages: NotebookPdfPageInput[] = [];
-  for (const page of ordered.filter(item => item.type !== 'pdf')) {
-    const drawing = options.drawingOverrides?.[page.id]
-      ?? await notebookRepository.loadDrawingData(workspaceId, notebook.id, page.id) as DrawingData
-      ?? createEmptyDrawingData();
-    const properties = resolvePageProperties(notebook, page, drawing.properties);
-    pages.push({ id: page.id, title: page.title, properties, drawing: { ...drawing, properties } });
-  }
+  for (const page of ordered) pages.push(await preparePage(page, notebook, workspaceId, options));
   const result = await exportNotebookPdf({
     theme,
     sections: [{ id: section.id, name: section.name, notebookName: notebook.name, pages }],
     loadImage: fileId => canvasRepository.getImage(fileId),
   });
-  if (skippedPdfPages.length) {
-    result.unsupportedObjects += skippedPdfPages.length;
-    result.warnings.push({
-      code: 'pdf-owned-pages-skipped',
-      message: `${skippedPdfPages.length} imported PDF page record(s) were skipped by standard section export.`,
-    });
-  }
   return { result, fileName: `${notebook.name}-${section.name}` };
 }
 

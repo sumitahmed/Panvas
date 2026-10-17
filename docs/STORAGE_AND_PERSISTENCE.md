@@ -2,6 +2,8 @@
 
 Panvas keeps local data authoritative in both execution profiles. The adapter changes by platform; the domain model and user-visible recovery flows remain shared.
 
+Changing the desktop root persists previous shared-media roots in native settings (`assetStorageRoots`) without moving files. This includes a previous configured root that is currently unavailable, rather than retaining only its discovery fallback. Reads prefer the current root, then recorded roots and legacy registered workspace parents. PDF/image/audio IPC readers, sync payload scanning and portable backup reads share this lookup. Original folders must be accessible to read their bytes; a folder change is not a migration or backup. New assets are written only to the active root. Settings usage includes known retained roots; unavailable media should be restored from an independent backup rather than guessed.
+
 ## Windows Electron layout
 
 The default root is `Documents/Panvas` (`app.getPath('documents')/Panvas`). The user can select another validated storage root in settings. A workspace is stored below that root:

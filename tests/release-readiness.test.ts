@@ -60,7 +60,7 @@ test('Windows release metadata preserves Panvas user data and excludes developme
   const winTargets = build?.win?.target ?? [];
 
   assert.equal(manifest.name, 'panvas');
-  assert.equal(manifest.version, '0.1.7');
+  assert.match(manifest.version, /^\d+\.\d+\.\d+(?:-rc\.\d+)?$/);
   assert.equal(build?.appId, 'com.panvas.app');
   assert.equal(build?.productName, 'Panvas');
   assert.equal(build?.win?.artifactName, '${productName}-${version}-Setup.${ext}');
@@ -87,17 +87,19 @@ test('incomplete legacy cloud sync is quarantined and cannot delete local data o
   assert.doesNotMatch(engine, /supabase\.from\('[^']+'\)\.delete\(\)/);
 });
 
-test('public Windows download metadata and CTAs use the current release', async () => {
+test('published Windows download metadata and CTAs remain internally consistent', async () => {
   const { PANVAS_RELEASE } = await import('../src/components/marketing/releaseMetadata.ts');
   const manifest = JSON.parse(await readFile('package.json', 'utf8'));
   const lock = JSON.parse(await readFile('package-lock.json', 'utf8'));
   const windows = PANVAS_RELEASE.windows;
   assert.equal(lock.version, manifest.version);
   assert.equal(lock.packages[''].version, manifest.version);
-  assert.equal(PANVAS_RELEASE.project.version, manifest.version);
-  assert.equal(windows.version, manifest.version);
-  assert.equal(windows.releaseTag, `v${manifest.version}`);
-  assert.equal(windows.installerFileName, `Panvas-${manifest.version}-Setup.exe`);
+  // Build the stable binary before publishing it, then update website metadata
+  // only after the uploaded bytes are verified. Never advertise a future build.
+  assert.equal(PANVAS_RELEASE.project.version, windows.version);
+  assert.ok(windows.version.localeCompare(manifest.version, undefined, { numeric: true }) <= 0);
+  assert.equal(windows.releaseTag, `v${windows.version}`);
+  assert.equal(windows.installerFileName, `Panvas-${windows.version}-Setup.exe`);
   const releases = `${PANVAS_RELEASE.project.githubRepoUrl}/releases`;
   assert.equal(windows.downloadUrl, `${releases}/download/${windows.releaseTag}/${windows.installerFileName}`);
   assert.equal(windows.releaseNotesUrl, `${releases}/tag/${windows.releaseTag}`);

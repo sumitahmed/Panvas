@@ -6,16 +6,16 @@ export function AppearanceSection() {
   const { theme, setTheme, fullDarkView, setFullDarkView } = useUIStore();
 
   return (
-    <div className="flex flex-col gap-8 animate-in fade-in duration-300">
+    <div className="flex flex-col gap-6">
       <div>
-        <h2 className="text-2xl font-semibold text-panvas-text-primary mb-2">Appearance</h2>
+        <h2 className="text-xl font-semibold text-panvas-text-primary mb-1">Appearance</h2>
         <p className="text-sm text-panvas-text-secondary">Customize the look and feel of your workspace.</p>
       </div>
 
-      <div className="grid gap-6 mt-4">
+      <div className="grid gap-6">
         <div className="flex flex-col gap-4">
-          <label className="text-xs font-semibold uppercase tracking-wider text-panvas-text-tertiary">Theme</label>
-          <div className="grid grid-cols-3 gap-2 sm:gap-6">
+          <label className="text-xs font-semibold uppercase tracking-wider text-panvas-text-secondary">Theme</label>
+          <div className="grid grid-cols-3 gap-2 sm:gap-3">
 
             <ThemeCard
               name="Light"
@@ -42,7 +42,7 @@ export function AppearanceSection() {
 
 
           </div>
-          <p className="text-xs text-panvas-text-tertiary">
+          <p className="text-xs text-panvas-text-secondary">
             Ink pairs warm-gray tablet surfaces with softer colors. Paper color stays independent, and switching to Light or Dark restores full color.
           </p>
           {theme === 'dark' && <label className="flex items-center justify-between gap-4 rounded-xl border border-panvas-border-subtle p-3">
@@ -69,20 +69,20 @@ function ThemeCard({ name, active, icon, onClick, preview }: ThemeCardProps) {
       type="button"
       onClick={onClick}
       aria-pressed={active}
-      className={`flex min-w-0 flex-col items-center gap-4 rounded-2xl border p-6 max-[599px]:px-2 max-[599px]:py-4 text-left transition-all duration-200 focus-ring ${
+      className={`flex min-w-0 flex-col items-center gap-3 rounded-xl border px-3 py-4 text-left transition-colors duration-200 focus-ring ${
         active
           ? 'border-panvas-accent-violet bg-panvas-bg-secondary text-panvas-text-primary shadow-[0_0_0_1px_rgba(var(--accent-violet),0.18),var(--shadow-surface)]'
           : 'border-panvas-border-subtle bg-panvas-bg-primary text-panvas-text-secondary hover:border-panvas-border-strong hover:bg-panvas-bg-hover hover:shadow-[var(--shadow-surface)]'
       }`}
     >
-      <div className="relative flex h-14 w-14 items-center justify-center overflow-hidden rounded-full border border-panvas-border-subtle shadow-inner">
+      <div className="relative flex h-12 w-12 items-center justify-center overflow-hidden rounded-full border border-panvas-border-subtle">
         <div className="absolute inset-0">{preview}</div>
         {React.cloneElement(icon as React.ReactElement<{ className?: string }>, {
           className: `relative z-10 drop-shadow-[0_0_2px_rgba(255,255,255,0.7)] ${active ? 'text-panvas-accent-violet' : 'text-panvas-text-tertiary'}`,
         })}
       </div>
       <span className="text-sm font-semibold">{name}</span>
-      <span className="-mt-2 text-xs text-panvas-text-tertiary">{active ? 'Selected theme' : 'Switch theme'}</span>
+      <span className={`-mt-2 text-xs ${active ? 'text-panvas-text-primary' : 'text-panvas-text-secondary'}`}>{active ? 'Selected theme' : 'Switch theme'}</span>
     </button>
   );
 }

@@ -58,6 +58,7 @@ const PAGE_DIMENSIONS: Record<PagePropertySet['pageSize'], PageDimensions> = {
   // The current property model has no persisted custom width/height. Preserve
   // the existing renderer fallback until that model gains explicit dimensions.
   Custom: { width: 794, height: 1123 },
+  Infinite: { width: 794, height: 1123 },
 };
 
 const clampNoteSpace = (value: number | undefined) => Number.isFinite(value)
@@ -77,6 +78,7 @@ export function resolvePageNoteSpace(properties: Partial<PagePropertySet>): Page
 /** Resolve the unchanged physical/source dimensions belonging to one page. */
 export function resolveBasePageDimensions(properties: PagePropertySet): PageDimensions {
   const dimensions = PAGE_DIMENSIONS[properties.pageSize];
+  if (properties.pageSize === 'Infinite') return { width: Number.isFinite(properties.infiniteWidth) && properties.infiniteWidth! > 0 ? properties.infiniteWidth! : 794, height: 1123 };
   return properties.orientation === 'landscape'
     ? { width: dimensions.height, height: dimensions.width }
     : { ...dimensions };
@@ -86,9 +88,11 @@ export function resolveBasePageDimensions(properties: PagePropertySet): PageDime
 export function resolvePageSurfaceGeometry(properties: PagePropertySet): PageSurfaceGeometry {
   const base = resolveBasePageDimensions(properties);
   const noteSpace = resolvePageNoteSpace(properties);
+  const expanded = properties.pageSize === 'Infinite' || properties.layoutMode === 'document';
+  const extent = expanded && Number.isFinite(properties.layoutExtent) ? Math.max(base.height, properties.layoutExtent!) : base.height;
   return {
     width: noteSpace.left + base.width + noteSpace.right,
-    height: noteSpace.top + base.height + noteSpace.bottom,
+    height: noteSpace.top + extent + noteSpace.bottom,
     source: { left: noteSpace.left, top: noteSpace.top, ...base },
     noteSpace,
   };
@@ -189,7 +193,11 @@ export function resolvePageGeometryScrollDelta(
 }
 
 export function getNotebookPageDefaults(notebook?: Notebook): PagePropertySet {
-  return { ...DEFAULT_PAGE_PROPERTY_SET, ...(notebook?.defaultPageProperties ?? {}) };
+  const defaults = { ...DEFAULT_PAGE_PROPERTY_SET, ...(notebook?.defaultPageProperties ?? {}) };
+  delete defaults.layoutExtent;
+  delete defaults.layoutMode;
+  delete defaults.infiniteWidth;
+  return defaults;
 }
 
 /**
@@ -243,9 +251,11 @@ export function resolvePageProperties(
   // Metadata with an explicit overrides object uses the new inheritance model.
   // Missing metadata identifies a legacy page whose drawing payload remains the
   // source of its presentation until it is edited or included in apply-to-all.
-  return page?.pagePropertyOverrides !== undefined
+  const properties = page?.pagePropertyOverrides !== undefined
     ? { ...defaults, ...page.pagePropertyOverrides }
     : { ...defaults, ...(legacyProperties ?? {}) };
+  if ((properties.pageSize === 'Infinite' || properties.layoutMode === 'document') && Number.isFinite(legacyProperties?.layoutExtent) && legacyProperties!.layoutExtent! >= 0) properties.layoutExtent = legacyProperties!.layoutExtent;
+  return properties;
 }
 
 /**
@@ -289,6 +299,7 @@ export function derivePagePropertyOverrides(
     ...(Object.keys(properties) as (keyof PagePropertySet)[]),
   ]);
   for (const key of keys) {
+    if (key === 'layoutExtent') continue;
     if (properties[key] !== defaults[key]) {
       // TypeScript cannot correlate the indexed key/value pair here, but both
       // come from the same PagePropertySet contract.

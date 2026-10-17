@@ -3,9 +3,12 @@ import { generateId } from '../../lib/utils/id';
 import type { CanvasData } from '@/types/canvas';
 import type { Workspace, Folder, CanvasFile } from '@/types/workspace';
 import type { Notebook, NotebookSection, NotebookPage } from '@/types/notebook';
-import { buildWorkspaceBackup, remapWorkspaceBackup, type BackupPagePayload, type WorkspaceBackup, type BackupImportResult } from './backupService';
+import { buildWorkspaceBackup, remapWorkspaceBackup, serializeWorkspaceBackup, type BackupPagePayload, type BackupAnnotationPayload, type WorkspaceBackup, type BackupImportResult } from './backupService';
+import { collectBackupAssets, verifyBackupAssets } from './backupAssets';
+import { parsePdfAnnotationStorageId, pdfAnnotationStorageId } from '../../lib/pdfAnnotationStorage';
 
-const belongsToUser = (record: { userId?: string | null }, userId: string | null) => (record.userId ?? null) === userId;
+// Legacy binary/custom-block stores represent an anonymous owner as ''.
+const belongsToUser = (record: { userId?: string | null }, userId: string | null) => (record.userId || null) === userId;
 
 export async function collectBrowserWorkspaceBackup(workspaceId: string, userId: string | null): Promise<WorkspaceBackup> {
   const workspace = await db.workspaces.get(workspaceId);
@@ -31,17 +34,40 @@ export async function collectBrowserWorkspaceBackup(workspaceId: string, userId:
   const pagePayloads: Record<string, BackupPagePayload> = {};
   for (const page of pages) pagePayloads[page.id] = { content: contentByPage.get(page.id) ?? null, drawing: drawingByPage.get(page.id) ?? null };
   const canvasData: Record<string, CanvasData> = {};
+  const customBlocks = await db.customBlocks.toArray();
   for (const canvas of canvases) {
     canvasData[canvas.id] = payloadByCanvas.get(canvas.id) ?? {
       canvasFileId: canvas.id, elements: [], appState: {}, files: {}, customBlocks: [], version: 1, updatedAt: canvas.updatedAt, userId,
     };
+    const canonicalBlocks = customBlocks.filter(block => block.canvasFileId === canvas.id && belongsToUser(block, userId));
+    const canonicalIds = new Set(canonicalBlocks.map(block => block.id));
+    canvasData[canvas.id] = { ...canvasData[canvas.id], customBlocks: [
+      ...(canvasData[canvas.id].customBlocks ?? []).filter(block => !canonicalIds.has(block.id)), ...canonicalBlocks,
+    ] };
   }
-  return buildWorkspaceBackup({ workspace, folders, notebooks, sections, pages, canvases, pagePayloads, canvasPayloads: canvasData });
+  const annotationPayloads: Record<string, BackupAnnotationPayload> = {};
+  const contentById = new Map(contents.map(record => [record.pageId, record]));
+  for (const record of drawings) {
+    const annotation = parsePdfAnnotationStorageId(record.pageId);
+    if (!annotation || !belongsToUser(record, userId) || !pages.some(page => page.id === annotation.ownerPageId && page.type === 'pdf')) continue;
+    const content = contentById.get(record.pageId);
+    annotationPayloads[record.pageId] = { ...annotation, drawing: record.data, content: content && belongsToUser(content, userId) ? content.data : null };
+  }
+  const source = { workspace, folders, notebooks, sections, pages, canvases, pagePayloads, canvasPayloads: canvasData, annotationPayloads };
+  const assets = await collectBackupAssets(source, async reference => {
+    const record = await (reference.kind === 'pdf' ? db.pdfFiles.get(reference.id) : db.imageFiles.get(reference.id));
+    return record && belongsToUser(record, userId) ? record : null;
+  });
+  const backup = buildWorkspaceBackup({ ...source, assets });
+  serializeWorkspaceBackup(backup); // Do not emit a package the importer cannot accept.
+  return backup;
 }
 
 export async function restoreBrowserWorkspaceBackup(backup: WorkspaceBackup, userId: string | null): Promise<BackupImportResult> {
+  serializeWorkspaceBackup(backup);
+  const verified = await verifyBackupAssets(backup);
   const existing = await db.workspaces.toArray();
-  const baseName = backup.header.workspaceName.trim();
+  const baseName = backup.header.workspaceName.trim().slice(0, 140);
   const names = new Set(existing.map(item => item.name));
   let workspaceName = `${baseName} (Restored)`;
   let suffix = 2;
@@ -50,7 +76,14 @@ export async function restoreBrowserWorkspaceBackup(backup: WorkspaceBackup, use
   const pageContentRecords = restored.pages.map(page => ({ pageId: page.id, workspaceId: restored.workspace.id, notebookId: page.notebookId, data: restored.pagePayloads[page.id].content, version: 1 as const, updatedAt: restored.workspace.updatedAt, userId }));
   const pageDrawingRecords = restored.pages.map(page => ({ pageId: page.id, workspaceId: restored.workspace.id, notebookId: page.notebookId, data: restored.pagePayloads[page.id].drawing, version: 1 as const, updatedAt: restored.workspace.updatedAt, userId }));
   const canvasData = restored.canvases.map(canvas => restored.canvasPayloads[canvas.id]);
-  await db.transaction('rw', [db.workspaces, db.folders, db.canvasFiles, db.canvasData, db.notebooks, db.notebookSections, db.notebookPages, db.notebookPageContents, db.notebookPageDrawings], async () => {
+  for (const annotation of Object.values(restored.annotationPayloads ?? {})) {
+    const id = pdfAnnotationStorageId(annotation.ownerPageId, annotation.sourcePage);
+    const owner = restored.pages.find(page => page.id === annotation.ownerPageId)!;
+    pageDrawingRecords.push({ pageId: id, workspaceId: restored.workspace.id, notebookId: owner.notebookId, data: annotation.drawing, version: 1, updatedAt: restored.workspace.updatedAt, userId });
+    if (annotation.content !== null) pageContentRecords.push({ pageId: id, workspaceId: restored.workspace.id, notebookId: owner.notebookId, data: annotation.content, version: 1, updatedAt: restored.workspace.updatedAt, userId });
+  }
+  const bytesByHash = new Map(Object.entries(backup.assets ?? {}).map(([id, asset]) => [asset.sha256, verified.bytes.get(id)!]));
+  await db.transaction('rw', [db.workspaces, db.folders, db.canvasFiles, db.canvasData, db.customBlocks, db.pdfFiles, db.imageFiles, db.notebooks, db.notebookSections, db.notebookPages, db.notebookPageContents, db.notebookPageDrawings], async () => {
     await db.workspaces.add({ ...restored.workspace, name: workspaceName, userId, syncStatus: 'local', deletedAt: null });
     await db.folders.bulkAdd(restored.folders.map(item => ({ ...item, userId, syncStatus: 'local' })));
     await db.notebooks.bulkAdd(restored.notebooks.map(item => ({ ...item, userId, syncStatus: 'local' })));
@@ -60,6 +93,13 @@ export async function restoreBrowserWorkspaceBackup(backup: WorkspaceBackup, use
     if (canvasData.length) await db.canvasData.bulkAdd(canvasData);
     if (pageContentRecords.length) await db.notebookPageContents.bulkAdd(pageContentRecords);
     if (pageDrawingRecords.length) await db.notebookPageDrawings.bulkAdd(pageDrawingRecords);
+    const blocks = canvasData.flatMap(canvas => canvas.customBlocks);
+    if (blocks.length) await db.customBlocks.bulkAdd(blocks);
+    for (const asset of Object.values(restored.assets ?? {})) {
+      const bytes = bytesByHash.get(asset.sha256)!;
+      const record = { id: asset.id, canvasFileId: asset.ownerId, fileName: asset.fileName, mimeType: asset.mimeType, createdAt: asset.createdAt, userId, data: bytes.slice().buffer };
+      if (asset.kind === 'pdf') await db.pdfFiles.add(record); else await db.imageFiles.add(record);
+    }
   });
-  return { workspaceId: restored.workspace.id, workspaceName };
+  return { workspaceId: restored.workspace.id, workspaceName, ...(verified.warnings.length ? { warnings: verified.warnings } : {}) };
 }

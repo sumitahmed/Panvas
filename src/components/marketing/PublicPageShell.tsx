@@ -25,7 +25,6 @@ export function PublicPageShell({ label, title, intro, children, aside }: { labe
     <footer className="pp-footer">
       <div className="pp-footer-brand"><img src="/panvas_logo.png" alt=""/><p>Structured when you need it.<br/>Local by default.</p></div>
       <nav aria-label="Footer navigation">
-        <div><span>Product</span><Link href="/">Home</Link><Link href="/roadmap">Roadmap</Link></div>
         <div><span>Product</span><Link href="/">Home</Link><Link href="/download">Download</Link><Link href="/roadmap">Roadmap</Link></div>
         <div><span>Trust</span><Link href="/privacy">Privacy</Link><Link href="/terms">Terms</Link><Link href="/security">Security</Link></div>
         <div><span>Open source</span><a href={PANVAS_RELEASE.project.githubRepoUrl} target="_blank" rel="noreferrer"><Github size={14}/>Repository</a><a href={PANVAS_RELEASE.project.githubIssuesUrl} target="_blank" rel="noreferrer">Issues</a></div>

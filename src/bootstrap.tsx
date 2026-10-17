@@ -85,11 +85,13 @@ export function mountPanvas(): void {
         });
       }
     } else if (location.protocol === 'https:') {
-      window.addEventListener('load', () => {
-        void navigator.serviceWorker.register('./service-worker.js').catch(error => {
+      const registerOfflineShell = () => {
+        void navigator.serviceWorker.register(`${import.meta.env.BASE_URL}service-worker.js`).catch(error => {
           console.warn('[Panvas] Offline shell registration failed:', error);
         });
-      });
+      };
+      if (document.readyState === 'complete') registerOfflineShell();
+      else window.addEventListener('load', registerOfflineShell, { once: true });
     }
   }
 

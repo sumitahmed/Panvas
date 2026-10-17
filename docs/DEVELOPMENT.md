@@ -4,7 +4,7 @@ The repository-level [CONTRIBUTING.md](../CONTRIBUTING.md) is the canonical setu
 
 ## Prerequisites
 
-- Node.js 20 or 22 LTS
+- Node.js 24 LTS (CI/container: 24.21.0)
 - npm and Git
 - Windows 10/11 for Electron-specific work
 

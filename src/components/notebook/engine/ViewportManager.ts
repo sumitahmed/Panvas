@@ -146,6 +146,20 @@ export class ViewportManager {
     this.contentOffsetX = offsetX;
     this.contentOffsetY = offsetY;
   }
+  private renderOriginY = 0;
+  private renderWindowHeight?: number;
+  /** Transient raster window; persisted coordinates always remain logical. */
+  setRenderWindowOrigin(y: number, height?: number): void { this.renderOriginY = Number.isFinite(y) ? y : 0; this.renderWindowHeight = height; }
+  getRenderWindowBounds(): { left: number; top: number; right: number; bottom: number } | null {
+    return this.renderWindowHeight === undefined ? null : { left: -this.contentOffsetX, top: this.renderOriginY - this.contentOffsetY, right: this.pageWidth - this.contentOffsetX, bottom: this.renderOriginY + this.renderWindowHeight - this.contentOffsetY };
+  }
+  intersectsRenderWindow(object: { x: number; y: number; width: number; height: number; rotation?: number; strokeWidth?: number }): boolean {
+    const bounds = this.getRenderWindowBounds();
+    if (!bounds) return true;
+    const radius = Math.hypot(object.width, object.height) / 2 + (object.strokeWidth ?? 0) / 2;
+    const x = object.x + object.width / 2, y = object.y + object.height / 2;
+    return y + radius >= bounds.top && y - radius <= bounds.bottom && x + radius >= bounds.left && x - radius <= bounds.right;
+  }
 
   /**
    * Translates the viewport by dx, dy (in screen pixels).
@@ -199,13 +213,13 @@ export class ViewportManager {
     const point = sourceToVisual({ x: x + this.contentOffsetX, y: y + this.contentOffsetY }, { width: this.pageWidth, height: this.pageHeight }, this.pageRotation);
     const scale = this.renderScale ? this.state.scale : 1;
     return { x: point.x * scale + (this.renderPan ? this.state.offsetX : 0),
-      y: point.y * scale + (this.renderPan ? this.state.offsetY : 0) };
+      y: (point.y - this.renderOriginY) * scale + (this.renderPan ? this.state.offsetY : 0) };
   }
 
   canvasToPage(canvasX: number, canvasY: number): { x: number; y: number } {
     const scale = this.renderScale ? this.state.scale : 1;
     const x = (canvasX - (this.renderPan ? this.state.offsetX : 0)) / scale;
-    const y = (canvasY - (this.renderPan ? this.state.offsetY : 0)) / scale;
+    const y = (canvasY - (this.renderPan ? this.state.offsetY : 0)) / scale + this.renderOriginY;
     const dimensions: PdfPageDimensions = { width: this.pageWidth, height: this.pageHeight };
     const point = visualToSource({ x, y }, dimensions, this.pageRotation);
     return { x: point.x - this.contentOffsetX, y: point.y - this.contentOffsetY };
@@ -259,6 +273,7 @@ export class ViewportManager {
       ctx.scale(this.state.scale, this.state.scale);
     }
     applyPdfRotationTransform(ctx, this.pageRotation, { width: this.pageWidth, height: this.pageHeight });
+    if (this.renderOriginY) ctx.translate(0, -this.renderOriginY);
     if (this.contentOffsetX !== 0 || this.contentOffsetY !== 0) ctx.translate(this.contentOffsetX, this.contentOffsetY);
   }
 

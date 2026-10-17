@@ -13,13 +13,19 @@ import { NotebookToolPropertiesPanel } from './NotebookToolPropertiesPanel';
 import { NotebookFloatingToolbar } from './NotebookFloatingToolbar';
 import { NotebookNavigator } from './NotebookNavigator';
 import { NotebookWorkspaceControls } from './NotebookWorkspaceControls';
+import { createDocumentLayoutTransition, runDocumentLayoutHistory, documentConversionSource } from './documentLayoutTransition';
+import { unsupportedNotebookContent, NOTEBOOK_RICH_TEXT_SCHEMA_VERSION } from './notebookContentCompatibility';
+import { getNotebookSchema } from './tiptapExtensions';
 import { NotebookPageUtilities } from './NotebookPageUtilities';
 import { PresentationOverlay } from '@/components/workspace/PresentationOverlay';
 import { resolveNotebookNavigationDelta, shouldNotebookHandleNavigationKey } from './notebookNavigation';
 import { NotebookPageView } from './NotebookPageView';
+import { LOGICAL_SCROLL_WINDOW } from './logicalScrollWindow';
 import { PageRenderer } from './PageRenderer';
 import { residentPageIds, reuseResidentPageIds, dominantPageId } from './pageVisualWindow';
 import { NotebookContextMenu, type ContextMenuState } from './NotebookContextMenu';
+import { DocumentationLinkDialog } from './DocumentationLinkDialog';
+import { DocumentationMarkdownDialog } from './DocumentationMarkdownDialog';
 import { HandwritingConversionDialog } from './HandwritingConversionDialog';
 import type { Editor } from '@tiptap/react';
 import { notebookRepository } from '@/repositories/NotebookRepository';
@@ -27,18 +33,21 @@ import { exportNotebookToPdf, exportPageToPdf, printNotebook, printPage } from '
 import { type AudioNote, type TextObject, type Stroke, createEmptyDrawingData, type DrawingData, type NotebookMode } from './engine/drawingTypes';
 import { canvasRepository } from '@/repositories/CanvasRepository';
 import { generateId } from '@/lib/utils/id';
-import { getSafeHttpUrl, htmlToTipTapJson } from './tiptapExtensions';
+import { htmlToTipTapJson } from './tiptapExtensions';
+import { parsePlainTextClipboard, textContentWithSafeLinks } from './notebookClipboard';
+import { installNotebookReferenceNavigation } from './notebookReferences';
 import { useToolState } from './useEngineState';
 import { attachTwoFingerViewportGesture } from './engine/touchViewportGesture';
 import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
 import { useHasTouchInput } from '@/hooks/useHasTouchInput';
-import { capturePageGeometryAnchor, derivePagePropertyOverrides, getNotebookPageDefaults, hasAuthoritativePageAppearance, resolveNotebookPageLayout, resolvePageDimensions, resolvePageGeometryScrollDelta, resolvePageProperties, resolvePageRenderProperties, type PageGeometryAnchor } from '@/lib/pageProperties';
+import { capturePageGeometryAnchor, derivePagePropertyOverrides, getNotebookPageDefaults, hasAuthoritativePageAppearance, resolveNotebookPageLayout, resolvePageDimensions, resolvePageGeometryScrollDelta, resolvePageProperties, resolvePageRenderProperties, resolveBasePageDimensions, type PageGeometryAnchor } from '@/lib/pageProperties';
 import type { NotebookPropertyBatchSnapshot, PagePropertySet } from '@/types/notebook';
 import { createStickyNote, STICKY_NOTE_MIN_HEIGHT, STICKY_NOTE_WIDTH } from './stickyNotes';
 import type { HandwritingToolPreferences } from '@/services/beautification/handwritingBeautification';
 import type { ReviewedHandwritingLine } from '@/services/recognition/bulkConversion';
 import { PanelTopOpen, PanelRight, Plus } from 'lucide-react';
 import { pageAudioPersistence } from '@/services/audio/pageAudioPersistenceInstance';
+import { rememberDrawingSnapshotJson } from '@/services/storage/drawingSnapshotJson';
 import { changeVoiceNote, type VoiceState } from '@/services/audio/voiceNoteCommands';
 import { formatPageIndicator } from './pageIndicator';
 import {
@@ -54,14 +63,6 @@ import {
 import { gate0Profiler } from '@/dev/gate0Profiler';
 import { recordHandwritingTraceMarker } from '@/dev/handwritingTrace';
 import { DrawingSaveScheduler } from './drawingSaveScheduler';
-
-const clipboardCodeLanguages = new Set([
-  'python', 'javascript', 'typescript', 'java', 'c', 'cpp', 'csharp',
-  'go', 'rust', 'sql', 'bash', 'shell', 'json', 'html', 'css',
-  'markdown', 'jsx', 'tsx',
-]);
-
-const plainTextUrlPattern = /https?:\/\/[^\s<>"']+/gi;
 
 function captureEngineOwnedDrawing(
   notebookEngine: NotebookEngine,
@@ -92,80 +93,6 @@ function captureEngineOwnedDrawing(
     () => notebookEngine.getDrawingData(),
     renderedSheetId,
   );
-}
-
-function textContentWithSafeLinks(text: string): any[] {
-  const content: any[] = [];
-  let cursor = 0;
-
-  for (const match of text.matchAll(plainTextUrlPattern)) {
-    const start = match.index ?? 0;
-    const rawUrl = match[0];
-    // Sentence punctuation is not normally part of a copied URL.
-    const url = rawUrl.replace(/[),.;!?]+$/, '');
-    const safeUrl = getSafeHttpUrl(url);
-
-    if (!safeUrl) continue;
-    if (start > cursor) content.push({ type: 'text', text: text.slice(cursor, start) });
-    content.push({ type: 'text', text: safeUrl, marks: [{ type: 'link', attrs: { href: safeUrl } }] });
-    cursor = start + rawUrl.length;
-  }
-
-  if (cursor < text.length) content.push({ type: 'text', text: text.slice(cursor) });
-  return content;
-}
-
-/**
- * Converts only properly fenced Markdown code into the existing TipTap
- * codeBlock schema. Returning null leaves the established plain-text path
- * untouched.
- */
-function parsePlainTextClipboard(text: string): any | null {
-  const lineEnding = text.includes('\r\n') ? '\r\n' : '\n';
-  const lines = text.split(/\r?\n/);
-  const content: any[] = [];
-  const proseLines: string[] = [];
-  let foundFence = false;
-
-  const appendProse = () => {
-    for (const line of proseLines) {
-      content.push({
-        type: 'paragraph',
-        content: line ? textContentWithSafeLinks(line) : [],
-      });
-    }
-    proseLines.length = 0;
-  };
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const openingFence = lines[index].match(/^ {0,3}```([^\s`]*)[ \t]*$/);
-    if (!openingFence) {
-      proseLines.push(lines[index]);
-      continue;
-    }
-
-    const closingIndex = lines.findIndex(
-      (line, candidate) => candidate > index && /^ {0,3}```[ \t]*$/.test(line),
-    );
-    if (closingIndex === -1) {
-      return null;
-    }
-
-    appendProse();
-    const requestedLanguage = openingFence[1].toLowerCase();
-    const language = clipboardCodeLanguages.has(requestedLanguage) ? requestedLanguage : null;
-    const code = lines.slice(index + 1, closingIndex).join(lineEnding);
-    content.push({
-      type: 'codeBlock',
-      attrs: { language },
-      content: code ? [{ type: 'text', text: code }] : [],
-    });
-    foundFence = true;
-    index = closingIndex;
-  }
-
-  appendProse();
-  return foundFence ? { type: 'doc', content } : null;
 }
 
 /**
@@ -224,17 +151,41 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   const [pageProperties, setPageProperties] = useState(() => notebookEngine.getProperties());
   const [sectionDataCache, setSectionDataCache] = useState<Record<string, DrawingData>>({});
   const sectionDataCacheRef = useRef<Record<string, DrawingData>>({});
-  const updateSectionDataCache = useCallback((update: (current: Record<string, DrawingData>) => Record<string, DrawingData>) => {
+  const updateSectionDataCache = useCallback((update: (current: Record<string, DrawingData>) => Record<string, DrawingData>, publish = true) => {
     const next = update(sectionDataCacheRef.current);
     sectionDataCacheRef.current = next;
-    setSectionDataCache(next);
+    if (publish) setSectionDataCache(next);
   }, []);
   const focusedPageLoadGenerationRef = useRef(0);
   const loadedSceneRevisionRef = useRef<number | null>(null);
   const residentImageManagersRef = useRef(new Map<string, ImageManager>());
-  const registerPageImages = useCallback((pageId: string, images: ImageManager | null) => {
+  const residentDrawingEnginesRef = useRef(new Map<string, NotebookEngine['drawing']>());
+  const registerPageImages = useCallback((pageId: string, images: ImageManager | null, drawing?: NotebookEngine['drawing']) => {
     if (images) residentImageManagersRef.current.set(pageId, images);
     else residentImageManagersRef.current.delete(pageId);
+    if (drawing) {
+      const cached = residentDrawingEnginesRef.current.get(pageId);
+      if (cached && cached !== drawing) drawing.retainStrokePaths(cached);
+      residentDrawingEnginesRef.current.delete(pageId);
+      residentDrawingEnginesRef.current.set(pageId, drawing);
+      // Detached previews release their canvases/images in PageView cleanup.
+      // Keep only a small recent geometry window so revisiting a page does not
+      // rebuild every path. Never retain an unbounded notebook's geometry.
+      const sampleCount = (id: string, engine: NotebookEngine['drawing']) => {
+        const strokes = engine.getStrokes();
+        if (strokes.length) return strokes.reduce((count, stroke) => count + stroke.points.length, 0);
+        const data = sectionDataCacheRef.current[id];
+        return (data?.strokes ?? data?.objects?.filter(object => object.type === 'stroke') ?? [])
+          .reduce((count, stroke) => count + stroke.points.length, 0);
+      };
+      let samples = [...residentDrawingEnginesRef.current].reduce((sum, [id, engine]) => sum + sampleCount(id, engine), 0);
+      for (const [id, engine] of residentDrawingEnginesRef.current) {
+        if (residentDrawingEnginesRef.current.size <= 6 && samples <= 500_000) break;
+        if (id === pageId) continue;
+        samples -= sampleCount(id, engine);
+        residentDrawingEnginesRef.current.delete(id);
+      }
+    }
   }, []);
   // The focused page owns the live engine. Keep its identity available while
   // resolving the visible page props so a metadata snapshot cannot briefly
@@ -256,6 +207,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   }
   const latestScheduledDrawingRevisionRef = useRef(new Map<string, number>());
   const latestScheduledDrawingFingerprintRef = useRef(new Map<string, string>());
+  const latestScheduledDrawingDataRef = useRef(new Map<string, DrawingData>());
   const [, setTextObjects] = useState<TextObject[]>([]);
   const latestCapturedDrawingRef = useRef(new Map<string, PageOwnedDrawing>());
   const [, setSelectionRevision] = useState(0);
@@ -266,8 +218,10 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   const { isPropertiesPanelOpen } = useUIStore();
   const { notebookModeLevel, setNotebookModeLevel, workspaceViewMode, setWorkspaceViewMode, isToolbarCollapsed, setToolbarCollapsed } = useLayoutStore();
   const setActivePage = useWorkspaceStore(s => s.setActivePage);
-  const createNotebookPage = useWorkspaceStore(s => s.createNotebookPage);
-  const reorderPages = useWorkspaceStore(s => s.reorderPages);
+  useEffect(() => installNotebookReferenceNavigation(
+    notebookEngine, () => useWorkspaceStore.getState().notebookPages,
+    id => useWorkspaceStore.getState().setActivePage(id),
+  ), [notebookEngine]);
   
   const containerRef = useRef<HTMLDivElement>(null);
   const fullscreenToolbarHostRef = useRef<HTMLDivElement>(null);
@@ -504,16 +458,44 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     }));
   }, [currentSectionPages, notebook, sectionDataCache]);
 
+  const [logicalScrollBases, setLogicalScrollBases] = useState<Record<string, number>>({});
+  const rebaseLogicalScroll = useCallback((pageId: string, base: number, delta: number) => {
+    const container = containerRef.current;
+    // Only the editing owner can recenter the shared scroll viewport. An
+    // inactive Infinite neighbor must not pull a manually selected page away.
+    if (!container || focusedPageIdRef.current !== pageId || notebookEngine.getDrawingOwnership().pageId !== pageId) return;
+    const scrollTop = container.scrollTop;
+    flushSync(() => setLogicalScrollBases(previous => ({ ...previous, [pageId]: base })));
+    container.scrollTop = scrollTop - delta * notebookEngine.viewport.getState().scale;
+  }, [notebookEngine]);
   const layoutConfig = useMemo(() => resolveNotebookPageLayout(
     currentSectionPages.map(sectionPage => ({
       id: sectionPage.id,
-      properties: resolvedSectionProperties.get(sectionPage.id)!,
+      properties: resolvedSectionProperties.get(sectionPage.id)!.pageSize === 'Infinite' || resolvedSectionProperties.get(sectionPage.id)!.layoutMode === 'document'
+        ? { ...resolvedSectionProperties.get(sectionPage.id)!, layoutExtent: Math.min(LOGICAL_SCROLL_WINDOW, resolvedSectionProperties.get(sectionPage.id)!.layoutExtent ?? 1123) }
+        : resolvedSectionProperties.get(sectionPage.id)!,
     })),
     spreadMode,
   ), [currentSectionPages, resolvedSectionProperties, spreadMode]);
   const sectionAppearanceReady = currentSectionPages.every(sectionPage =>
     hasAuthoritativePageAppearance(sectionPage, sectionDataCache[sectionPage.id]?.properties),
   );
+  useEffect(() => {
+    const goToPosition = (event: Event) => {
+      const y = Number((event as CustomEvent).detail?.y);
+      const id = focusedPageIdRef.current, container = containerRef.current;
+      const props = id ? resolvedSectionProperties.get(id) : undefined;
+      if (!id || !container || !Number.isFinite(y) || y < 0 || !(props?.pageSize === 'Infinite' || props?.layoutMode === 'document')) return;
+      const extent = props.layoutExtent ?? 1123;
+      const point = Math.min(extent - 1, y);
+      const base = Math.max(0, Math.min(extent - LOGICAL_SCROLL_WINDOW, point - LOGICAL_SCROLL_WINDOW / 2));
+      flushSync(() => setLogicalScrollBases(previous => ({ ...previous, [id]: base })));
+      const root = document.getElementById(`page-${id}`);
+      if (root) container.scrollTop += root.getBoundingClientRect().top - container.getBoundingClientRect().top + (point - base) * notebookEngine.viewport.getState().scale;
+    };
+    document.addEventListener('panvas:go-to-logical-y', goToPosition);
+    return () => document.removeEventListener('panvas:go-to-logical-y', goToPosition);
+  }, [resolvedSectionProperties, notebookEngine]);
 
   useLayoutEffect(() => {
     const pending = pageGeometryTransitionRef.current;
@@ -604,10 +586,10 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   }, [layoutConfig.totalWidth, viewport.scale]);
 
   // Direct panel zoom button (+, -, fit)
-  const handlePanelZoom = useCallback((newZoom: number) => {
+  const handlePanelZoom = useCallback((zoomFactor: number) => {
     const container = containerRef.current;
     if (!container) return;
-    const clampedZoom = Math.max(0.25, Math.min(4.0, newZoom));
+    const clampedZoom = Math.max(0.25, Math.min(4.0, viewport.scale * zoomFactor));
     const factor = clampedZoom / viewport.scale;
     if (factor === 1) return;
     applyZoom(factor, container.clientWidth / 2, container.clientHeight / 2);
@@ -910,17 +892,20 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     if (latestScheduledRevision !== undefined && snapshot.drawingRevision < latestScheduledRevision) {
       return;
     }
+    if (latestScheduledRevision === snapshot.drawingRevision && latestScheduledDrawingDataRef.current.get(pageId) === data) return;
     recordHandwritingTraceMarker('saveStarted', {
       pageId: snapshot.sheetId,
       revision: snapshot.drawingRevision,
     });
     recordHandwritingTraceMarker('stringifyStarted', { pageId, revision: snapshot.drawingRevision });
     const fingerprint = JSON.stringify(data);
+    rememberDrawingSnapshotJson(data, fingerprint);
     recordHandwritingTraceMarker('stringifyEnded', { pageId, revision: snapshot.drawingRevision });
     if (latestScheduledRevision !== undefined && snapshot.drawingRevision === latestScheduledRevision
       && fingerprint === latestScheduledFingerprint) return;
     latestScheduledDrawingRevisionRef.current.set(pageId, snapshot.drawingRevision);
     latestScheduledDrawingFingerprintRef.current.set(pageId, fingerprint);
+    latestScheduledDrawingDataRef.current.set(pageId, data);
     const { notebookPages: allPages, notebooks: allNotebooks, workspaces: allWorkspaces } = useWorkspaceStore.getState();
     const targetPage = allPages.find(p => p.id === pageId) ?? notebookPages.find(p => p.id === pageId);
     if (!targetPage) {
@@ -1004,8 +989,17 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     }
   }, [activePageId, focusedPageId, currentSectionPages, sectionDataCache]);
 
-  const handlePagePropertiesUpdate = useCallback((updates: Partial<PagePropertySet>) => {
+  const handlePagePropertiesUpdate = useCallback((updates: Partial<PagePropertySet>, sourceTextId?: string) => {
+    if (updates.layoutMode && (workspaceViewMode !== 'edit' || focusedPage?.type === 'pdf')) return;
+    if (updates.layoutMode === 'document' && !sourceTextId) {
+      const texts = notebookEngine.texts.getTexts();
+      if (!texts.some(text => text.metadata?.documentRole === 'body' || text.metadata?.documentDormantBody) && texts.some(text => !text.metadata?.audioNoteId)) {
+        sourceTextId = documentConversionSource(notebookEngine)?.id;
+        if (!sourceTextId) { useUIStore.getState().showToast('Select or edit a text box to use as the document.', 'info'); return; }
+      }
+    }
     const previousProperties = notebookEngine.getProperties();
+    if (updates.pageSize === 'Infinite' && previousProperties.pageSize !== 'Infinite') updates = { ...updates, infiniteWidth: resolveBasePageDimensions(previousProperties).width };
     const noteSpaceKeys: (keyof PagePropertySet)[] = ['extraHeight', 'extraTop', 'extraRight', 'extraBottom', 'extraLeft'];
     const isNoteSpaceChange = noteSpaceKeys.some(key => key in updates);
     const isLineColorChange = updates.ruleLineColor !== undefined;
@@ -1013,7 +1007,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       (updates.orientation !== undefined && updates.orientation !== previousProperties.orientation)
       || (updates.pageSize !== undefined && updates.pageSize !== previousProperties.pageSize)
       || isNoteSpaceChange;
-    if (changesDimensions) {
+    if (changesDimensions && updates.pageSize !== 'Infinite' && previousProperties.pageSize !== 'Infinite') {
       const container = containerRef.current;
       const pageId = focusedPageIdRef.current;
       const pageElement = pageId ? document.getElementById(`page-${pageId}`) : null;
@@ -1054,6 +1048,28 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       });
     };
     const nextProperties = { ...previousProperties, ...updates };
+    if (updates.layoutMode) {
+      const source = sourceTextId ? notebookEngine.texts.getTexts().find(text => text.id === sourceTextId) : undefined;
+      if (source && notebookEngine.texts.getEditor(source.id)?.view.composing) {
+        useUIStore.getState().showToast('Finish the current text composition before converting.', 'info');
+        return;
+      }
+      if (sourceTextId && (!source || Number(source.metadata?.richTextSchemaVersion ?? 1) > NOTEBOOK_RICH_TEXT_SCHEMA_VERSION || unsupportedNotebookContent(source.content, getNotebookSchema()).length)) {
+        useUIStore.getState().showToast('This text requires a compatible Panvas version. Its original content is protected.', 'info');
+        return;
+      }
+      const transition = createDocumentLayoutTransition(notebookEngine, updates.layoutMode, properties => {
+        setActiveEditor(null);
+        applyProperties(properties);
+        if (properties.layoutMode === 'document' && pageId) {
+          notebookEngine.tools.setMode('text');
+          useUIStore.getState().setDocumentFocusPageId(pageId);
+        }
+      }, sourceTextId);
+      if (transition) { notebookEngine.history.push(transition); return; }
+      if (sourceTextId) { useUIStore.getState().showToast('Select an editable text box on a Freeform page to convert.', 'info'); return; }
+      if (Object.keys(updates).length === 1 && updates.layoutMode === (previousProperties.layoutMode ?? 'freeform')) return;
+    }
     if (isNoteSpaceChange || isLineColorChange) {
       notebookEngine.history.push({
         description: isNoteSpaceChange ? 'Change research space' : 'Change line color',
@@ -1061,7 +1077,15 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         undo: () => applyProperties(previousProperties),
       });
     } else applyProperties(nextProperties);
-  }, [notebookEngine, notebook, workspace, updateSectionDataCache]);
+  }, [notebookEngine, notebook, workspace, updateSectionDataCache, workspaceViewMode, focusedPage?.type]);
+
+  const getConversionText = useCallback(() => {
+    return documentConversionSource(notebookEngine);
+  }, [notebookEngine]);
+  const handleConvertText = useCallback(() => {
+    const source = getConversionText();
+    if (source) handlePagePropertiesUpdate({ layoutMode: 'document' }, source.id);
+  }, [getConversionText, handlePagePropertiesUpdate]);
 
   const handleApplyPropertiesToAll = useCallback(async (updates: Partial<PagePropertySet>) => {
     if (!workspace || !notebook) throw new Error('No active notebook.');
@@ -1198,7 +1222,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
 
   // Safe Autosave: debounced write strictly on user drawing actions
   useEffect(() => {
-    const onUserDrawingAction = () => {
+    const onUserDrawingAction = (reason?: 'document-text') => {
       const currentPageId = focusedPageIdRef.current;
       if (!currentPageId) return;
       const { notebookPages: allPages } = useWorkspaceStore.getState();
@@ -1212,9 +1236,12 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       });
       if (!pageOwnedSnapshot) return;
       latestCapturedDrawingRef.current.set(currentPageId, pageOwnedSnapshot);
+      // Capture and enqueue every document edit synchronously. Its live editor
+      // owns the DOM; publishing identical geometry would rerender the whole
+      // notebook per keystroke. Properties, save completion and handoff publish.
       updateSectionDataCache(prev => prev[currentPageId] === pageOwnedSnapshot.data
         ? prev
-        : { ...prev, [currentPageId]: pageOwnedSnapshot.data });
+        : { ...prev, [currentPageId]: pageOwnedSnapshot.data }, reason !== 'document-text');
       drawingSaveSchedulerRef.current?.enqueue(pageOwnedSnapshot);
     };
 
@@ -1336,11 +1363,17 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       if (backing) backing.style.visibility = 'visible';
       if (interaction) interaction.style.visibility = 'hidden';
     }
+    if (outgoingPageId) residentDrawingEnginesRef.current.get(outgoingPageId)?.retainStrokePaths(notebookEngine.drawing);
     notebookEngine.unmount();
     const incomingImages = residentImageManagersRef.current.get(targetPageId);
     if (incomingImages) notebookEngine.images.adoptDecodedImages(incomingImages,
       (incomingData.objects ?? []).filter(object => object.type === 'image').map(object => object.fileId));
-    notebookEngine.setDrawingData(incomingData, targetPageId);
+    const incomingDrawing = residentDrawingEnginesRef.current.get(targetPageId);
+    notebookEngine.setDrawingData(incomingData, targetPageId, incomingDrawing);
+    if (incomingDrawing) {
+      residentDrawingEnginesRef.current.delete(targetPageId);
+      residentDrawingEnginesRef.current.set(targetPageId, incomingDrawing);
+    }
     loadedSceneRevisionRef.current = notebookEngine.getDrawingOwnership().revision;
     focusedPageIdRef.current = targetPageId;
 
@@ -1386,6 +1419,15 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       const dominantPage = currentSectionPages.find(page => page.id === dominantId);
 
       if (isNavigatingRef.current || pageGeometryTransitionRef.current) return;
+      if (notebookEngine.getProperties().pageSize === 'Infinite') return;
+      if (notebookEngine.getProperties().layoutMode === 'document' && drawingGestureActiveRef.current) return;
+      // Caret scrolling and reflow must not replace the editor's page. This
+      // applies to freeform text as well as the flowing document body.
+      const textId = notebookEngine.texts.getActiveTextId();
+      const textEditor = textId && notebookEngine.texts.getEditor(textId);
+      const editingControl = document.activeElement?.closest<HTMLElement>('[data-document-editor]');
+      if (textEditor?.view.dom.isConnected && (textEditor.isFocused || textEditor.view.dom.contains(document.activeElement)
+        || editingControl?.dataset.documentEditor === textId)) return;
 
       if (dominantPage && dominantPage.id !== currentActivePageIdRef.current) {
         if (dominantPage.type === 'pdf') {
@@ -1508,6 +1550,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     canRedo: false,
     canConvertHandwriting: false,
   });
+  useEffect(() => { setContextMenu(previous => ({ ...previous, isOpen: false, editor: null })); }, [activePageId]);
 
   // Sensible position for pasted content (viewport center on focused/active page)
   const getSensiblePastePosition = useCallback((contentWidth = 300, contentHeight = 100): { x: number; y: number } => {
@@ -1531,14 +1574,14 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     let pageCenterY = paperDimensions.height / 3;
     if (visibleBottom > visibleTop) {
       const visibleCenterY = (visibleTop + visibleBottom) / 2;
-      pageCenterY = (visibleCenterY - pageRect.top) / (viewport.scale || 1);
+      pageCenterY = (visibleCenterY - pageRect.top) / (viewport.scale || 1) + (targetPageId ? logicalScrollBases[targetPageId] ?? 0 : 0);
     }
 
     const x = Math.max(20, Math.min(paperDimensions.width - contentWidth - 20, Math.round((paperDimensions.width - contentWidth) / 2)));
     const y = Math.max(20, Math.min(paperDimensions.height - contentHeight - 20, Math.round(pageCenterY - contentHeight / 2)));
 
     return { x, y };
-  }, [focusedPageId, activePageId, paperDimensions, viewport.scale]);
+  }, [focusedPageId, activePageId, paperDimensions, viewport.scale, logicalScrollBases]);
 
   // Sticky notes use the existing text/selection/persistence pipeline. The
   // toolbar and slash menu intentionally communicate through a narrow DOM
@@ -1640,7 +1683,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
             const screenY = clientY - rect.top;
             const pt = viewportManager.screenToPage(screenX, screenY);
             pageX = pt.x;
-            pageY = pt.y;
+            pageY = pt.y + (logicalScrollBases[targetPageId] ?? 0);
           } else {
             const pos = getSensiblePastePosition(width, height);
             pageX = pos.x + width / 2;
@@ -1695,7 +1738,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       }
     };
     reader.readAsArrayBuffer(file);
-  }, [focusedPageId, activePageId, notebookEngine, paperDimensions, getSensiblePastePosition, workspace, notebook]);
+  }, [focusedPageId, activePageId, notebookEngine, paperDimensions, getSensiblePastePosition, workspace, notebook, logicalScrollBases]);
 
   // Import rich text formatted content as editable TextObject (OneNote style paste)
   const importRichText = useCallback((content: any, customX?: number, customY?: number, pastePresentation?: 'sticky-note' | 'mixed-paste') => {
@@ -1703,6 +1746,18 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     if (!content || !content.content || content.content.length === 0) return;
     const targetPageId = focusedPageId || activePageId;
     if (!targetPageId) return;
+    if (notebookEngine.getProperties().layoutMode === 'document') {
+      const body = notebookEngine.texts.getTexts().find(text => text.metadata?.documentRole === 'body');
+      const editor = body && notebookEngine.texts.getEditor(body.id);
+      if (editor && !editor.isDestroyed && editor.view.dom.dataset.protectedContent !== 'true' && notebookEngine.layers.isEditable(body.layerId)) {
+        notebookEngine.tools.setMode('text');
+        editor.setEditable(true, false);
+        editor.chain().focus().pasteDocumentationContent(content).run();
+        return;
+      }
+      useUIStore.getState().showToast('The document body is not ready for editing.', 'error');
+      return;
+    }
 
     // Check if content has codeBlock or large elements to size appropriately
     const contentStr = JSON.stringify(content);
@@ -1763,6 +1818,10 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     if (!targetPageId) return;
 
     const lines = rawText.split(/\r?\n/);
+    if (notebookEngine.getProperties().layoutMode === 'document') {
+      importRichText({ type: 'doc', content: lines.map(line => ({ type: 'paragraph', content: line ? textContentWithSafeLinks(line) : [] })) });
+      return;
+    }
     const toolColor = toolState.color || '#20242a';
 
     const content = {
@@ -1821,14 +1880,43 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     if (workspace && notebook && targetPageId) {
       persistDrawing(captureEngineOwnedDrawing(notebookEngine, notebook?.id, targetPageId));
     }
-  }, [focusedPageId, activePageId, toolState.color, getSensiblePastePosition, notebookEngine, workspace, notebook]);
+  }, [focusedPageId, activePageId, toolState.color, getSensiblePastePosition, notebookEngine, workspace, notebook, importRichText]);
 
   const handledPasteEvents = useRef(new WeakSet<Event>());
 
   // Unified clipboard paste handler (strictly obeys live OS clipboard precedence)
+  const pasteIntoDocument = useCallback((html: string, text: string, original?: DataTransfer): boolean => {
+    if (notebookEngine.getProperties().layoutMode !== 'document') return false;
+    const owner = notebookEngine.getDrawingOwnership().pageId;
+    const body = notebookEngine.texts.getTexts().find(object => object.metadata?.documentRole === 'body');
+    if (!owner || !body) { useUIStore.getState().showToast('Choose Document in the writing mode control before pasting.', 'info'); return true; }
+    // Native clipboard data is readable during its event. Copy every textual
+    // format before replaying it after the Text tool becomes editable.
+    const clipboard = new DataTransfer();
+    if (original) for (const type of original.types) if (type !== 'Files') clipboard.setData(type, original.getData(type));
+    if (html) clipboard.setData('text/html', html);
+    if (text) clipboard.setData('text/plain', text);
+    notebookEngine.tools.setMode('text');
+    const deliver = (attempt = 0) => {
+      const editor = notebookEngine.texts.getEditor(body.id);
+      if (notebookEngine.getDrawingOwnership().pageId !== owner || notebookEngine.tools.getState().mode !== 'text') return;
+      if (!editor?.isEditable || !editor.view.dom.isConnected) {
+        if (attempt < 3) requestAnimationFrame(() => deliver(attempt + 1));
+        else useUIStore.getState().showToast('The document is not editable yet. Paste when the writing cursor appears.', 'info');
+        return;
+      }
+      editor.view.focus();
+      editor.view.dom.dispatchEvent(new ClipboardEvent('paste', { clipboardData: clipboard, bubbles: true, cancelable: true }));
+    };
+    requestAnimationFrame(() => deliver());
+    return true;
+  }, [notebookEngine]);
+
   const handlePasteFromClipboard = useCallback(async (e?: React.ClipboardEvent | ClipboardEvent) => {
     // 1. If inside a native input / TipTap text editor, let it paste natively
+    const pasteTarget = e?.target instanceof HTMLElement ? e.target : null;
     const isTextEditing = (
+      Boolean(pasteTarget?.isContentEditable) ||
       document.activeElement instanceof HTMLInputElement || 
       document.activeElement instanceof HTMLTextAreaElement ||
       !!(document.activeElement as HTMLElement)?.isContentEditable
@@ -1884,6 +1972,8 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         }
       }
 
+      if ((htmlData || textData) && pasteIntoDocument(htmlData, textData, e.clipboardData)) { e.preventDefault(); return; }
+
       // c. Formatted HTML from OS clipboard
       if (htmlData && htmlData.trim().length > 0) {
         e.preventDefault();
@@ -1935,6 +2025,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
               const htmlText = await htmlBlob.text();
               if (!stillOnPage()) return;
               if (htmlText && htmlText.trim().length > 0) {
+                if (pasteIntoDocument(htmlText, '')) return;
                 const json = htmlToTipTapJson(htmlText);
                 if (json && json.content && json.content.length > 0) {
                   importRichText(json, undefined, undefined, getPlainTextPastePresentation(json));
@@ -1973,6 +2064,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
             // not valid JSON
           }
         }
+        if (pasteIntoDocument('', text)) return;
         const content = parsePlainTextClipboard(text);
         if (content) {
           importRichText(content, undefined, undefined, getPlainTextPastePresentation(content));
@@ -1985,7 +2077,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     } catch (err) {
       console.error('Failed to paste from clipboard:', err);
     }
-  }, [importImage, importRichText, importText, notebookEngine]);
+  }, [importImage, importRichText, importText, notebookEngine, pasteIntoDocument]);
 
   const openHandwritingConversion = useCallback(() => {
     const strokes = notebookEngine.selection.getSelectedStrokes();
@@ -2023,7 +2115,10 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
 
     switch (command) {
       case 'undo':
-        if (isTextEditing) {
+        if ((document.activeElement as HTMLElement)?.closest('.ProseMirror')) {
+          const text = notebookEngine.texts.getFocusedText(), editor = text && notebookEngine.texts.getEditor(text.id);
+          if (!editor?.commands.undo()) runDocumentLayoutHistory(notebookEngine, 'undo', editor);
+        } else if (isTextEditing) {
           document.execCommand('undo');
         } else if (notebookEngine.history.canUndo()) {
           notebookEngine.history.undo();
@@ -2032,7 +2127,10 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         }
         break;
       case 'redo':
-        if (isTextEditing) {
+        if ((document.activeElement as HTMLElement)?.closest('.ProseMirror')) {
+          const text = notebookEngine.texts.getFocusedText(), editor = text && notebookEngine.texts.getEditor(text.id);
+          if (!editor?.commands.redo()) runDocumentLayoutHistory(notebookEngine, 'redo', editor);
+        } else if (isTextEditing) {
           document.execCommand('redo');
         } else if (notebookEngine.history.canRedo()) {
           notebookEngine.history.redo();
@@ -2285,10 +2383,17 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
 
     window.addEventListener('paste', onWindowPaste);
     return () => window.removeEventListener('paste', onWindowPaste);
-  }, [handlePasteFromClipboard, workspaceViewMode]);
+  }, [handlePasteFromClipboard, workspaceViewMode, notebookEngine]);
 
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
+    const target = e.target as HTMLElement;
+    const editor = notebookEngine.texts.getTexts().map(object => notebookEngine.texts.getEditor(object.id))
+      .find(candidate => candidate && !candidate.isDestroyed && candidate.isEditable && candidate.view.dom.contains(target));
+    const blockId = target.closest<HTMLElement>('[data-block-id]')?.dataset.blockId;
+    if (editor && blockId && !target.closest('[data-block-id]')?.contains(editor.view.domAtPos(editor.state.selection.from).node)) {
+      editor.commands.focusDocumentationBlock(blockId);
+    }
     const hasSelection = notebookEngine.selection.getSelectedElements().length > 0;
     const canConvertHandwriting = notebookEngine.selection.hasSelectedStrokes();
     const isTextEditing = (
@@ -2306,6 +2411,8 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       canUndo: notebookEngine.history.canUndo(),
       canRedo: notebookEngine.history.canRedo(),
       canConvertHandwriting,
+      editor: editor ?? null,
+      blockId,
     });
   };
 
@@ -2378,25 +2485,12 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     return () => notebookEngine.selection.setVoiceDeleteHandler(undefined);
   }, [notebookEngine, handleDeleteVoiceNote]);
 
-  const handleInsertPage = useCallback(async () => {
+  const handleInsertPage = useCallback(() => {
     const sectionId = page?.sectionId ?? activeNotebookSectionId;
     if (!sectionId) return;
 
-    try {
-      // The repository creates new pages at the end. Reinsert the new id after
-      // the current page so the quick action has predictable notebook semantics.
-      const existingIds = currentSectionPages.map(item => item.id);
-      const created = await createNotebookPage(sectionId, 'New page');
-      const activeIndex = existingIds.indexOf(activePageId ?? '');
-      const insertAt = activeIndex >= 0 ? activeIndex + 1 : existingIds.length;
-      existingIds.splice(insertAt, 0, created.id);
-      await reorderPages(existingIds);
-      setActivePage(created.id);
-    } catch (error) {
-      console.error('[NotebookRenderer] quick page insertion failed:', error);
-      useUIStore.getState().showToast('Could not insert a new page.', 'error');
-    }
-  }, [activePageId, activeNotebookSectionId, createNotebookPage, currentSectionPages, page?.sectionId, reorderPages, setActivePage]);
+    useUIStore.getState().openCreateDialog('page', sectionId, 'section', 'document', activePageId);
+  }, [activePageId, activeNotebookSectionId, page?.sectionId]);
 
   const handleExportPagePdf = useCallback(async () => {
     if (!page || !notebook) return;
@@ -2482,7 +2576,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
           on its own visible chrome. */}
       {isMobileViewport && workspaceViewMode !== 'present' && notebookModeLevel !== 2 && <div className="panvas-mobile-document-header">
         <button type="button" className="min-w-0 flex-1 truncate text-left text-xs font-medium" onClick={() => useUIStore.getState().toggleSidebar()} title="Browse notebook pages">{focusedPage?.title ?? 'Notebook'}</button>
-        <button type="button" onClick={() => handlePanelZoom((containerSize.width - 16) / paperDimensions.width)} className="shrink-0 whitespace-nowrap px-2 text-xs" aria-label="Fit page width">Fit width</button>
+        <button type="button" onClick={() => handlePanelZoom((containerSize.width - 16) / paperDimensions.width / viewport.scale)} className="shrink-0 whitespace-nowrap px-2 text-xs" aria-label="Fit page width">Fit width</button>
         <button type="button" className="panvas-icon-control focus-ring" onClick={() => useUIStore.getState().togglePropertiesPanel()} aria-label="Open page and view inspector" aria-expanded={isPropertiesPanelOpen}><PanelRight size={18} /></button>
         <NotebookPageUtilities engine={notebookEngine} workspaceId={workspace?.id} notebookId={notebook?.id} ownerId={focusedPage?.id} editable={workspaceViewMode === 'edit'} onPageDataPersisted={handlePageAudioPersisted} onVoiceDelete={handleDeleteVoiceNote} onVoiceRename={handleRenameVoiceNote} onChange={handleLayersChange} compact onExportPage={() => void handleExportPagePdf()} onExportNotebook={() => void handleExportNotebookPdf()} onPrintPage={() => void handlePrintPage()} onPrintNotebook={() => void handlePrintNotebook()} isExporting={isExportingPdf} />
         <NotebookWorkspaceControls focusOnly embedded />
@@ -2612,6 +2706,8 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
                     <NotebookPageView
                       key={pos.id}
                       page={pageItem}
+                      logicalBase={resolvedSectionProperties.get(pos.id)!.pageSize === 'Infinite' || resolvedSectionProperties.get(pos.id)!.layoutMode === 'document' ? logicalScrollBases[pos.id] ?? 0 : 0}
+                      onLogicalRebase={(base, delta) => rebaseLogicalScroll(pos.id, base, delta)}
                       onImageManagerReady={registerPageImages}
                       data={renderData}
                       properties={resolvedSectionProperties.get(pos.id)!}
@@ -2643,6 +2739,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
                   {isFocused && workspaceViewMode === 'edit' && !isMobileViewport && (
                     <button
                       type="button"
+                      onPointerDownCapture={event => event.stopPropagation()}
                       onClick={() => void handleInsertPage()}
                       className="panvas-insert-page-button panvas-floating-surface panvas-icon-control absolute bottom-0 left-full ml-3 z-30 h-8 w-8 rounded-full p-0 pointer-events-auto focus-ring"
                       aria-label="Insert page after current page"
@@ -2695,6 +2792,8 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
           zoom={viewport.scale} 
           properties={pageProperties}
           onUpdateProperties={handlePagePropertiesUpdate}
+          onConvertText={handleConvertText}
+          canConvertText={Boolean(getConversionText())}
           onApplyPropertiesToAll={handleApplyPropertiesToAll}
           onRestorePropertiesBatch={handleRestorePropertiesBatch}
           onZoom={handlePanelZoom}
@@ -2702,7 +2801,10 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       )}
 
       {/* Right-click Context Menu */}
+      <DocumentationLinkDialog />
+      <DocumentationMarkdownDialog />
       <NotebookContextMenu
+        engine={notebookEngine}
         state={contextMenu}
         onClose={() => setContextMenu(prev => ({ ...prev, isOpen: false }))}
         onCommand={executeCommand}

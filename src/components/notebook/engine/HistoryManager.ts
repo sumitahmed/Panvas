@@ -108,6 +108,11 @@ export class HistoryManager {
     return this.redoStack.length > 0;
   }
 
+  nextCommand(direction: 'undo' | 'redo'): Readonly<HistoryCommand> | undefined {
+    const stack = direction === 'undo' ? this.undoStack : this.redoStack;
+    return stack[stack.length - 1];
+  }
+
   /** Clear all history. */
   clear(): void {
     this.undoStack.length = 0;

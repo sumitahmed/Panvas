@@ -1,89 +1,60 @@
-// ============================================
-// Panvas — Storage Service
-// ============================================
+﻿import { useAuthStore } from '@/stores/authStore';
+import { workspaceRepository } from '@/repositories/WorkspaceRepository';
+import { canvasRepository } from '@/repositories/CanvasRepository';
+import { notebookRepository } from '@/repositories/NotebookRepository';
+import { initializeBrowserStorageDurability } from './browserStorageDurability';
+import type { StorageOverview } from '@/types/storageOverview';
 
-import { useAuthStore } from '@/stores/authStore';
-import { getBrowserStorageDurabilityState, initializeBrowserStorageDurability } from './browserStorageDurability';
-
-export interface StorageMetrics {
-  usedBytes: number;
-  storageLimitBytes: number | null; // null means no limit (e.g. Local Development)
-  plan: string | null;
-  percentageUsed: number | null;
-  status: 'healthy' | 'warning' | 'critical' | 'unlimited';
-}
+const cache = new Map<string, { value?: StorageOverview; pending?: Promise<StorageOverview> }>();
+const CACHE_MS = 30_000;
 
 export class StorageService {
-  /**
-   * Calculates the exact local storage bytes used by the IndexedDB database.
-   * Relies on navigator.storage API, falls back to 0 if unavailable.
-   */
-  static async getUsedBytes(): Promise<number> {
-    const isBrowserMode = typeof window !== 'undefined' && !window.panvas;
-    const result = isBrowserMode
-      ? await initializeBrowserStorageDurability()
-      : getBrowserStorageDurabilityState();
-    return result.estimate.usage ?? 0;
+  /** Lazy, coalesced inspection; explicit Refresh bypasses the settled cache. */
+  static getMetrics(refresh = false): Promise<StorageOverview> {
+    const userId = useAuthStore.getState().user?.id ?? null;
+    const native = typeof window !== 'undefined' ? window.panvas?.storage : undefined;
+    const key = native ? 'desktop' : userId ?? 'local';
+    const entry = cache.get(key) ?? {};
+    if (entry.pending) return entry.pending;
+    if (!refresh && entry.value && Date.now() - entry.value.measuredAt < CACHE_MS) return Promise.resolve(entry.value);
+    const pending = native ? native.getOverview(refresh) : this.inspectBrowser(userId);
+    entry.pending = pending.then(value => { entry.value = value; return value; })
+      .catch(error => { delete entry.value; throw error; }).finally(() => { delete entry.pending; });
+    cache.set(key, entry);
+    return entry.pending;
   }
 
-  /**
-   * Retrieves the user's plan from Supabase app_metadata, and computes
-   * their storage limit and current health status.
-   */
-  static async getMetrics(): Promise<StorageMetrics> {
-    const user = useAuthStore.getState().user;
-    const usedBytes = await this.getUsedBytes();
-
-    // If local mode (no user), return unlimited development state
-    if (!user) {
-      return {
-        usedBytes,
-        storageLimitBytes: null,
-        plan: 'Development',
-        percentageUsed: null,
-        status: 'unlimited',
-      };
-    }
-
-    // Attempt to extract plan and limit from app_metadata
-    const plan = user.app_metadata?.plan || null;
-    const limitBytes = user.app_metadata?.storage_limit_bytes; // e.g. defined by future backend
-
-    if (typeof limitBytes !== 'number') {
-      return {
-        usedBytes,
-        storageLimitBytes: null,
-        plan,
-        percentageUsed: null,
-        status: 'healthy',
-      };
-    }
-
-    const storageLimitBytes = limitBytes;
-    const percentageUsed = (usedBytes / storageLimitBytes) * 100;
-    
-    let status: 'healthy' | 'warning' | 'critical' = 'healthy';
-    if (percentageUsed >= 90) status = 'critical';
-    else if (percentageUsed >= 70) status = 'warning';
-
+  private static async inspectBrowser(userId: string | null): Promise<StorageOverview> {
+    const [workspaces, canvases, notebooks, pages, durability] = await Promise.all([
+      workspaceRepository.getAll(userId), canvasRepository.getAll(userId),
+      notebookRepository.getAll(userId), notebookRepository.getPages(userId),
+      initializeBrowserStorageDurability(),
+    ]);
+    const activeWorkspaceIds = new Set(workspaces.map(item => item.id));
+    const activeNotebooks = notebooks.filter(item => activeWorkspaceIds.has(item.workspaceId));
+    const notebookIds = new Set(activeNotebooks.map(item => item.id));
+    let usedBytes: number | null = null, quotaBytes: number | null = null;
+    try {
+      const estimate = await navigator.storage?.estimate?.();
+      if (typeof estimate?.usage === 'number' && Number.isFinite(estimate.usage) && estimate.usage >= 0) usedBytes = estimate.usage;
+      if (typeof estimate?.quota === 'number' && Number.isFinite(estimate.quota) && estimate.quota > 0) quotaBytes = estimate.quota;
+    } catch { /* Unsupported or rejected estimates are unavailable, never zero. */ }
+    const persistent = ['granted', 'already-persisted'].includes(durability.persistence);
     return {
-      usedBytes,
-      storageLimitBytes,
-      plan,
-      percentageUsed,
-      status,
+      backend: 'browser', counts: {
+        workspaces: workspaces.length,
+        canvases: canvases.filter(item => activeWorkspaceIds.has(item.workspaceId)).length,
+        notebooks: activeNotebooks.length, pages: pages.filter(item => notebookIds.has(item.notebookId)).length,
+      }, countsComplete: true, usedBytes, usageKind: usedBytes === null ? 'unavailable' : 'estimated', quotaBytes,
+      health: persistent && usedBytes !== null ? 'accessible' : 'attention',
+      healthDetail: `Local repositories were read successfully. ${durability.message}`,
+      root: null, measuredAt: Date.now(), issues: [],
     };
   }
 
-  /**
-   * Helper to format bytes into readable strings (e.g. 1.2 MB, 5 GB)
-   */
-  static formatBytes(bytes: number, decimals = 2): string {
-    if (!+bytes) return '0 Bytes';
-    const k = 1024;
-    const dm = decimals < 0 ? 0 : decimals;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+  static formatBytes(bytes: number, decimals = 1): string {
+    if (bytes === 0) return '0 Bytes';
+    const unit = Math.min(4, Math.max(0, Math.floor(Math.log(bytes) / Math.log(1024))));
+    return `${parseFloat((bytes / 1024 ** unit).toFixed(decimals))} ${['Bytes', 'KB', 'MB', 'GB', 'TB'][unit]}`;
   }
 }

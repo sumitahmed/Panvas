@@ -1,4 +1,4 @@
-import { ipcMain, app, dialog, BrowserWindow, type IpcMainInvokeEvent } from 'electron';
+import { ipcMain, app, dialog, clipboard, BrowserWindow, type IpcMainInvokeEvent } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { promises as fsPromises } from 'fs';
@@ -6,7 +6,6 @@ import { generateId } from '../../src/lib/utils/id.js';
 import { writeQueue } from './write-queue.js';
 import { workspaceService } from './WorkspaceService.js';
 import { DEFAULT_PAGE_PROPERTY_SET } from '../../src/types/notebook.js';
-import { validateWorkspaceBackup } from '../../src/services/backup/backupService.js';
 import {
   libraryDisplayName,
   parseExcalidrawLibrary,
@@ -69,13 +68,16 @@ function requireJsonPayload(value: unknown, label: string, maxBytes = MAX_PAYLOA
 
 function requirePagePropertyPatch(value: unknown, label: string): void {
   requirePlainObject(value, label);
-  const allowed = new Set(['paperColor', 'template', 'ruleLineColor', 'orientation', 'pageSize', 'margins', 'templateFields', 'extraHeight', 'extraTop', 'extraRight', 'extraBottom', 'extraLeft']);
+  const allowed = new Set(['paperColor', 'template', 'ruleLineColor', 'orientation', 'pageSize', 'margins', 'templateFields', 'extraHeight', 'extraTop', 'extraRight', 'extraBottom', 'extraLeft', 'layoutMode', 'layoutExtent', 'infiniteWidth']);
   if (Object.keys(value).some(key => !allowed.has(key))) throw new Error(`Invalid ${label}.`);
   for (const [key, entry] of Object.entries(value)) {
     if ((key === 'paperColor' || key === 'ruleLineColor') && (typeof entry !== 'string' || !/^#[0-9a-f]{6,8}$/i.test(entry))) throw new Error(`Invalid ${key}.`);
     if (key === 'template' && (typeof entry !== 'string' || !PAGE_TEMPLATES.has(entry))) throw new Error('Invalid template.');
     if (key === 'orientation' && entry !== 'portrait' && entry !== 'landscape') throw new Error('Invalid orientation.');
-    if (key === 'pageSize' && !['A3', 'A4', 'A5', 'Letter', 'Custom'].includes(String(entry))) throw new Error('Invalid page size.');
+    if (key === 'pageSize' && !['A3', 'A4', 'A5', 'Letter', 'Custom', 'Infinite'].includes(String(entry))) throw new Error('Invalid page size.');
+    if (key === 'layoutMode' && entry !== 'freeform' && entry !== 'document') throw new Error('Invalid writing layout.');
+    if (key === 'layoutExtent' && (typeof entry !== 'number' || !Number.isFinite(entry) || entry < 0)) throw new Error('Invalid layout extent.');
+    if (key === 'infiniteWidth' && (typeof entry !== 'number' || !Number.isFinite(entry) || entry <= 0)) throw new Error('Invalid Infinite width.');
     if (key === 'margins' && !['No Margin', 'Normal', 'Narrow', 'Wide'].includes(String(entry))) throw new Error('Invalid margins.');
     if (['extraHeight', 'extraTop', 'extraRight', 'extraBottom', 'extraLeft'].includes(key)
       && (typeof entry !== 'number' || !Number.isFinite(entry) || entry < 0 || entry > 6000)) throw new Error(`Invalid ${key}.`);
@@ -147,7 +149,7 @@ function requireUpdates(channel: string, updates: unknown): void {
   }
 }
 
-function validateArguments(channel: string, args: unknown[]): void {
+async function validateArguments(channel: string, args: unknown[]): Promise<void> {
   const idArguments: Record<string, number[]> = {
     'workspace:update': [0], 'workspace:reorder': [0],
     'folder:create': [0], 'folder:getAll': [0], 'folder:update': [0, 1], 'folder:delete': [0, 1],
@@ -167,6 +169,7 @@ function validateArguments(channel: string, args: unknown[]): void {
   for (const index of idArguments[channel] ?? []) requireId(args[index], 'identifier');
 
   if (channel === 'workspace:create') requireName(args[0], 'workspace name');
+  if (channel === 'storage:getOverview' && args[0] !== undefined && typeof args[0] !== 'boolean') throw new Error('Invalid storage refresh option.');
   if (channel === 'storage:setRoot' && (typeof args[0] !== 'string' || args[0].length > 4096)) throw new Error('Invalid storage folder.');
   if (channel === 'folder:create' || channel === 'canvasFile:create' || channel === 'notebook:create') {
     requireName(args[1], 'name'); requireOptionalId(args[2], 'parent identifier');
@@ -190,7 +193,9 @@ function validateArguments(channel: string, args: unknown[]): void {
     throw new Error('Invalid trash entity kind.');
   }
   if (['workspace:update', 'folder:update', 'canvasFile:update', 'notebook:update', 'notebookSection:update', 'notebookPage:update'].includes(channel)) requireUpdates(channel, args[2] ?? args[1]);
-  if (['canvas:save', 'notebook:savePage', 'notebook:saveDrawing'].includes(channel)) requireJsonPayload(args[args.length - 1], 'content payload');
+  if (channel === 'notebook:saveDrawing' && typeof args[3] === 'string') {
+    if (Buffer.byteLength(args[3], 'utf8') > MAX_PAYLOAD_BYTES) throw new Error('Invalid content payload.');
+  } else if (['canvas:save', 'notebook:savePage', 'notebook:saveDrawing'].includes(channel)) requireJsonPayload(args[args.length - 1], 'content payload');
   if (channel === 'library:import' || channel === 'library:delete') requireLibraryFileName(args[1]);
   if (channel === 'library:import') {
     if (typeof args[2] !== 'string') throw new Error('Invalid Excalidraw library payload.');
@@ -198,6 +203,7 @@ function validateArguments(channel: string, args: unknown[]): void {
   }
   if (channel === 'backup:import') {
     requireJsonPayload(args[0], 'backup payload', MAX_BACKUP_BYTES);
+    const { validateWorkspaceBackup } = await import('../../src/services/backup/backupService.js');
     validateWorkspaceBackup(args[0]);
   }
   if (channel === 'cloudsync:applyRemoteRecord') {
@@ -292,7 +298,7 @@ function validateArguments(channel: string, args: unknown[]): void {
 function registerHandler(channel: string, handler: (event: IpcMainInvokeEvent, ...args: any[]) => unknown): void {
   ipcMain.handle(channel, async (event, ...args) => {
     requireTrustedSender(event);
-    validateArguments(channel, args);
+    await validateArguments(channel, args);
     return handler(event, ...args);
   });
 }
@@ -414,6 +420,11 @@ async function permanentlyDeleteWorkspaceEntity(workspaceId: string, id: string,
 }
 
 export function registerDomainHandlers() {
+  registerHandler('clipboard:writeText', (_event, text: unknown) => {
+    if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > MAX_PAYLOAD_BYTES) throw new Error('Invalid clipboard text.');
+    clipboard.writeText(text);
+    if (clipboard.readText().replace(/\r\n/g, '\n') !== text.replace(/\r\n/g, '\n')) throw new Error('Clipboard is unavailable.');
+  });
   registerHandler('print:pdf', async (event, payload: ArrayBuffer) => {
     const parent = BrowserWindow.fromWebContents(event.sender) ?? undefined;
     const tempRoot = path.resolve(app.getPath('temp'));
@@ -583,6 +594,8 @@ export function registerDomainHandlers() {
   // assets are created. Existing registered workspace directories remain in
   // the service registry and are never moved by this operation.
   registerHandler('storage:getRoot', async () => workspaceService.getStorageRootInfo());
+  registerHandler('storage:getOverview', async (_event, refresh = false) => workspaceService.getStorageOverview(refresh));
+  registerHandler('app:getInfo', async () => ({ version: app.getVersion(), platform: process.platform, electron: process.versions.electron, chromium: process.versions.chrome }));
 
   registerHandler('storage:setRoot', async (_event, selectedPath: string) => workspaceService.setStorageRoot(selectedPath));
 
@@ -1139,36 +1152,41 @@ export function registerDomainHandlers() {
   });
 
   registerHandler('notebook:saveDrawing', async (event, workspaceId: string, notebookId: string, pageId: string, drawingData: any) => {
+    const decoded = typeof drawingData === 'string' ? JSON.parse(drawingData) : drawingData;
+    requireJsonPayload(decoded, 'drawing payload');
     const dir = workspaceService.getWorkspaceDirById(workspaceId);
     requireWorkspacePage(await workspaceService.readWorkspaceJson(dir), notebookId, pageId);
     const pagesDir = path.join(dir, 'Notebooks', notebookId, 'pages');
     await fsPromises.mkdir(pagesDir, { recursive: true });
 
     const drawingPath = path.join(pagesDir, `${pageId}.drawing.json`);
-    await writeQueue.enqueue(drawingPath, JSON.stringify(drawingData, null, 2));
+    await writeQueue.enqueue(drawingPath, JSON.stringify(decoded, null, 2));
   });
 
-  registerHandler('notebook:loadDrawing', async (event, workspaceId: string, notebookId: string, pageId: string) => {
+  registerHandler('notebook:loadDrawing', async (event, workspaceId: string, notebookId: string, pageId: string, asJson = false) => {
+    if (typeof asJson !== 'boolean') throw new Error('Invalid drawing transport.');
     const dir = workspaceService.getWorkspaceDirById(workspaceId);
     requireWorkspacePage(await workspaceService.readWorkspaceJson(dir), notebookId, pageId);
     const drawingPath = path.join(dir, 'Notebooks', notebookId, 'pages', `${pageId}.drawing.json`);
     if (fs.existsSync(drawingPath)) {
       const content = await fsPromises.readFile(drawingPath, 'utf8');
-      return JSON.parse(content);
+      return asJson ? content : JSON.parse(content);
     }
     return null;
   });
 
   // ---- BACKUP / RESTORE ----
   registerHandler('backup:export', async (event, workspaceId: string) => {
+    const { serializeWorkspaceBackup } = await import('../../src/services/backup/backupService.js');
     const backup = await workspaceService.exportWorkspaceBackup(workspaceId);
+    const serialized = serializeWorkspaceBackup(backup);
     const win = BrowserWindow.fromWebContents(event.sender);
     const filters = [{ name: 'Panvas Workspace Backup (*.panvas-backup.json, *.json)', extensions: ['panvas-backup.json', 'json', 'panvas-backup'] }];
     const result = win
       ? await dialog.showSaveDialog(win, { defaultPath: `${backup.header.workspaceName}.panvas-backup.json`, filters })
       : await dialog.showSaveDialog({ defaultPath: `${backup.header.workspaceName}.panvas-backup.json`, filters });
     if (result.canceled || !result.filePath) return { backup, canceled: true };
-    await writeQueue.enqueue(result.filePath, JSON.stringify(backup, null, 2));
+    await writeQueue.enqueue(result.filePath, serialized);
     return { backup, savedPath: result.filePath };
   });
 
@@ -1193,7 +1211,8 @@ export function registerDomainHandlers() {
       return await workspaceService.importWorkspaceBackup(parsed);
     } catch (error) {
       console.warn('[backup:importDialog] Backup validation error:', error);
-      throw new Error('This file is not a valid Panvas workspace backup.');
+      const { describeBackupError } = await import('../../src/services/backup/backupService.js');
+      throw new Error(describeBackupError(error));
     }
   });
 
@@ -1268,10 +1287,10 @@ export function registerDomainHandlers() {
 
   registerHandler('binary:getPdf', async (event, id: string) => {
     await workspaceService.ensureBaseDir();
-    const dir = workspaceService.getPdfStoreDir();
     try {
-      const meta = JSON.parse(await fsPromises.readFile(path.join(dir, `${id}.meta.json`), 'utf8'));
-      const bytes = await fsPromises.readFile(path.join(dir, `${id}.bin`));
+      const meta = await workspaceService.readBinaryAsset('pdf', id);
+      if (!meta) return null;
+      const bytes = meta.data;
       const data = new ArrayBuffer(bytes.byteLength);
       new Uint8Array(data).set(bytes);
       return { id, fileName: String(meta.fileName ?? 'document.pdf'), createdAt: Number.isFinite(meta.createdAt) ? Number(meta.createdAt) : 0, data };
@@ -1292,10 +1311,10 @@ export function registerDomainHandlers() {
 
   registerHandler('binary:getImage', async (event, id: string) => {
     await workspaceService.ensureBaseDir();
-    const dir = workspaceService.getImageStoreDir();
     try {
-      const meta = JSON.parse(await fsPromises.readFile(path.join(dir, `${id}.meta.json`), 'utf8'));
-      const bytes = await fsPromises.readFile(path.join(dir, `${id}.bin`));
+      const meta = await workspaceService.readBinaryAsset('image', id);
+      if (!meta) return null;
+      const bytes = meta.data;
       const data = new ArrayBuffer(bytes.byteLength);
       new Uint8Array(data).set(bytes);
       return { id, fileName: String(meta.fileName ?? 'image'), mimeType: String(meta.mimeType ?? 'image/png'), createdAt: Number.isFinite(meta.createdAt) ? Number(meta.createdAt) : 0, data };
@@ -1316,10 +1335,10 @@ export function registerDomainHandlers() {
 
   registerHandler('binary:getAudio', async (event, id: string) => {
     await workspaceService.ensureBaseDir();
-    const dir = workspaceService.getAudioStoreDir();
     try {
-      const meta = JSON.parse(await fsPromises.readFile(path.join(dir, `${id}.meta.json`), 'utf8'));
-      const bytes = await fsPromises.readFile(path.join(dir, `${id}.bin`));
+      const meta = await workspaceService.readBinaryAsset('audio', id);
+      if (!meta) return null;
+      const bytes = meta.data;
       const data = new ArrayBuffer(bytes.byteLength);
       new Uint8Array(data).set(bytes);
       return { id, fileName: String(meta.fileName ?? 'voice-note.webm'), mimeType: String(meta.mimeType ?? 'audio/webm'), createdAt: Number.isFinite(meta.createdAt) ? Number(meta.createdAt) : 0, data };
@@ -1330,11 +1349,10 @@ export function registerDomainHandlers() {
 
   registerHandler('binary:deleteAudio', async (event, id: string) => {
     await workspaceService.ensureBaseDir();
-    const dir = workspaceService.getAudioStoreDir();
-    await Promise.all([
+    await Promise.all((await workspaceService.getBinaryReadDirectories('audio')).flatMap(dir => [
       fsPromises.rm(path.join(dir, `${id}.bin`), { force: true }),
       fsPromises.rm(path.join(dir, `${id}.meta.json`), { force: true }),
-    ]);
+    ]));
     return true;
   });
 

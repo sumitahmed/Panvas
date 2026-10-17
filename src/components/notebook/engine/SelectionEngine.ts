@@ -125,7 +125,7 @@ export class SelectionEngine {
   selectElement(id: string, type: 'stroke' | 'shape' | 'text' | 'image', multi = false): void {
     const source = type === 'stroke' ? this.drawingEngine.getStrokes() : type === 'shape' ? this.shapeManager.getShapes() : type === 'text' ? this.textManager.getTexts() : this.imageManager.getImages();
     const object = source.find(item => item.id === id);
-    if (!object || !this.layerManager.isEditable(object.layerId)) return;
+    if (!object || type === 'text' && 'metadata' in object && object.metadata?.documentRole === 'body' || !this.layerManager.isEditable(object.layerId)) return;
     if (!multi) {
       this.clearSelection();
     }
@@ -210,6 +210,7 @@ export class SelectionEngine {
     const shapesToRestore: any[] = [];
     const imagesToRestore: any[] = [];
     const textsToRestore: TextObject[] = [];
+    const textPositions = new Map(this.textManager.getTexts().map((text, index) => [text.id, index]));
 
     this.historyManager.push({
       description: 'Delete selection',
@@ -246,7 +247,9 @@ export class SelectionEngine {
         for (const s of strokesToRestore) this.drawingEngine.addStroke(s);
         for (const s of shapesToRestore) this.shapeManager.addShape(s);
         for (const img of imagesToRestore) this.imageManager.addImage(img);
-        for (const text of textsToRestore) this.textManager.addText(text);
+        const texts = [...this.textManager.getTexts()];
+        for (const text of textsToRestore) texts.splice(textPositions.get(text.id) ?? texts.length, 0, text);
+        this.textManager.setTexts(texts);
         this.selectedElements = [...elements];
         this.selectedIds = new Set(elements.map(e => e.id));
         this.notifySelectionChange();
@@ -646,7 +649,7 @@ export class SelectionEngine {
     for (const layer of [...this.layerManager.getLayers()].reverse()) {
       if (!layer.visible || layer.locked) continue;
       const onLayer = (item: { layerId?: string }) => (item.layerId ?? 'layer-default') === layer.id;
-      const text = [...this.textManager.getTexts()].reverse().find(item => onLayer(item) && contains(item));
+      const text = [...this.textManager.getTexts()].reverse().find(item => item.metadata?.documentRole !== 'body' && onLayer(item) && contains(item));
       if (text) return { type: 'text', id: text.id };
       const shape = [...this.shapeManager.getShapes()].reverse().find(item => onLayer(item) && (shapeHits.has(item.id) || (item.shapeType !== 'line' && item.shapeType !== 'arrow' && contains(item))));
       if (shape) return { type: 'shape', id: shape.id };
@@ -747,7 +750,7 @@ export class SelectionEngine {
       this.selectedElements.push({ type: 'shape', id: sh.id });
     }
     for (const t of this.textManager.getTexts()) {
-      if (!this.layerManager.isEditable(t.layerId)) continue;
+      if (t.metadata?.documentRole === 'body' || !this.layerManager.isEditable(t.layerId)) continue;
       this.selectedIds.add(t.id);
       this.selectedElements.push({ type: 'text', id: t.id });
     }
@@ -794,7 +797,7 @@ export class SelectionEngine {
 
     this.drawingEngine.getStrokes().forEach(stroke => consider({ type: 'stroke', id: stroke.id }, stroke.layerId));
     this.shapeManager.getShapes().forEach(shape => consider({ type: 'shape', id: shape.id }, shape.layerId));
-    this.textManager.getTexts().forEach(text => consider({ type: 'text', id: text.id }, text.layerId));
+    this.textManager.getTexts().filter(text => text.metadata?.documentRole !== 'body').forEach(text => consider({ type: 'text', id: text.id }, text.layerId));
     this.imageManager.getImages().forEach(image => consider({ type: 'image', id: image.id }, image.layerId));
 
     if (enclosed.length === 0) return 0;

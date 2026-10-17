@@ -2,6 +2,8 @@
 
 Follow [release readiness](docs/RELEASE_READINESS.md) for source review, test gates, Windows packaging, checksums and GitHub publication.
 
+**The current release-candidate task stops before commit, push, tag, upload or deployment.** Finish local verification and wait for explicit owner approval. The publication steps below apply only after that approval. Docker/local operation is documented in [DOCKER.md](docs/DOCKER.md); it does not deploy anything publicly.
+
 - Verify the repository is `https://github.com/sumitahmed/Panvas.git` and the branch is `main`.
 - Review each staged file explicitly. Keep credentials, private notes, personal paths, workspace data and generated output out of Git and packages.
 - Build the installer from a clean release-source commit. The annotated tag must identify that exact commit.

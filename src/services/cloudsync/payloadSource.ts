@@ -154,6 +154,16 @@ function rememberAsset(target: Map<string, AssetReference>, reference: AssetRefe
 function rememberDrawingAssets(target: Map<string, AssetReference>, drawing: any, ownerId: string): void {
   for (const object of Array.isArray(drawing?.objects) ? drawing.objects : []) {
     if (object?.type === 'image' && typeof object.fileId === 'string') rememberAsset(target, { id: object.fileId, ownerId, kind: 'image' });
+    if (object?.type === 'text') {
+      const pending = [object.content];
+      while (pending.length) {
+        const node = pending.pop();
+        if (!node || typeof node !== 'object') continue;
+        if ((node.type === 'image' || node.type === 'inlineImage') && typeof node.attrs?.fileId === 'string'
+          && /^[a-zA-Z0-9_-]{1,160}$/.test(node.attrs.fileId)) rememberAsset(target, { id: node.attrs.fileId, ownerId, kind: 'image' });
+        if (Array.isArray(node.content)) for (const child of node.content) pending.push(child);
+      }
+    }
   }
   for (const note of Array.isArray(drawing?.audioNotes) ? drawing.audioNotes : []) {
     if (typeof note?.fileId === 'string') rememberAsset(target, { id: note.fileId, ownerId, kind: 'audio', fileName: note.fileName, mimeType: note.mimeType, createdAt: note.createdAt });

@@ -1,0 +1,103 @@
+name: Prepare release (manual)
+# No tag-push publication. Building artifacts is the default action.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing reviewed source tag (created only after owner approval)
+        required: true
+        type: string
+      publish:
+        description: Owner has manually tested and explicitly approved PUBLIC publication
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      VITE_ENABLE_CLOUD_SYNC: ${{ vars.VITE_ENABLE_CLOUD_SYNC || 'false' }}
+      VITE_PANVAS_SYNC_V2: ${{ vars.VITE_PANVAS_SYNC_V2 || 'true' }}
+      VITE_PANVAS_GOOGLE_WEB_CLIENT_ID: ${{ vars.VITE_PANVAS_GOOGLE_WEB_CLIENT_ID }}
+      VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+      VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+      PANVAS_GOOGLE_CLIENT_ID: ${{ secrets.PANVAS_GOOGLE_CLIENT_ID }}
+      PANVAS_GOOGLE_CLIENT_SECRET: ${{ secrets.PANVAS_GOOGLE_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.21.0
+          cache: npm
+      - name: Verify exact version tag
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          if ($env:RELEASE_TAG -cne "v$version") { throw 'Tag must exactly match package version.' }
+          git describe --tags --exact-match
+          if ($LASTEXITCODE) { throw 'Source must be tagged.' }
+      - run: npm ci
+      - name: Require configured desktop OAuth before publishing a sync-enabled build
+        if: inputs.publish
+        shell: pwsh
+        run: |
+          if ($env:VITE_PANVAS_SYNC_V2 -eq 'true' -and
+              ([string]::IsNullOrWhiteSpace($env:PANVAS_GOOGLE_CLIENT_ID) -or
+               [string]::IsNullOrWhiteSpace($env:PANVAS_GOOGLE_CLIENT_SECRET))) {
+            throw 'Configure the existing Desktop OAuth client through Actions secrets before publication.'
+          }
+      - run: npm run package:win -- --portable
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      - run: npm test
+      - run: npm run test:release-units
+      - run: npm run check:release
+      - run: node scripts/audit-package.mjs --public-desktop-oauth
+      - run: npm audit --omit=dev --audit-level=moderate
+      - run: npm run build:web
+      - run: npm run check:release:web
+      - run: node scripts/archive-web.mjs
+      - run: npm run checksum
+      - shell: pwsh
+        run: |
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          Copy-Item "docs/RELEASE_NOTES_v$version.md" release/RELEASE_NOTES.md
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-candidate
+          path: |
+            release/Panvas-*.exe
+            release/Panvas-*-Web.zip
+            release/SHA256SUMS.txt
+            release/RELEASE_NOTES.md
+          retention-days: 30
+  publish:
+    if: inputs.publish
+    needs: build
+    runs-on: ubuntu-latest
+    # Configure required reviewers for this environment before using publication.
+    environment: public-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-candidate
+          path: release
+      - name: Create a new release; never replace a tag or existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          extra=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then extra+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" --verify-tag --title "Panvas $RELEASE_TAG" --notes-file release/RELEASE_NOTES.md "${extra[@]}" release/Panvas-*.exe release/Panvas-*-Web.zip release/SHA256SUMS.txt

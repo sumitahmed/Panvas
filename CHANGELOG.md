@@ -2,6 +2,28 @@
 
 All notable Panvas changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.1.8] - 2026-10-17
+
+Documentation editor, notebook performance and release infrastructure updates.
+
+### Added
+
+- Technical document flow with automatic A4 continuation, math, tables, code controls and persistent text-highlighter gestures.
+- Rolling six-color highlight palette, portable media backups and expanded Chromium/Electron regression coverage.
+- Docker production/development web workflows, CI build/package checks and a manual future publication workflow.
+
+### Fixed
+
+- Formatting selection/background normalization and rich-document PDF rendering from the current stabilization work.
+- Shared desktop media remains readable from previous roots after changing the storage folder; no relocation is performed.
+- Settings counts/provider/version reporting, populated-page rendering costs and drawing serialization paths.
+- Stale native output cleanup and package/bundle auditing, including imported Electron implementation chunks.
+- Packaged desktop startup ignores inherited development-server URLs instead of redirecting to a development host.
+
+### Known limitations
+
+- Windows x64 binaries are unsigned. Live provider acceptance and isolated installer behavior are reported separately from automated checks. See [release notes](docs/RELEASE_NOTES_v0.1.8.md).
+
 ## [0.1.1] - 2026-09-16
 
 Production hotfix restoring Ink mode aesthetic fidelity and adding compact navigation page and section management.

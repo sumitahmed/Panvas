@@ -1,0 +1,34 @@
+# Allowlist the build context: no local credentials, workspaces or QA recordings.
+**
+!package.json
+!package-lock.json
+!index.html
+!tsconfig.json
+!tsconfig.electron.json
+!vite.config.ts
+!postcss.config.js
+!tailwind.config.ts
+!src/
+!src/**
+!electron/
+!electron/**
+!public/
+!public/**
+!tests/
+!tests/**
+!scripts/
+!scripts/**
+!docker/
+!docker/**
+!Dockerfile
+!LICENSE
+!THIRD_PARTY_NOTICES.md
+src/Background Images/
+tests/screenshots/
+**/*.log
+**/.env
+**/.env.*
+**/*.key
+**/*.pem
+**/*.p12
+**/*.pfx

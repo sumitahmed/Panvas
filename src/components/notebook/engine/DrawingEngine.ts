@@ -47,6 +47,7 @@ export class DrawingEngine {
   private spareWetInkTimer: ReturnType<typeof setTimeout> | null = null;
   private liveFrame: number | null = null;
   private pendingInk: Stroke | null = null;
+  private lastLiveInk: Stroke | null = null;
   private liveTrace: HandwritingTrace | null = null;
   private frameQueuedAt = 0;
   private lastFrameAt = 0;
@@ -135,6 +136,7 @@ export class DrawingEngine {
     this.ctx = null;
     this.canvasCssWidth = 0;
     this.canvasCssHeight = 0;
+    this.pencilSurface = undefined;
     this.endLiveStroke();
     this.releaseSpareWetInk();
   }
@@ -157,9 +159,22 @@ export class DrawingEngine {
   }
 
   /** Set strokes (from deserialization). Redraws. */
-  setStrokes(strokes: Stroke[]): void {
+  setStrokes(strokes: Stroke[], pathSource?: DrawingEngine, repaint = true): void {
+    // Snapshot cloning deliberately detaches mutable scene data. Retain only
+    // validated geometry across those clones, bounded to the incoming page.
+    this.retainStrokePaths(this);
+    if (pathSource) this.retainStrokePaths(pathSource);
+    const ids = new Set(strokes.map(stroke => stroke.id));
+    for (const id of this.retainedInkPaths.keys()) if (!ids.has(id)) this.retainedInkPaths.delete(id);
     this.strokes = strokes;
-    this.redraw();
+    if (repaint) this.redraw();
+  }
+
+  retainStrokePaths(source: DrawingEngine): void {
+    for (const stroke of source.strokes) {
+      const path = source.inkPaths.get(stroke) ?? source.retainedInkPaths.get(stroke.id);
+      if (path) this.retainedInkPaths.set(stroke.id, path);
+    }
   }
 
   getLayerManager(): LayerManager { return this.layerManager; }
@@ -191,6 +206,7 @@ export class DrawingEngine {
     const index = this.strokes.findIndex(s => s.id === id);
     if (index === -1) return undefined;
     const [removed] = this.strokes.splice(index, 1);
+    this.retainedInkPaths.delete(id);
     return removed;
   }
 
@@ -199,6 +215,7 @@ export class DrawingEngine {
     const removed: Stroke[] = [];
     this.strokes = this.strokes.filter(s => {
       if (ids.has(s.id)) {
+        this.retainedInkPaths.delete(s.id);
         removed.push(s);
         return false;
       }
@@ -211,6 +228,7 @@ export class DrawingEngine {
   clearStrokes(): Stroke[] {
     const removed = this.strokes;
     this.strokes = [];
+    this.retainedInkPaths.clear();
     return removed;
   }
 
@@ -267,6 +285,8 @@ export class DrawingEngine {
       if (layerCtx) { ctx.save(); this.viewport.applyTransform(ctx); }
       this.imageManager.renderImages(ctx, layer.id);
       for (const stroke of this.strokes) {
+        const windowBounds = this.viewport.getRenderWindowBounds();
+        if (windowBounds && !boundsOverlap(windowBounds, eraseBounds(stroke))) continue;
         if (cullBounds && boundsForStroke && !boundsOverlap(cullBounds, boundsForStroke(stroke))) continue;
         const strokeLayerId = stroke.layerId ?? DEFAULT_PAGE_LAYER_ID;
         if (strokeLayerId === layer.id) this.renderStroke(ctx, stroke);
@@ -330,27 +350,47 @@ export class DrawingEngine {
   private pencilSurface?: HTMLCanvasElement;
   // Geometry-only cache. Validate samples as selection tools can edit points in
   // place; WeakMap ownership lets replaced/deleted strokes be collected.
-  private inkPaths = new WeakMap<Stroke, { key: string; samples: number[]; path: Path2D }>();
-  private inkPath(stroke: Stroke): Path2D | null {
+  private inkPaths = new WeakMap<Stroke, { key: string; samples: number[]; path: Path2D; x: number; y: number }>();
+  private retainedInkPaths = new Map<string, { key: string; samples: number[]; path: Path2D; x: number; y: number }>();
+  private inkPath(stroke: Stroke): { path: Path2D; x: number; y: number } | null {
     if (stroke.id === '__live__' || typeof Path2D === 'undefined') return null;
     const key = `${stroke.centerline}/${stroke.tool}/${stroke.inkFamily}/${stroke.pattern}/${stroke.thickness}`;
-    const cached = this.inkPaths.get(stroke);
+    const cached = this.inkPaths.get(stroke) ?? this.retainedInkPaths.get(stroke.id);
     if (cached?.key === key && cached.samples.length === stroke.points.length * 4
       && stroke.points.every((p,i) => cached.samples[i*4] === p.x && cached.samples[i*4+1] === p.y
-        && cached.samples[i*4+2] === p.pressure && cached.samples[i*4+3] === p.t)) return cached.path;
+        && cached.samples[i*4+2] === p.pressure && cached.samples[i*4+3] === p.t)) {
+      this.inkPaths.set(stroke, cached);
+      return cached;
+    }
+    // Path2D retains large coordinates with insufficient precision for narrow
+    // pen caps, especially when intersecting a damage clip. Keep distant paths
+    // local to their first sample; the existing viewport applies their origin.
+    // Ordinary notebook paths retain their exact established rendering.
+    const x = Math.abs(stroke.points[0].x) >= 2 ** 20 ? Math.trunc(stroke.points[0].x) : 0;
+    const y = Math.abs(stroke.points[0].y) >= 2 ** 20 ? Math.trunc(stroke.points[0].y) : 0;
     const path = new Path2D();
     if (stroke.centerline === 'polyline' && stroke.tool === 'pen' && (!stroke.pattern || stroke.pattern === 'solid')) {
       const geometry = new PenGeometry();
-      geometry.update(stroke.points);
-      geometry.trace(path, stroke);
+      geometry.update(x || y ? stroke.points.map(point => ({ ...point, x: point.x - x, y: point.y - y })) : stroke.points, stroke.inkFamily === 'brush');
+      geometry.trace(path, stroke, 0, stroke.points.length, false);
     } else {
       for (const polygon of buildInkFamilyGeometry(stroke)) {
-        polygon.forEach((p,i) => i ? path.lineTo(p.x,p.y) : path.moveTo(p.x,p.y));
+        polygon.forEach((p,i) => i ? path.lineTo(p.x - x,p.y - y) : path.moveTo(p.x - x,p.y - y));
         path.closePath();
       }
     }
-    this.inkPaths.set(stroke, { key, path, samples: stroke.points.flatMap(p => [p.x,p.y,p.pressure,p.t]) });
-    return path;
+    this.inkPaths.set(stroke, { key, path, x, y, samples: stroke.points.flatMap(p => [p.x,p.y,p.pressure,p.t]) });
+    return { path, x, y };
+  }
+  private fillInkPath(ctx: CanvasRenderingContext2D, path: { path: Path2D; x: number; y: number }): void {
+    if (path.x || path.y) {
+      // Compose the cancelling origins in double precision before sending the
+      // small final matrix to the canvas rasterizer.
+      const transform = ctx.getTransform();
+      transform.translateSelf(path.x, path.y);
+      ctx.setTransform(transform);
+    }
+    ctx.fill(path.path);
   }
   private renderDot(
     ctx: CanvasRenderingContext2D,
@@ -406,7 +446,7 @@ export class DrawingEngine {
       ctx.globalCompositeOperation = 'source-over';
       ctx.fillStyle = color;
       const path = this.inkPath(stroke);
-      if (path) ctx.fill(path);
+      if (path) this.fillInkPath(ctx, path);
       else {
         const geometry = new PenGeometry();
         geometry.update(points);
@@ -447,7 +487,7 @@ export class DrawingEngine {
     if (stroke.inkFamily) {
       ctx.fillStyle = color;
       const path = this.inkPath(stroke);
-      if (path) { ctx.fill(path); ctx.restore(); return; }
+      if (path) { this.fillInkPath(ctx, path); ctx.restore(); return; }
       ctx.beginPath();
       for (const polygon of buildInkFamilyGeometry(stroke)) {
         polygon.forEach((point, i) => i === 0 ? ctx.moveTo(point.x, point.y) : ctx.lineTo(point.x, point.y));
@@ -728,6 +768,7 @@ export class DrawingEngine {
     if (this.liveFrame !== null) cancelAnimationFrame(this.liveFrame);
     this.liveFrame = null;
     this.pendingInk = null;
+    this.lastLiveInk = null;
     if (this.wetInk) {
       this.releaseSpareWetInk();
       if (this.wetInk.target.canvas.isConnected) {
@@ -748,12 +789,22 @@ export class DrawingEngine {
     if (!this.ctx || !this.canvas) return;
     this.pendingInk = { id: '__live__', type: 'stroke', points, tool, color, thickness, opacity,
       pattern, inkFamily, centerline: 'polyline', createdAt: 0 };
+    this.lastLiveInk = this.pendingInk;
     if (this.liveFrame !== null) return;
     this.frameQueuedAt = performance.now();
     this.liveFrame = requestAnimationFrame(() => {
       this.liveFrame = null;
       this.flushLiveInk();
     });
+  }
+  /** Rebuild presentation atomically; logical samples and pointer capture stay owned. */
+  rebaseLiveSurface(): void {
+    const stroke = this.lastLiveInk, trace = this.liveTrace;
+    this.endLiveStroke(); this.releaseSpareWetInk(); this.redraw();
+    if (!stroke) return;
+    this.liveTrace = trace;
+    this.renderLiveStroke(stroke.points, stroke.tool, stroke.color, stroke.thickness, stroke.opacity, stroke.pattern, stroke.inkFamily);
+    this.flushLiveInk();
   }
 
   private flushLiveInk(finalizing = false): void {

@@ -35,6 +35,18 @@ The package-specific `test:package-a`, `test:package-b`, and `test:package-c` sc
 
 ## Browser and Electron checks
 
+The current code-block regression drives the real application controls and checks exact code text, computed wrapping/scrolling, clipboard output, persisted JSON, language/undo/redo and reload:
+
+```sh
+npm run build
+npm run build:web -- --outDir=artifacts/production-readiness-20261017/web-build
+node tests/code-block-release-browser.mjs --web-dir=artifacts/production-readiness-20261017/web-build
+node tests/code-block-release-browser.mjs --electron
+node tests/storage-root-assets-browser.mjs
+```
+
+Use `--url=http://localhost:8080` for a running production web container or `--electron --executable=<absolute-unpacked-Panvas.exe>` for an actual packaged executable. These harnesses create disposable profiles/workspace roots and restore the native clipboard. The accelerated `--sustained-only` variant measures a 1000-paragraph document, 480 actual typing transactions, durable checkpoints and 24 notebook switches; it is not an hours-long human writing session. Run performance comparisons without concurrent build load.
+
 Browser harnesses expect a local Vite server and may use a real browser profile. Electron harnesses launch the built app or inspect the main/preload boundary. Do not use a production account, real OAuth token, or private workspace in automated tests. Test fixtures belong under `tests/fixtures/` and should not contain personal data.
 
 ## Writing tests

@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
-const server = await createServer({ mode: 'web', server: { port: 0, open: false } });
+const cacheDirectory = await mkdtemp(path.join(tmpdir(), 'panvas-navigation-cache-'));
+const server = await createServer({ mode: 'web', cacheDir: cacheDirectory, optimizeDeps: { entries: ['tests/fixtures/notebook-navigation.html'] }, server: { port: 0, open: false } });
 await server.listen();
 const browser = await chromium.launch({
   headless: true,

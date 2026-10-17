@@ -15,6 +15,9 @@ export function NotebookLayersControl({ engine, onChange }: { engine: NotebookEn
   const activeLayerId = engine.layers.getActiveLayerId();
   const change = (operation: () => unknown) => {
     operation();
+    // Layer mutations change the persisted scene and invalidate the same
+    // revision-keyed snapshot used by ink/text saves.
+    engine.input.notifyChange();
     onChange?.();
   };
 

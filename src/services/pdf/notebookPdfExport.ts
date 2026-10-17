@@ -17,10 +17,11 @@ import type { DrawingData, NotebookObject, PageProperties, Shape, Stroke, TextOb
 import { DEFAULT_PAGE_LAYER_ID, createDefaultPageLayer } from '../../components/notebook/engine/drawingTypes.ts';
 import type { NotebookCover, NotebookPage, NotebookSection } from '../../types/notebook.ts';
 import { resolveNotebookCover } from '../../lib/notebookCover.ts';
-import { resolvePageNoteSpace } from '../../lib/pageProperties.ts';
+import { resolveBasePageDimensions, resolvePageNoteSpace } from '../../lib/pageProperties.ts';
 import { currentPresentationTheme, presentationColor, presentationData, presentationImage } from '../../lib/themePresentation.ts';
 import type { PanvasTheme } from '../../lib/theme.ts';
 import { marginRuling, MARGIN_RULE_ACCENT } from '../../components/notebook/templates/marginRuling.ts';
+import { documentInsets, positionedContentBottom } from '../../components/notebook/documentFlowGeometry.ts';
 
 export interface NotebookExportImage {
   mimeType: string;
@@ -32,6 +33,8 @@ export interface NotebookPdfPageInput {
   title: string;
   properties: PageProperties;
   drawing: DrawingData;
+  /** Existing annotated-PDF pipeline, loaded lazily in canonical notebook order. */
+  loadImportedPdf?: () => Promise<{ bytes: Uint8Array; exportedObjects: number; unsupportedObjects: number; warnings: string[] }>;
 }
 
 export interface NotebookPdfWarning {
@@ -209,7 +212,7 @@ const LOGICAL_PIXELS = {
 } as const;
 
 export function resolveNotebookPageGeometry(properties: PageProperties): NotebookPageGeometry | null {
-  if (properties.pageSize === 'Custom') return null;
+  if (properties.pageSize === 'Custom' || properties.pageSize === 'Infinite') return null;
   const physical = PHYSICAL_POINTS[properties.pageSize];
   const logical = LOGICAL_PIXELS[properties.pageSize];
   const landscape = properties.orientation === 'landscape';
@@ -397,6 +400,7 @@ export function visibleObjects(data: DrawingData): NotebookObject[] {
   return objects
     .map((object, index) => ({ object, index, layer: order.get(object.layerId ?? DEFAULT_PAGE_LAYER_ID) ?? 0 }))
     .filter(entry => visible.has(entry.object.layerId ?? DEFAULT_PAGE_LAYER_ID))
+    .filter(entry => !(entry.object.type === 'text' && entry.object.metadata?.documentRole === 'body'))
     .sort((a, b) => a.layer - b.layer || ({ image: 0, stroke: 1, shape: 2, text: 3 }[a.object.type] - { image: 0, stroke: 1, shape: 2, text: 3 }[b.object.type]) || a.index - b.index)
     .map(entry => entry.object);
 }
@@ -494,7 +498,7 @@ export async function exportNotebookPdf(input: NotebookPdfExportInput): Promise<
       italic: await pdf.embedFont(StandardFonts.HelveticaOblique), boldItalic: await pdf.embedFont(StandardFonts.HelveticaBoldOblique),
     };
     const firstPage = sections[0]?.pages[0] ?? standalonePages[0];
-    if (input.cover) await drawNotebookCover(pdf, input.cover, firstPage.properties, fonts, result);
+    if (input.cover) await drawNotebookCover(pdf, input.cover, firstPage.properties.pageSize === 'Infinite' ? { ...firstPage.properties, pageSize: 'A4' } : firstPage.properties, fonts, result);
     const imageCache = new Map<string, Awaited<ReturnType<typeof pdf.embedPng>>>();
     const entries: Array<{ source: NotebookPdfPageInput; section?: NotebookPdfSectionInput }> = [];
     for (const section of sections) {
@@ -504,15 +508,37 @@ export async function exportNotebookPdf(input: NotebookPdfExportInput): Promise<
     for (const entry of entries) {
       const source = presentationData(entry.source, theme);
       const section = entry.section;
-      if (section) drawSectionDivider(pdf, section, source.properties, fonts, result);
-      const g = resolveNotebookPageGeometry(source.properties);
+      if (section) drawSectionDivider(pdf, section, source.properties.pageSize === 'Infinite' ? { ...source.properties, pageSize: 'A4' } : source.properties, fonts, result);
+      if (source.loadImportedPdf) {
+        const imported = await source.loadImportedPdf(), original = await PDFDocument.load(imported.bytes);
+        for (const page of await pdf.copyPages(original, original.getPageIndices())) pdf.addPage(page);
+        result.pageCount += original.getPageCount(); result.exportedObjects += imported.exportedObjects; result.unsupportedObjects += imported.unsupportedObjects;
+        imported.warnings.forEach(message => addWarning(result, { code: 'imported-pdf-warning', message, pageId: source.id }));
+        continue;
+      }
+      const continuous = source.properties.pageSize === 'Infinite' || source.properties.layoutMode === 'document';
+      const printProperties: PageProperties = source.properties.pageSize === 'Infinite' ? { ...source.properties, pageSize: 'A4', orientation: 'portrait', extraHeight: 0, extraTop: 0, extraBottom: 0, extraLeft: 0, extraRight: 0 } : source.properties;
+      let g = resolveNotebookPageGeometry(printProperties);
       if (!g) throw new Error(`Page “${source.title}” uses Custom size, but the current page schema stores no custom dimensions.`);
-      const page = pdf.addPage([g.pdfWidth, g.pdfHeight]);
+      if (source.properties.pageSize === 'Infinite') {
+        const width = resolveBasePageDimensions(source.properties).width, notes = resolvePageNoteSpace(source.properties);
+        const totalWidth = width + notes.left + notes.right, scale = g.pdfWidth / totalWidth, logicalHeight = g.pdfHeight / scale;
+        g = { ...g, logicalWidth: totalWidth, logicalHeight, scaleX: scale, scaleY: scale, sourceX: notes.left, sourceY: 0, sourceWidth: width, sourceHeight: logicalHeight };
+      }
+      const body = source.properties.layoutMode === 'document' ? source.drawing.objects?.find((object): object is TextObject => object.type === 'text' && object.metadata?.documentRole === 'body') : undefined;
+      const rich = body ? await import('./richDocumentPdf').then(async renderer => ({ renderer, layout: await renderer.layoutRichDocument(body, printProperties, input.loadImage, g!) })) : null;
+      const stride = continuous ? g.logicalHeight + 32 : 0;
+      const extent = Math.max(rich ? rich.layout.height + documentInsets(printProperties) * 2 : 0, positionedContentBottom(visibleObjects(source.drawing)));
+      const sheetCount = continuous ? Math.max(1, Math.ceil((extent + 32) / stride)) : 1;
+      const sheets: PDFPage[] = [];
+      try {
+      for (let sheet = 0; sheet < sheetCount; sheet++) {
+      const page = pdf.addPage([g.pdfWidth, g.pdfHeight]); sheets.push(page);
       page.drawRectangle({ x: 0, y: 0, width: g.pdfWidth, height: g.pdfHeight, color: color(source.properties.paperColor, '#ffffff') });
-      drawTemplate(page, source.properties, g, result, source.id, theme);
+      drawTemplate(page, printProperties, g, result, source.id, theme);
       const hasNoteSpace = g.sourceX > 0 || g.sourceY > 0 || g.sourceWidth < g.logicalWidth || g.sourceHeight < g.logicalHeight;
       if (hasNoteSpace) page.drawRectangle({ x: g.sourceX * g.scaleX, y: g.pdfHeight - (g.sourceY + g.sourceHeight) * g.scaleY, width: g.sourceWidth * g.scaleX, height: g.sourceHeight * g.scaleY, borderColor: color(source.properties.ruleLineColor, '#c8c3b8'), borderWidth: 0.35, opacity: 0.45 });
-      page.pushOperators(pushGraphicsState(), concatTransformationMatrix(1, 0, 0, 1, g.sourceX * g.scaleX, -g.sourceY * g.scaleY));
+      page.pushOperators(pushGraphicsState(), rectangle(0, 0, g.pdfWidth, g.pdfHeight), clip(), endPath(), concatTransformationMatrix(1, 0, 0, 1, g.sourceX * g.scaleX, (sheet * stride - g.sourceY) * g.scaleY));
       for (const object of visibleObjects(source.drawing)) {
         if (object.type === 'stroke') drawStroke(page, object, g);
         else if (object.type === 'shape') drawShape(page, object, g, result, source.id);
@@ -546,6 +572,16 @@ export async function exportNotebookPdf(input: NotebookPdfExportInput): Promise<
       }
       page.pushOperators(popGraphicsState());
       result.pageCount += 1;
+      }
+      if (rich) {
+        const detail = await rich.renderer.drawRichDocument(pdf, sheets, rich.layout, g);
+        result.exportedObjects += 1;
+        if (detail.rasterGlyphs) {
+          result.approximatedObjects += 1;
+          addWarning(result, { code: 'unicode-glyph-images', message: `${detail.rasterGlyphs} text run(s) outside PDF core fonts were preserved as high-resolution glyph images. Other prose remains selectable.`, pageId: source.id });
+        }
+      }
+      } finally { rich?.layout.dispose(); }
     }
     result.bytes = await pdf.save();
     result.success = true;

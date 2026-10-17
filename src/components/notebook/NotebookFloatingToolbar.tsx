@@ -10,10 +10,15 @@ import {
   PenTool, Pencil, Highlighter, Eraser, MousePointer2, Square, Circle, ArrowRight, Minus, Slash, Type, Hand,
   Undo2, Redo2, X, MoreHorizontal, PenTool as PenToolIcon, ChevronLeft, ChevronRight, Maximize2, Minimize2, PanelLeft, PanelRight,
   Strikethrough, AlignLeft, AlignCenter, AlignRight, AlignJustify, ListOrdered, Palette, PaintBucket, Image as ImageIcon, Ruler, StickyNote, Languages,
-  CircleDot, Crosshair, LassoSelect, ScanLine, Shapes, Spline, Check
+  CircleDot, Crosshair, LassoSelect, ScanLine, Shapes, Spline, Check, Link2
 } from 'lucide-react';
 import { FloatingImageControls } from './FloatingImageControls';
+import { DocumentationControls, DocumentationTabs, type DocumentationSection } from './DocumentationControls';
+import { runDocumentLayoutHistory } from './documentLayoutTransition';
+import { requestDocumentationLink } from './notebookLinkEditing';
 import { TextFontPicker } from './TextFontPicker';
+import { TextColorPalette } from './TextColorPalette';
+import { useTextHighlightMode } from './useTextHighlightMode';
 import { NotebookWorkspaceControls } from './NotebookWorkspaceControls';
 import { applyNotebookTextFont } from './textTypography';
 import type { Editor } from '@tiptap/react';
@@ -30,6 +35,10 @@ import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
 import { useToolState } from './useEngineState';
 import {
   captureFormattingSelection,
+  mapFormattingSelection,
+  formattingColorValue,
+  formattingColorIsMixed,
+  hasLowContrastFormatting,
   isUsableFormattingEditor,
   resolveFormattingEditor,
   runFormattingCommand,
@@ -683,8 +692,8 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
     {
       id: 'history',
       items: [
-        <ToolButton key="undo" icon={<Undo2 size={16} />} active={false} onClick={() => { if (activeTool === 'text' && editor?.isFocused) editor?.chain().focus().undo().run(); else engine.history.undo(); }} tooltip="Undo (Ctrl+Z)" />,
-        <ToolButton key="redo" icon={<Redo2 size={16} />} active={false} onClick={() => { if (activeTool === 'text' && editor?.isFocused) editor?.chain().focus().redo().run(); else engine.history.redo(); }} tooltip="Redo (Ctrl+Y)" />
+        <ToolButton key="undo" icon={<Undo2 size={16} />} active={false} onClick={() => { if (activeTool === 'text' && editor?.isFocused) { if (!editor.chain().focus().undo().run()) runDocumentLayoutHistory(engine, 'undo', editor); } else engine.history.undo(); }} tooltip="Undo (Ctrl+Z)" />,
+        <ToolButton key="redo" icon={<Redo2 size={16} />} active={false} onClick={() => { if (activeTool === 'text' && editor?.isFocused) { if (!editor.chain().focus().redo().run()) runDocumentLayoutHistory(engine, 'redo', editor); } else engine.history.redo(); }} tooltip="Redo (Ctrl+Y)" />
       ]
     },
     {
@@ -803,11 +812,13 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
     activeTool === 'hand' ? 'hand' :
     'shapes';
   const mobileQuickTools = resolveMobileQuickTools(containerWidth);
-  const layout: ReturnType<typeof resolveToolbarLayout> = compactTools
+  const baseLayout: ReturnType<typeof resolveToolbarLayout> = compactTools
     ? { visible: [] as ToolbarGroupId[], overflow: TOOLBAR_GROUP_ORDER.filter(group => group === 'primary' || !mobileQuickTools.includes(group as typeof mobileQuickTools[number])), compact: true }
     : fullscreenToolOnly
     ? resolveFullscreenToolbarLayout(layoutWidth, activeToolGroupId)
     : resolveToolbarLayout(layoutWidth, activeToolGroupId);
+  const ownsTextFormatting = activeTool === 'text' && Boolean(resolveFormattingEditor(editor, engine));
+  const layout = { ...baseLayout, visible: baseLayout.visible.filter(group => group !== 'format' || !ownsTextFormatting), overflow: baseLayout.overflow.filter(group => group !== 'format' || !ownsTextFormatting) };
   const groupById = new Map(toolGroups.map(group => [group.id, group]));
   // Compact tools follow the available width; Hand always stays direct.
   const activeToolInOverflow = layout.overflow.includes(activeToolGroupId)
@@ -1141,6 +1152,12 @@ function FormatMenuTrigger({ editor, engine }: { editor: Editor | null, engine: 
   const commandEditor = showSlashMenu && isUsableFormattingEditor(sessionEditorRef.current)
     ? sessionEditorRef.current
     : resolvedEditor;
+  useEffect(() => {
+    if (!showSlashMenu || !commandEditor) return;
+    const map = ({ transaction }: { transaction: import('@tiptap/pm/state').Transaction }) => { sessionSelectionRef.current = mapFormattingSelection(sessionSelectionRef.current, transaction); };
+    commandEditor.on('transaction', map);
+    return () => { commandEditor.off('transaction', map); };
+  }, [showSlashMenu, commandEditor]);
 
   const beginFormattingSession = () => {
     const targetEditor = resolveFormattingEditor(editor, engine);
@@ -1196,12 +1213,12 @@ function FormatMenuTrigger({ editor, engine }: { editor: Editor | null, engine: 
         <span className="text-xs font-semibold px-1">Aa</span>
       </button>
 
-      <OverlayManager isOpen={showSlashMenu} onClose={closeFormattingMenu} anchorRef={anchorRef} placement="bottom-start">
+      <OverlayManager isOpen={showSlashMenu} onClose={closeFormattingMenu} anchorRef={anchorRef} placement="bottom-start" exclusiveGroup="documentation">
         <div
-          className="w-[260px] rounded-xl bg-panvas-bg-primary border border-panvas-border-strong shadow-2xl overflow-y-auto max-h-[60vh] py-2 max-[599px]:w-[min(17rem,calc(100vw-1.5rem))]"
+          className="w-[288px] rounded-xl bg-panvas-bg-primary border border-panvas-border-strong shadow-2xl overflow-y-auto max-h-[min(400px,calc(100dvh-8rem))] py-2 max-[599px]:w-[min(17rem,calc(100vw-1.5rem))]"
           onMouseDown={(event) => event.stopPropagation()}
         >
-          <TextFormatMenuContent engine={engine} commandEditor={commandEditor} applyTextCommand={applyTextCommand} />
+          <TextFormatMenuContent engine={engine} commandEditor={commandEditor} applyTextCommand={applyTextCommand} onDismiss={closeFormattingMenu} />
         </div>
       </OverlayManager>
     </>
@@ -1214,202 +1231,170 @@ function FormatMenuTrigger({ editor, engine }: { editor: Editor | null, engine: 
  * session command runner, so formatting applies to the live caret or the
  * retained selected range — never the whole object.
  */
-function TextFormatMenuContent({ engine, commandEditor, applyTextCommand }: {
+function TextFormatMenuContent({ engine, commandEditor, applyTextCommand, onDismiss }: {
   engine: NotebookEngine;
   commandEditor: Editor | null;
   applyTextCommand: (command: FormattingCommand) => void;
+  onDismiss: () => void;
 }) {
+  const [section, setSection] = useState<DocumentationSection>('text');
+  const [fontOpen, setFontOpen] = useState(false);
+  const panelId = React.useId();
   return (
     <>
-      <div className="px-3 pb-1 mb-1 border-b border-panvas-border-subtle text-2xs font-semibold text-panvas-text-tertiary uppercase tracking-wider">Style</div>
-      <div className="flex justify-center gap-1 px-2 mb-2">
-        <ToolButton icon={<Bold size={16} />} active={commandEditor?.isActive('bold') ?? false} onClick={() => applyTextCommand(c => c.toggleBold())} tooltip="Bold (Ctrl+B)" />
-        <ToolButton icon={<Italic size={16} />} active={commandEditor?.isActive('italic') ?? false} onClick={() => applyTextCommand(c => c.toggleItalic())} tooltip="Italic (Ctrl+I)" />
-        <ToolButton icon={<Underline size={16} />} active={commandEditor?.isActive('underline') ?? false} onClick={() => applyTextCommand(c => c.toggleUnderline())} tooltip="Underline (Ctrl+U)" />
-        <ToolButton icon={<Strikethrough size={16} />} active={commandEditor?.isActive('strike') ?? false} onClick={() => applyTextCommand(c => c.toggleStrike())} tooltip="Strikethrough" />
-      </div>
+      <DocumentationTabs value={section} onChange={value => { setSection(value); setFontOpen(false); }} panelId={panelId} includeText table={commandEditor?.isActive('table') ?? false} />
+      <div role="tabpanel" id={panelId} aria-labelledby={`${panelId}-${section}`} data-document-editor={commandEditor && !commandEditor.isDestroyed ? commandEditor.view.dom.closest<HTMLElement>('[data-document-body],[data-text-object-id]')?.dataset.documentBody ?? commandEditor.view.dom.closest<HTMLElement>('[data-text-object-id]')?.dataset.textObjectId : undefined}>
+      {section === 'text' ? <>
+      {fontOpen ? <button type="button" className="mx-3 mb-1 min-h-7 text-xs text-panvas-text-secondary hover:text-panvas-text-primary focus-ring" onMouseDown={event => event.preventDefault()} onClick={() => setFontOpen(false)}>Typography</button> : <div className="flex justify-end px-3 mb-1">
+        <ToolButton icon={<Code2 size={16} />} active={commandEditor?.isActive('code') ?? false} onClick={() => applyTextCommand(c => c.toggleCode())} tooltip="Inline code" />
+      </div>}
 
-      <div className="px-3 pb-1 mb-1 mt-2 border-b border-panvas-border-subtle text-2xs font-semibold text-panvas-text-tertiary uppercase tracking-wider">Typography</div>
-      <div className="px-2 mb-2 space-y-2">
-        <div className="flex gap-2">
+      {!fontOpen && <div className="px-3 mb-1 text-2xs font-medium text-panvas-text-secondary">Typography</div>}
+      <div className="px-2 mb-2 grid grid-cols-2 gap-2">
+        <div className="col-span-2 flex gap-2">
           <TextFontPicker
+            presentation="inline" open={fontOpen} onOpenChange={setFontOpen}
             value={commandEditor?.getAttributes('textStyle').fontFamily || engine.texts.getDefaultFontFamily()}
             onChange={font => {
-              if (commandEditor?.isFocused && !commandEditor.state.selection.empty) {
+              if (commandEditor && (!commandEditor.state.selection.empty || commandEditor.view.dom.closest('[data-document-body]'))) {
                 engine.texts.setDefaultFontFamily(font);
                 applyTextCommand(c => c.setFontFamily(font || 'Inter, sans-serif'));
               } else applyNotebookTextFont(engine, font, commandEditor);
             }}
           />
-          <select
-            className="w-20 rounded-md border border-panvas-border-default bg-panvas-bg-primary px-2 py-1 text-xs text-panvas-text-primary"
-            value={commandEditor?.getAttributes('textStyle').fontSize || ''}
-            onChange={e => e.target.value ? applyTextCommand(c => c.setFontSize(e.target.value)) : applyTextCommand(c => c.unsetFontSize())}
-          >
-            <option value="">Size</option>
-            <option value="12px">12px</option>
-            <option value="14px">14px</option>
-            <option value="16px">16px</option>
-            <option value="20px">20px</option>
-            <option value="24px">24px</option>
-            <option value="32px">32px</option>
-          </select>
-        </div>
-        <div className="flex items-center justify-between px-1">
-          <div className="flex items-center gap-2">
-            <Palette size={14} className="text-panvas-text-secondary" />
-            <span className="text-xs text-panvas-text-secondary">Text</span>
-          </div>
-
-          <input
-            type="color"
-            value={commandEditor?.getAttributes('textStyle').color || '#000000'}
-            onMouseDown={(e) => e.preventDefault()}
-            onChange={e => applyTextCommand(c => c.setColor(e.target.value))}
-            className="w-6 h-6 p-0 border border-panvas-border-default rounded cursor-pointer"
-          />
-        </div>
-        <div className="flex items-center justify-between px-1">
-          <div className="flex items-center gap-2">
-            <PaintBucket size={14} className="text-panvas-text-secondary" />
-            <span className="text-xs text-panvas-text-secondary">Highlight</span>
-          </div>
-          <input
-            type="color"
-            value={commandEditor?.getAttributes('highlight').color || '#ffffff'}
-            onMouseDown={(e) => e.preventDefault()}
-            onChange={e => applyTextCommand(c => c.setHighlight({ color: e.target.value }))}
-            className="w-6 h-6 p-0 border border-panvas-border-default rounded cursor-pointer"
-          />
+          {!fontOpen && <input type="number" min="8" max="384" step="1" key={commandEditor?.getAttributes('textStyle').fontSize || 'auto'}
+            aria-label="Font size"
+            className="h-8 w-16 rounded-md border border-panvas-border-default bg-panvas-bg-primary px-2 text-xs text-panvas-text-primary focus-ring"
+            defaultValue={parseFloat(commandEditor?.getAttributes('textStyle').fontSize || '16')}
+            onBlur={event => {
+              const value = event.target.value;
+              if (!value) applyTextCommand(c => c.unsetFontSize());
+              else if (event.target.validity.valid && Number(value) !== parseFloat(commandEditor?.getAttributes('textStyle').fontSize || '16')) applyTextCommand(c => c.setFontSize(`${value}px`));
+            }}
+            onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur(); commandEditor?.view.focus(); } }}
+          />}
         </div>
       </div>
 
-      <div className="px-3 pb-1 mb-1 mt-2 border-b border-panvas-border-subtle text-2xs font-semibold text-panvas-text-tertiary uppercase tracking-wider">Alignment</div>
+      {!fontOpen && <div className="mx-3 mb-2 grid gap-1 text-xs">
+        {hasLowContrastFormatting(commandEditor) && <p role="status" className="px-2 py-1 text-panvas-text-secondary">Low contrast. Clear the highlight or reset the text color for readability.</p>}
+        <button type="button" className="min-h-8 rounded px-2 text-left text-panvas-text-primary hover:bg-panvas-bg-hover focus-ring" onMouseDown={event => event.preventDefault()} onClick={() => applyTextCommand(c => c.unsetColor())}>Reset text color</button>
+        <button type="button" title="Remove inline styling; keep headings, links and block colors" className="min-h-8 rounded px-2 text-left text-panvas-text-primary hover:bg-panvas-bg-hover focus-ring" onMouseDown={event => event.preventDefault()} onClick={() => applyTextCommand(c => c.unsetBold().unsetItalic().unsetUnderline().unsetStrike().unsetCode().unsetColor().unsetHighlight().unsetFontFamily().unsetFontSize())}>Reset text formatting</button>
+      </div>}
+
+      {!fontOpen && <><div className="px-3 mb-1 mt-1 text-2xs font-medium text-panvas-text-secondary">Alignment</div>
       <div className="flex justify-center gap-1 px-2 mb-2">
         <ToolButton icon={<AlignLeft size={16} />} active={commandEditor?.isActive({ textAlign: 'left' }) ?? false} onClick={() => applyTextCommand(c => c.setTextAlign('left'))} tooltip="Align Left" />
         <ToolButton icon={<AlignCenter size={16} />} active={commandEditor?.isActive({ textAlign: 'center' }) ?? false} onClick={() => applyTextCommand(c => c.setTextAlign('center'))} tooltip="Align Center" />
         <ToolButton icon={<AlignRight size={16} />} active={commandEditor?.isActive({ textAlign: 'right' }) ?? false} onClick={() => applyTextCommand(c => c.setTextAlign('right'))} tooltip="Align Right" />
         <ToolButton icon={<AlignJustify size={16} />} active={commandEditor?.isActive({ textAlign: 'justify' }) ?? false} onClick={() => applyTextCommand(c => c.setTextAlign('justify'))} tooltip="Justify" />
-      </div>
+      </div></>}
 
-      <div className="px-3 pb-1 mb-1 mt-2 border-b border-panvas-border-subtle text-2xs font-semibold text-panvas-text-tertiary uppercase tracking-wider">Headings</div>
-      <div className="flex justify-center gap-1 px-2 mb-2">
-        <ToolButton icon={<span className="font-bold">H1</span>} active={commandEditor?.isActive('heading', { level: 1 }) ?? false} onClick={() => applyTextCommand(c => c.toggleHeading({ level: 1 }))} tooltip="Heading 1" />
-        <ToolButton icon={<span className="font-bold">H2</span>} active={commandEditor?.isActive('heading', { level: 2 }) ?? false} onClick={() => applyTextCommand(c => c.toggleHeading({ level: 2 }))} tooltip="Heading 2" />
-        <ToolButton icon={<span className="font-bold">H3</span>} active={commandEditor?.isActive('heading', { level: 3 }) ?? false} onClick={() => applyTextCommand(c => c.toggleHeading({ level: 3 }))} tooltip="Heading 3" />
-      </div>
-
-      <div className="px-3 pb-1 mb-1 mt-2 border-b border-panvas-border-subtle text-2xs font-semibold text-panvas-text-tertiary uppercase tracking-wider">Blocks</div>
-      <div className="flex justify-center gap-1 px-2 mb-2">
-        <ToolButton icon={<List size={16} />} active={commandEditor?.isActive('bulletList') ?? false} onClick={() => applyTextCommand(c => c.toggleBulletList())} tooltip="Bullet List" />
-        <ToolButton icon={<ListOrdered size={16} />} active={commandEditor?.isActive('orderedList') ?? false} onClick={() => applyTextCommand(c => c.toggleOrderedList())} tooltip="Numbered List" />
-        <ToolButton icon={<ListChecks size={16} />} active={commandEditor?.isActive('taskList') ?? false} onClick={() => applyTextCommand(c => c.toggleTaskList())} tooltip="Checklist" />
-        <ToolButton icon={<Quote size={16} />} active={commandEditor?.isActive('blockquote') ?? false} onClick={() => applyTextCommand(c => c.toggleBlockquote())} tooltip="Quote" />
-        <ToolButton icon={<Code2 size={16} />} active={commandEditor?.isActive('codeBlock') ?? false} onClick={() => applyTextCommand(c => c.toggleCodeBlock())} tooltip="Code Block" />
+      </> : section === 'paragraph' ? <div className="px-3 pb-2">
+        <div className="mb-2 text-xs font-medium text-panvas-text-secondary">Headings</div>
+        <div className="mb-3 flex gap-1">
+          <ToolButton icon={<span className="font-bold">H1</span>} active={commandEditor?.isActive('heading', { level: 1 }) ?? false} onClick={() => applyTextCommand(c => c.toggleHeading({ level: 1 }))} tooltip="Heading 1" />
+          <ToolButton icon={<span className="font-bold">H2</span>} active={commandEditor?.isActive('heading', { level: 2 }) ?? false} onClick={() => applyTextCommand(c => c.toggleHeading({ level: 2 }))} tooltip="Heading 2" />
+          <ToolButton icon={<span className="font-bold">H3</span>} active={commandEditor?.isActive('heading', { level: 3 }) ?? false} onClick={() => applyTextCommand(c => c.toggleHeading({ level: 3 }))} tooltip="Heading 3" />
+        </div>
+        <div className="mb-2 text-xs font-medium text-panvas-text-secondary">Lists and blocks</div>
+        <div className="flex gap-1">
+          <ToolButton icon={<List size={16} />} active={commandEditor?.isActive('bulletList') ?? false} onClick={() => applyTextCommand(c => c.toggleBulletList())} tooltip="Bullet List" />
+          <ToolButton icon={<ListOrdered size={16} />} active={commandEditor?.isActive('orderedList') ?? false} onClick={() => applyTextCommand(c => c.toggleOrderedList())} tooltip="Numbered List" />
+          <ToolButton icon={<ListChecks size={16} />} active={commandEditor?.isActive('taskList') ?? false} onClick={() => applyTextCommand(c => c.toggleTaskList())} tooltip="Checklist" />
+          <ToolButton icon={<Quote size={16} />} active={commandEditor?.isActive('blockquote') ?? false} onClick={() => applyTextCommand(c => c.toggleBlockquote())} tooltip="Quote" />
+          <ToolButton icon={<Code2 size={16} />} active={commandEditor?.isActive('codeBlock') ?? false} onClick={() => applyTextCommand(c => c.toggleCodeBlock())} tooltip="Code Block" />
+        </div>
+      </div> : <DocumentationControls editor={commandEditor} section={section} onDismiss={onDismiss} />}
       </div>
     </>
   );
 }
 
 /**
- * Contextual formatting strip for active text editing. It renders only while
- * a usable text editor exists (focused editor or a selected text object) and
- * keeps the primary inline controls — bold, italic, underline, text/highlight
- * color — one tap away; strikethrough and every paragraph control stay in the
- * shared full menu behind the Aa trigger. Buttons hold the pointer with
- * preventDefault so the editor never blurs and no ink is created underneath.
+ * The main toolbar owns this stationary secondary row while Text is active.
+ * Only formatting state follows the editor; Aa and palettes anchor to buttons.
+ * Retain the editor's native selection while their inputs take focus.
  */
-function TextFormattingStrip({ editor, engine, enabled }: {
-  editor: Editor | null;
-  engine: NotebookEngine;
-  enabled: boolean;
-}) {
-  const isMobileViewport = useIsMobileViewport();
+function TextFormattingStrip({ editor, engine, enabled }: { editor: Editor | null; engine: NotebookEngine; enabled: boolean }) {
   const resolvedEditor = resolveFormattingEditor(editor, engine);
-  const [showFullMenu, setShowFullMenu] = useState(false);
+  const textHighlighter = useTextHighlightMode(engine, enabled);
+  const [openMenu, setOpenMenu] = useState<'aa' | 'textStyle' | 'highlight' | null>(null);
   const menuAnchorRef = useRef<HTMLButtonElement>(null);
-  const [, refreshOnTransaction] = useState(0);
-
-  // Marks and caret state change without a React render; follow the editor's
-  // own transactions so the toggle states stay truthful while typing.
+  const textColorRef = useRef<HTMLButtonElement>(null);
+  const highlightRef = useRef<HTMLButtonElement>(null);
+  const sessionSelectionRef = useRef<FormattingSelection | null>(null);
+  const [, refreshOnFormattingChange] = useState(0);
   useEffect(() => {
-    if (!resolvedEditor) return undefined;
-    const update = () => refreshOnTransaction(count => count + 1);
-    resolvedEditor.on('transaction', update);
-    return () => {
-      resolvedEditor.off('transaction', update);
+    if (!resolvedEditor) return;
+    const signature = () => JSON.stringify([
+      ...['bold', 'italic', 'underline', 'strike', 'code', 'link', 'table', 'blockMath', 'inlineMath', 'bulletList', 'orderedList', 'taskList', 'blockquote', 'codeBlock'].map(mark => resolvedEditor.isActive(mark)),
+      ...[1, 2, 3].map(level => resolvedEditor.isActive('heading', { level })),
+      resolvedEditor.getAttributes('textStyle'), resolvedEditor.getAttributes('highlight'),
+      formattingColorIsMixed(resolvedEditor, 'textStyle'), formattingColorIsMixed(resolvedEditor, 'highlight'),
+      ...['left', 'center', 'right', 'justify'].map(textAlign => resolvedEditor.isActive({ textAlign })), resolvedEditor.isEditable,
+    ]);
+    let previous = signature();
+    const update = ({ transaction }: { transaction: import('@tiptap/pm/state').Transaction }) => {
+      sessionSelectionRef.current = mapFormattingSelection(sessionSelectionRef.current, transaction);
+      if (!transaction.docChanged && !transaction.selectionSet && !transaction.storedMarksSet) return;
+      const next = signature();
+      if (next !== previous) { previous = next; refreshOnFormattingChange(value => value + 1); }
     };
+    resolvedEditor.on('transaction', update);
+    return () => { resolvedEditor.off('transaction', update); };
   }, [resolvedEditor]);
-
-  useEffect(() => {
-    if (!enabled) setShowFullMenu(false);
-  }, [enabled]);
-
-  if (!enabled || !resolvedEditor) return null;
-
-  const apply = (command: FormattingCommand) => {
-    runFormattingCommand(resolvedEditor, null, command);
+  useEffect(() => { setOpenMenu(null); sessionSelectionRef.current = null; }, [resolvedEditor, enabled]);
+  // Mount the existing row when Text mode starts, before the first mouse drag.
+  // Mounting it on editor focus moves the paper under the pointer mid-selection.
+  if (!enabled) return null;
+  const canFormat = Boolean(resolvedEditor?.isInitialized && resolvedEditor.isEditable && resolvedEditor.view.dom.isConnected);
+  const active = (mark: string) => canFormat && Boolean(resolvedEditor?.isActive(mark));
+  const restoreFocus = () => { if (resolvedEditor && !resolvedEditor.isDestroyed && resolvedEditor.isEditable) resolvedEditor.view.focus(); };
+  const open = (menu: 'aa' | 'textStyle' | 'highlight') => {
+    if (menu !== 'highlight' && (!canFormat || !resolvedEditor)) return;
+    textHighlighter.disarm();
+    sessionSelectionRef.current = canFormat && resolvedEditor ? captureFormattingSelection(resolvedEditor) : null;
+    setOpenMenu(previous => previous === menu ? null : menu);
   };
-
-  return (
-    <div
-      className="panvas-floating-surface pointer-events-auto absolute left-1/2 top-full mt-2 -translate-x-1/2 flex h-9 max-w-[calc(100vw-1rem)] items-center gap-0.5 px-1.5 max-[599px]:mt-1.5"
-      aria-label="Text formatting"
-    >
-      <ToolButton icon={<Bold size={15} />} active={resolvedEditor.isActive('bold')} onClick={() => apply(c => c.toggleBold())} tooltip="Bold (Ctrl+B)" />
-      <ToolButton icon={<Italic size={15} />} active={resolvedEditor.isActive('italic')} onClick={() => apply(c => c.toggleItalic())} tooltip="Italic (Ctrl+I)" />
-      <ToolButton icon={<Underline size={15} />} active={resolvedEditor.isActive('underline')} onClick={() => apply(c => c.toggleUnderline())} tooltip="Underline (Ctrl+U)" />
-      {!isMobileViewport && (
-        <ToolButton icon={<Strikethrough size={15} />} active={resolvedEditor.isActive('strike')} onClick={() => apply(c => c.toggleStrike())} tooltip="Strikethrough" />
-      )}
-      <Divider />
-      <input
-        type="color"
-        aria-label="Text color"
-        title="Text color"
-        value={resolvedEditor.getAttributes('textStyle').color || '#000000'}
-        onMouseDown={(e) => e.preventDefault()}
-        onChange={e => apply(c => c.setColor(e.target.value))}
-        className="h-6 w-6 shrink-0 cursor-pointer rounded border border-panvas-border-default p-0"
-      />
-      <input
-        type="color"
-        aria-label="Highlight color"
-        title="Highlight color"
-        value={resolvedEditor.getAttributes('highlight').color || '#ffffff'}
-        onMouseDown={(e) => e.preventDefault()}
-        onChange={e => apply(c => c.setHighlight({ color: e.target.value }))}
-        className="h-6 w-6 shrink-0 cursor-pointer rounded border border-panvas-border-default p-0"
-      />
-      <Divider />
-      <button
-        ref={menuAnchorRef}
-        type="button"
-        onMouseDown={(e) => e.preventDefault()}
-        onClick={() => setShowFullMenu(open => !open)}
-        aria-expanded={showFullMenu}
-        aria-haspopup="dialog"
-        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-xs font-semibold transition-colors focus-ring ${showFullMenu ? 'bg-panvas-bg-hover text-panvas-text-primary' : 'text-panvas-text-secondary hover:bg-panvas-bg-hover hover:text-panvas-text-primary'}`}
-        title="More text formatting"
-        aria-label="More text formatting"
-      >
-        Aa
-      </button>
-      <OverlayManager isOpen={showFullMenu} onClose={() => setShowFullMenu(false)} anchorRef={menuAnchorRef} placement="bottom-start">
-        <div
-          role="dialog"
-          aria-label="Text formatting options"
-          className="w-[260px] rounded-xl bg-panvas-bg-primary border border-panvas-border-strong shadow-2xl overflow-y-auto max-h-[60vh] py-2 max-[599px]:w-[min(17rem,calc(100vw-1.5rem))]"
-          onMouseDown={(event) => event.stopPropagation()}
-        >
-          <TextFormatMenuContent engine={engine} commandEditor={resolvedEditor} applyTextCommand={apply} />
-        </div>
-      </OverlayManager>
-    </div>
-  );
+  const apply = (command: FormattingCommand) => {
+    if (!canFormat || !resolvedEditor) return;
+    sessionSelectionRef.current = runFormattingCommand(resolvedEditor, openMenu ? sessionSelectionRef.current : null, command);
+  };
+  const colorButton = 'flex h-9 w-[34px] shrink-0 flex-col items-center justify-center gap-0.5 rounded-lg text-panvas-text-secondary hover:bg-panvas-bg-hover focus-ring';
+  const textColor = canFormat ? resolvedEditor?.getAttributes('textStyle').color : undefined;
+  const highlight = canFormat ? resolvedEditor?.getAttributes('highlight').color : undefined;
+  const hasTextRange = canFormat && resolvedEditor && !resolvedEditor.state.selection.empty;
+  const paletteHighlight = hasTextRange ? highlight : textHighlighter.color;
+  const displayedHighlight = textHighlighter.armed ? textHighlighter.color : active('highlight') ? formattingColorValue(highlight, '#fff4b8') : null;
+  const chooseHighlight = (color: string | null) => {
+    // Choosing a color at a cursor arms the gesture, without setting a typing mark.
+    const range = sessionSelectionRef.current;
+    if (range && range.from !== range.to) apply(c => color === null ? c.unsetHighlight() : c.setHighlight({ color }));
+    textHighlighter.arm(color);
+    restoreFocus();
+  };
+  return <div role="toolbar" aria-label="Text formatting" className="panvas-text-formatting-strip panvas-floating-surface pointer-events-auto flex max-w-full flex-wrap items-center justify-center gap-0.5 px-1.5 py-0.5">
+    <ToolButton disabled={!canFormat} icon={<Bold size={15} />} active={active('bold')} onClick={() => apply(c => c.toggleBold())} tooltip="Bold (Ctrl+B)" />
+    <ToolButton disabled={!canFormat} icon={<Italic size={15} />} active={active('italic')} onClick={() => apply(c => c.toggleItalic())} tooltip="Italic (Ctrl+I)" />
+    <ToolButton disabled={!canFormat} icon={<Underline size={15} />} active={active('underline')} onClick={() => apply(c => c.toggleUnderline())} tooltip="Underline (Ctrl+U)" />
+    <ToolButton disabled={!canFormat} icon={<Strikethrough size={15} />} active={active('strike')} onClick={() => apply(c => c.toggleStrike())} tooltip="Strikethrough" />
+    <ToolButton disabled={!canFormat} icon={<Link2 size={15} />} active={active('link')} onClick={() => { if (canFormat && resolvedEditor) requestDocumentationLink(resolvedEditor); }} tooltip="Edit link (Ctrl+K)" />
+    <button disabled={!canFormat} ref={textColorRef} type="button" aria-label="Text color" title={formattingColorIsMixed(resolvedEditor, 'textStyle') ? 'Text color (mixed)' : 'Text color'} aria-haspopup="menu" aria-expanded={openMenu === 'textStyle'} className={colorButton} onMouseDown={event => event.preventDefault()} onClick={() => open('textStyle')}>
+      <Type size={15} /><span aria-hidden="true" className="h-0.5 w-4 rounded" style={{ backgroundColor: formattingColorValue(textColor, '#20242a') }} />
+    </button>
+    <button ref={highlightRef} type="button" aria-label="Highlight color" aria-pressed={textHighlighter.armed} title={textHighlighter.armed ? `Text highlighter active — drag to ${textHighlighter.color === null ? 'remove highlights' : 'highlight'}; click or Esc to exit` : formattingColorIsMixed(resolvedEditor, 'highlight') ? 'Highlight color (mixed)' : 'Highlight color'} aria-haspopup="menu" aria-expanded={openMenu === 'highlight'} className={`${colorButton} ${textHighlighter.armed ? 'bg-panvas-accent-blue/10 text-panvas-accent-blue font-bold shadow-sm ring-1 ring-panvas-accent-blue/50' : ''}`} onMouseDown={event => event.preventDefault()} onClick={() => open('highlight')}>
+      <Highlighter size={15} /><span aria-hidden="true" className={`h-1 w-4 rounded ${displayedHighlight === null ? 'panvas-transparent-swatch' : ''}`} style={displayedHighlight === null ? undefined : { backgroundColor: displayedHighlight }} />
+    </button>
+    <button disabled={!canFormat} ref={menuAnchorRef} type="button" aria-label="More text formatting" title="More text formatting" aria-haspopup="dialog" aria-expanded={openMenu === 'aa'} className={`${colorButton} text-xs font-semibold`} onMouseDown={event => event.preventDefault()} onClick={() => open('aa')}>Aa</button>
+    {(openMenu === 'highlight' || canFormat && resolvedEditor && openMenu === 'textStyle') && <TextColorPalette kind={openMenu} anchorRef={openMenu === 'highlight' ? highlightRef : textColorRef} value={openMenu === 'highlight' ? paletteHighlight ?? undefined : textColor} mixed={formattingColorIsMixed(resolvedEditor, openMenu)} noneSelected={!formattingColorIsMixed(resolvedEditor, openMenu) && (openMenu === 'highlight' ? hasTextRange ? !active('highlight') : textHighlighter.color === null : !textColor)} onChange={value => openMenu === 'highlight' ? chooseHighlight(value) : apply(c => value ? c.setColor(value) : c.unsetColor())} onClose={() => setOpenMenu(null)} onEscape={restoreFocus} />}
+    <OverlayManager isOpen={openMenu === 'aa'} onClose={() => setOpenMenu(null)} onEscape={restoreFocus} initialFocus='[role="tab"][aria-selected="true"]' anchorRef={menuAnchorRef} placement="bottom-end" exclusiveGroup="documentation">
+      <div role="dialog" aria-label="Text formatting options" className="w-[288px] rounded-xl border border-panvas-border-strong bg-panvas-bg-primary shadow-xl overflow-y-auto max-h-[min(400px,calc(100dvh-8rem))] py-2" onMouseDown={event => event.stopPropagation()}>
+        <TextFormatMenuContent engine={engine} commandEditor={resolvedEditor} applyTextCommand={apply} onDismiss={() => { setOpenMenu(null); restoreFocus(); }} />
+      </div>
+    </OverlayManager>
+  </div>;
 }
-
-// ─── Drawing Tool Settings Popup ───────────────────────────────────────────────
 
 function DrawingToolPopup({ toolName, settings, onUpdate, onClose, onOpenGestures }: {
   toolName: string;
@@ -1421,7 +1406,7 @@ function DrawingToolPopup({ toolName, settings, onUpdate, onClose, onOpenGesture
   const toolLabel = toolName.charAt(0).toUpperCase() + toolName.slice(1);
 
   return (
-    <section role="dialog" aria-label={`${toolLabel} settings`} className="w-[min(26.25rem,calc(100vw-1.5rem))] overflow-y-auto rounded-2xl border border-panvas-border-strong bg-panvas-bg-primary text-panvas-text-primary shadow-2xl max-[599px]:max-h-[60vh]">
+    <section role="dialog" aria-label={`${toolLabel} settings`} className="w-[min(26.25rem,calc(100vw-1.5rem))] overflow-y-auto rounded-2xl border border-panvas-border-strong bg-panvas-bg-primary text-panvas-text-primary shadow-2xl max-[599px]:max-h-[min(400px,calc(100dvh-8rem))]">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-panvas-border-subtle bg-panvas-bg-secondary/50">
         <span className="text-sm font-semibold text-panvas-text-primary">{toolLabel} Settings</span>
@@ -2020,7 +2005,7 @@ function HandwritingSettingsStrip({ settings, onChange, onPalette }: {
           <div
             role="dialog"
             aria-label="Text output settings"
-            className="flex max-h-[60vh] w-[min(16rem,calc(100vw-1.5rem))] flex-col gap-2 overflow-y-auto rounded-xl border border-panvas-border-strong bg-panvas-bg-primary p-2 text-panvas-text-primary shadow-2xl"
+            className="flex max-h-[min(400px,calc(100dvh-8rem))] w-[min(16rem,calc(100vw-1.5rem))] flex-col gap-2 overflow-y-auto rounded-xl border border-panvas-border-strong bg-panvas-bg-primary p-2 text-panvas-text-primary shadow-2xl"
           >
             {fontSelect}
             {sizeSelect}
@@ -2140,10 +2125,11 @@ function WritingPresetControls({
   );
 }
 
-function ToolButton({ icon, active, onClick, tooltip, hasPopup }: { icon: React.ReactNode; active: boolean; onClick: () => void; tooltip: string; hasPopup?: boolean }) {
+function ToolButton({ icon, active, onClick, tooltip, hasPopup, disabled }: { icon: React.ReactNode; active: boolean; onClick: () => void; tooltip: string; hasPopup?: boolean; disabled?: boolean }) {
   return (
     <button
       type="button"
+      disabled={disabled}
       onMouseDown={(e) => e.preventDefault()}
       onClick={onClick}
       title={tooltip}

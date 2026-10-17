@@ -169,7 +169,7 @@ test('the contextual text strip and the Aa menu share one formatting surface', a
   assert.equal((toolbar.match(/<TextFormatMenuContent /g) ?? []).length, 2);
   assert.match(toolbar, /function TextFormattingStrip/);
   assert.match(toolbar, /<TextFormattingStrip editor=\{editor\} engine=\{engine\} enabled=\{activeTool === 'text'\} \/>/);
-  assert.match(toolbar, /if \(!enabled \|\| !resolvedEditor\) return null/);
+  assert.match(toolbar, /if \(!enabled\) return null/);
   assert.match(toolbar, /resolveFormattingEditor\(editor, engine\)/);
   assert.equal((toolbar.match(/<TextFontPicker/g) ?? []).length, 2);
   assert.match(fontPicker, /role="listbox"/);
@@ -179,7 +179,7 @@ test('the contextual text strip and the Aa menu share one formatting surface', a
   // Strip holds the pointer so the editor never blurs and no ink is created.
   assert.match(toolbar, /aria-label="Text formatting"/);
   // Paragraph/typography commands exist only in the shared menu body (once);
-  // inline strip toggles intentionally duplicate B/I/U/S and the color wells.
+  // Primary controls belong only to the stationary strip.
   // toggleHeading is one per level (H1/H2/H3); setTextAlign once per alignment.
   const singleSourceCommands: Array<[string, number]> = [
     ['toggleBulletList', 1], ['toggleOrderedList', 1], ['toggleTaskList', 1],
@@ -189,9 +189,11 @@ test('the contextual text strip and the Aa menu share one formatting surface', a
   for (const [command, expected] of singleSourceCommands) {
     assert.equal((toolbar.match(new RegExp(command, 'g')) ?? []).length, expected, command);
   }
-  // Mobile strip keeps B/I/U + colors inline; strike stays in the shared menu.
+  // Mobile and desktop expose the same primary controls and palette removal.
   const strip = toolbar.slice(toolbar.indexOf('function TextFormattingStrip'));
-  assert.match(strip, /!isMobileViewport && \(/);
+  assert.ok(!strip.includes('!isMobileViewport'));
+  assert.ok(!richTextMenu.includes('toggleBold()'));
+  assert.ok(!strip.includes('aria-label="No background"'));
   assert.match(strip, /toggleStrike/);
   assert.match(strip, /aria-label="Highlight color"/);
   assert.match(strip, /resolvedEditor\.on\('transaction', update\)/);
@@ -199,7 +201,8 @@ test('the contextual text strip and the Aa menu share one formatting surface', a
 
 test('text persistence is the shared TipTap JSON path with no environment branch', async () => {
   const editorSource = await read('../src/components/notebook/FloatingTextEditor.tsx');
-  assert.match(editorSource, /engine\.texts\.updateTextContent\(object\.id, editor\.getJSON\(\)\)/);
+  assert.match(editorSource, /const json = editor\.getJSON\(\)/);
+  assert.match(editorSource, /engine\.texts\.updateTextContent\(object\.id, json\)/);
   assert.match(editorSource, /notebookTipTapExtensions/);
   // Web/Electron parity: the editor content path never branches on window.panvas.
   assert.ok(!/window\.panvas/.test(editorSource));

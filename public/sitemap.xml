@@ -1,54 +1,38 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
-    <loc>https://panvas.app/</loc>
-    <lastmod>2026-05-30</lastmod>
-    <lastmod>2026-09-14</lastmod>
+    <loc>https://panvas.vercel.app/</loc>
     <changefreq>weekly</changefreq>
     <priority>1.0</priority>
   </url>
   <url>
-    <loc>https://panvas.app/download</loc>
-    <lastmod>2026-09-14</lastmod>
+    <loc>https://panvas.vercel.app/download</loc>
     <changefreq>weekly</changefreq>
     <priority>0.9</priority>
   </url>
   <url>
-    <loc>https://panvas.app/roadmap</loc>
-    <lastmod>2026-09-14</lastmod>
+    <loc>https://panvas.vercel.app/roadmap</loc>
     <changefreq>monthly</changefreq>
     <priority>0.8</priority>
   </url>
   <url>
-    <loc>https://panvas.app/app</loc>
-    <lastmod>2026-09-14</lastmod>
+    <loc>https://panvas.vercel.app/app</loc>
     <changefreq>weekly</changefreq>
     <priority>0.9</priority>
   </url>
   <url>
-    <loc>https://panvas.app/security</loc>
-    <lastmod>2026-09-14</lastmod>
+    <loc>https://panvas.vercel.app/security</loc>
     <changefreq>monthly</changefreq>
     <priority>0.7</priority>
   </url>
   <url>
-    <loc>https://panvas.app/privacy</loc>
-    <lastmod>2026-05-30</lastmod>
-    <lastmod>2026-09-14</lastmod>
+    <loc>https://panvas.vercel.app/privacy</loc>
     <changefreq>monthly</changefreq>
     <priority>0.5</priority>
   </url>
   <url>
-    <loc>https://panvas.app/terms</loc>
-    <lastmod>2026-05-30</lastmod>
-    <lastmod>2026-09-14</lastmod>
+    <loc>https://panvas.vercel.app/terms</loc>
     <changefreq>monthly</changefreq>
     <priority>0.5</priority>
-  </url>
-  <url>
-    <loc>https://panvas.app/security</loc>
-    <lastmod>2026-05-30</lastmod>
-    <changefreq>monthly</changefreq>
-    <priority>0.8</priority>
   </url>
 </urlset>

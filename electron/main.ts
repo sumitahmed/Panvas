@@ -24,6 +24,9 @@ const __dirname = path.dirname(__filename);
 // │ └── index.html
 
 process.env.APP_ROOT = path.join(__dirname, '..');
+// An installed app must always load its packaged renderer. A stale development
+// environment must not redirect the privileged shell or widen IPC trust.
+if (app.isPackaged) delete process.env.VITE_DEV_SERVER_URL;
 
 // Gate 0 performance runs must never touch the normal Electron profile. This
 // switch is development-only, opt-in, and leaves the app id and default path

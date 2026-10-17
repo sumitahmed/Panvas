@@ -111,7 +111,7 @@ test('page renderer consumes literal paper and line colors instead of UI theme t
   ]);
   assert.doesNotMatch(renderer, /useUIStore|theme === 'dark'|theme === 'ink'/);
   assert.match(renderer, /const renderModel = resolvePageTemplateRenderModel\(properties\)/);
-  assert.match(renderer, /renderSVG\(geometry\.width, geometry\.height, effectiveLineColor, false, templateResourceScope\)/);
+  assert.match(renderer, /renderSVG\(geometry\.width, renderWindow\?\.height \?\? geometry\.height, effectiveLineColor, false, templateResourceScope\)/);
   assert.match(registry, /'Large grid'[\s\S]*<path[\s\S]*stroke=\{color\}/);
   assert.match(registry, /Dotted[\s\S]*<circle[\s\S]*fill=\{color\}/);
   assert.match(registry, /Engineering[\s\S]*stroke=\{color\}[\s\S]*opacity="0\.6"/);
@@ -386,17 +386,19 @@ test('orientation geometry resolves to one stable focal-position transition', as
   assert.match(renderer, /capturePageGeometryAnchor/);
   assert.match(renderer, /resolvePageGeometryScrollDelta/);
   assert.doesNotMatch(pageView, /\[isFocused, notebookEngine, width, height, page\.type, page\.id, renderScale\]/);
-  assert.match(pageView, /notebookEngine\.resize\(width, height\)/);
+  assert.match(pageView, /notebookEngine\.resize\(width, rasterHeight\)/);
+  assert.match(pageView, /const rasterHeight = expandedSurface \? renderWindow\.height : height/);
 });
 
-test('desktop persistence accepts note-space fields and page/canvas creation stays inline', async () => {
+test('desktop persistence accepts note-space fields, pages use the chooser and canvas creation stays inline', async () => {
   const [ipc, uiStore, tree] = await Promise.all([
     readFile(new URL('../electron/ipc/domain-handlers.ts', import.meta.url), 'utf8'),
     readFile(new URL('../src/stores/uiStore.ts', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/workspace/WorkspaceTree.tsx', import.meta.url), 'utf8'),
   ]);
   assert.match(ipc, /'templateFields', 'extraHeight', 'extraTop', 'extraRight', 'extraBottom', 'extraLeft'/);
-  assert.match(uiStore, /type === 'page' \|\| type === 'canvas'[\s\S]*inlineCreate: \{ type, parentId, parentType \}/);
+  assert.match(uiStore, /afterPageId = null\) => type === 'canvas'[\s\S]*inlineCreate: \{ type, parentId, parentType \}/);
+  assert.match(uiStore, /layoutMode \?\? \(type === 'page' \? 'document' : null\)/);
   assert.match(tree, /function InlineCreateRow/);
   assert.match(tree, /event\.key === 'Enter'/);
   assert.match(tree, /event\.key === 'Escape'/);

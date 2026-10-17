@@ -26,9 +26,20 @@ export async function copyWorkspaceGraph(profileId: string, workspaceId: string,
   }
   // Only structural/reference fields are rewritten. User text, URLs, and
   // drawing object IDs not present in the workspace graph are preserved.
-  const references = new Set(['id', 'workspaceId', 'parentId', 'folderId', 'notebookId', 'sectionId', 'pageId', 'canvasFileId', 'canvasId', 'blockId', 'fileId', 'pdfDataId', 'audioFileId', 'imageFileId', 'ownerId']);
+  const references = new Set(['id', 'workspaceId', 'parentId', 'folderId', 'notebookId', 'sectionId', 'pageId', 'canvasFileId', 'canvasId', 'blockId', 'fileId', 'pdfDataId', 'audioFileId', 'imageFileId', 'ownerId', 'targetPageId', 'targetBlockId']);
   const remap = (value: any, field = ''): any => {
-    if (typeof value === 'string') return references.has(field) ? ids.get(value) ?? value : value;
+    if (typeof value === 'string') {
+      if (references.has(field)) return ids.get(value) ?? value;
+      if (field === 'href') try {
+        const url = new URL(value); let changed = false;
+        if (['https:', 'http:', 'file:'].includes(url.protocol)) for (const parameter of ['panvasPage', 'panvasBlock']) {
+          const original = url.searchParams.get(parameter), replacement = original && ids.get(original);
+          if (replacement) { url.searchParams.set(parameter, replacement); changed = true; }
+        }
+        if (changed) return url.href;
+      } catch { /* Other links and user text are retained verbatim. */ }
+      return value;
+    }
     if (Array.isArray(value)) return value.map(item => remap(item, field));
     if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [field === 'files' ? ids.get(key) ?? key : key, remap(item, key)]));
     return value;

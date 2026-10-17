@@ -82,7 +82,7 @@ async function createWorkspaceNotebookSection(page: import('playwright').Page): 
   await page.waitForTimeout(1200);
   // Verify the actual parent before creating entities in the test workspace.
   const workspace = JSON.parse(await readFile(path.join(PANVAS_BASE, WORKSPACE_NAME, '.panvas', 'workspace.json'), 'utf8'));
-  await domClick(sidebar.locator('div[role="button"]').filter({ hasText: WORKSPACE_NAME }).first());
+  await domClick(sidebar.getByRole('treeitem', { name: WORKSPACE_NAME, exact: true }));
   await page.waitForFunction(id => localStorage.getItem('panvas.activeWorkspaceId') === id, workspace.id);
   await page.waitForTimeout(900);
 
@@ -124,19 +124,19 @@ async function createWorkspaceNotebookSection(page: import('playwright').Page): 
 // the parent collapsed. Wait, then toggle the workspace node once and retry.
 async function ensureTreeRowVisible(page: import('playwright').Page, name: RegExp): Promise<void> {
   const sidebar = page.getByRole('complementary');
-  const row = sidebar.getByRole('button', { name }).first();
+  const row = sidebar.getByRole('treeitem', { name }).first();
   try {
     await row.waitFor({ state: 'visible', timeout: 12000 });
     return;
   } catch { /* fall through: expand the workspace */ }
-  const ws = sidebar.getByRole('button', { name: new RegExp(WORKSPACE_NAME.slice(0, 20)) }).first();
+  const ws = sidebar.getByRole('button', { name: `Expand ${WORKSPACE_NAME}`, exact: true });
   await domClick(ws);
   await page.waitForTimeout(800);
   await row.waitFor({ state: 'visible', timeout: 12000 });
 }
 
 async function importPdfIntoSection(page: import('playwright').Page, pdfPath: string): Promise<void> {
-  const section = page.getByRole('complementary').getByRole('button', { name: /Pipeline Section/ }).first();
+  const section = page.getByRole('complementary').getByRole('treeitem', { name: 'Pipeline Section', exact: true });
   await section.evaluate(el => el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })));
   const importItem = page.getByText('Import PDF', { exact: true });
   await importItem.waitFor({ state: 'visible', timeout: 5000 });
@@ -168,12 +168,12 @@ async function assertPdfRenders(page: import('playwright').Page, label: string):
 
 async function openTestWorkspace(page: import('playwright').Page): Promise<void> {
   const sidebar = page.getByRole('complementary');
-  await domClick(sidebar.getByRole('button', { name: new RegExp(WORKSPACE_NAME.slice(0, 20)) }).first());
+  await domClick(sidebar.getByRole('treeitem', { name: WORKSPACE_NAME, exact: true }));
   await page.waitForTimeout(900);
   await ensureTreeRowVisible(page, /Pipeline Notebook/);
-  await domClick(sidebar.getByRole('button', { name: /Pipeline Notebook/ }).first());
+  await domClick(sidebar.getByRole('treeitem', { name: 'Pipeline Notebook', exact: true }));
   await page.waitForTimeout(700);
-  await domClick(sidebar.getByRole('button', { name: /Pipeline Section/ }).first());
+  await domClick(sidebar.getByRole('treeitem', { name: 'Pipeline Section', exact: true }));
   await page.waitForTimeout(600);
 }
 

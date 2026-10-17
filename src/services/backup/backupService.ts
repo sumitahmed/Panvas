@@ -1,12 +1,14 @@
 import type { CanvasData } from '@/types/canvas';
 import type { Workspace, Folder, CanvasFile } from '@/types/workspace';
 import type { Notebook, NotebookSection, NotebookPage } from '@/types/notebook';
+import { pdfAnnotationStorageId } from '../../lib/pdfAnnotationStorage.ts';
+import { MAX_BACKUP_BYTES, collectBackupAssetReferences, collectBackupBlockIds, isBackupId, remapBackupReferences, validateBackupAssetManifest, type BackupAsset } from './backupAssets.ts';
 
-export const BACKUP_VERSION = 1 as const;
+export const BACKUP_VERSION = 2 as const;
 export const BACKUP_TYPE = 'panvas/workspace-backup' as const;
 
 export interface BackupHeader {
-  version: typeof BACKUP_VERSION;
+  version: 1 | typeof BACKUP_VERSION;
   type: typeof BACKUP_TYPE;
   exportedAt: number;
   workspaceName: string;
@@ -16,6 +18,7 @@ export interface BackupPagePayload {
   drawing: unknown;
   content: unknown;
 }
+export interface BackupAnnotationPayload extends BackupPagePayload { ownerPageId: string; sourcePage: number }
 
 export interface WorkspaceBackup {
   header: BackupHeader;
@@ -27,6 +30,8 @@ export interface WorkspaceBackup {
   canvases: CanvasFile[];
   pagePayloads: Record<string, BackupPagePayload>;
   canvasPayloads: Record<string, CanvasData>;
+  assets?: Record<string, BackupAsset>;
+  annotationPayloads?: Record<string, BackupAnnotationPayload>;
 }
 
 export interface BackupExportResult {
@@ -38,6 +43,7 @@ export interface BackupExportResult {
 export interface BackupImportResult {
   workspaceId: string;
   workspaceName: string;
+  warnings?: string[];
 }
 
 export interface BackupSource {
@@ -49,6 +55,8 @@ export interface BackupSource {
   canvases: CanvasFile[];
   pagePayloads: Record<string, BackupPagePayload>;
   canvasPayloads: Record<string, CanvasData>;
+  assets?: Record<string, BackupAsset>;
+  annotationPayloads?: Record<string, BackupAnnotationPayload>;
 }
 
 export interface BackupRemapOptions {
@@ -72,7 +80,7 @@ function requireEntityCollection(value: unknown, label: string): any[] {
   if (!Array.isArray(value)) invalid(`${label} must be an array`);
   const ids = new Set<string>();
   for (const entity of value) {
-    if (!isRecord(entity) || typeof entity.id !== 'string' || !entity.id.trim()) invalid(`${label} contains an invalid record`);
+    if (!isRecord(entity) || !isBackupId(entity.id)) invalid(`${label} contains an invalid record`);
     if (ids.has(entity.id)) invalid(`${label} contains duplicate id ${entity.id}`);
     ids.add(entity.id);
   }
@@ -97,17 +105,19 @@ function validateWorkspaceName(value: unknown): asserts value is string {
 export function validateWorkspaceBackup(input: unknown): WorkspaceBackup {
   if (!isRecord(input)) invalid('root must be an object');
   const header = input.header;
-  if (!isRecord(header) || header.version !== BACKUP_VERSION || header.type !== BACKUP_TYPE || typeof header.exportedAt !== 'number' || !Number.isFinite(header.exportedAt)) {
+  if (!isRecord(header) || ![1, BACKUP_VERSION].includes(header.version) || header.type !== BACKUP_TYPE || typeof header.exportedAt !== 'number' || !Number.isFinite(header.exportedAt)) {
     invalid('header is invalid');
   }
   validateWorkspaceName(header.workspaceName);
-  if (!isRecord(input.workspace) || typeof input.workspace.id !== 'string' || !input.workspace.id.trim()) invalid('workspace metadata is invalid');
+  if (!isRecord(input.workspace) || !isBackupId(input.workspace.id)) invalid('workspace metadata is invalid');
 
   const folders = requireEntityCollection(input.folders, 'folders') as Folder[];
   const notebooks = requireEntityCollection(input.notebooks, 'notebooks') as Notebook[];
   const sections = requireEntityCollection(input.sections, 'sections') as NotebookSection[];
   const pages = requireEntityCollection(input.pages, 'pages') as NotebookPage[];
   const canvases = requireEntityCollection(input.canvases, 'canvases') as CanvasFile[];
+  const entityIds = [input.workspace.id, ...[folders, notebooks, sections, pages, canvases].flatMap(items => items.map(item => item.id))];
+  if (new Set(entityIds).size !== entityIds.length) invalid('entity identifiers collide across collections');
   const pagePayloads = requirePayloadMap(input.pagePayloads, 'pagePayloads') as Record<string, BackupPagePayload>;
   const canvasPayloads = requirePayloadMap(input.canvasPayloads, 'canvasPayloads') as Record<string, CanvasData>;
 
@@ -121,20 +131,33 @@ export function validateWorkspaceBackup(input: unknown): WorkspaceBackup {
   for (const page of pages) {
     const payload = pagePayloads[page.id];
     if (!payload || !Object.prototype.hasOwnProperty.call(payload, 'drawing') || !Object.prototype.hasOwnProperty.call(payload, 'content')) invalid(`page payload is missing for ${page.id}`);
-    if (typeof page.notebookId !== 'string' || !notebookIds.has(page.notebookId) || !sectionIds.has(page.sectionId)) invalid(`page ${page.id} relationships are invalid`);
+    if (typeof page.notebookId !== 'string' || !notebookIds.has(page.notebookId) || !sectionIds.has(page.sectionId)
+      || sections.find(section => section.id === page.sectionId)?.notebookId !== page.notebookId) invalid(`page ${page.id} relationships are invalid`);
   }
   if (Object.keys(pagePayloads).some(id => !pageIds.has(id))) invalid('pagePayloads contains an unknown page');
   const canvasIds = new Set(canvases.map(canvas => canvas.id));
   if (canvases.some(canvas => canvas.workspaceId !== input.workspace.id || (canvas.folderId !== null && !folderIds.has(canvas.folderId)))) invalid('canvas relationships are invalid');
+  if (canvases.some(canvas => (canvas.notebookId != null && !notebookIds.has(canvas.notebookId))
+    || (canvas.sectionId != null && (!sectionIds.has(canvas.sectionId) || sections.find(section => section.id === canvas.sectionId)?.notebookId !== canvas.notebookId)))) invalid('canvas notebook relationships are invalid');
   for (const canvas of canvases) {
     const payload = canvasPayloads[canvas.id];
     if (!payload || typeof payload !== 'object' || payload.canvasFileId !== canvas.id) invalid(`canvas payload is missing or mismatched for ${canvas.id}`);
   }
   if (Object.keys(canvasPayloads).some(id => !canvasIds.has(id))) invalid('canvasPayloads contains an unknown canvas');
+  const assets = header.version === 2 ? validateBackupAssetManifest(input.assets ?? {}) : {};
+  const annotationPayloads = header.version === 2 ? requirePayloadMap(input.annotationPayloads ?? {}, 'annotationPayloads') as Record<string, BackupAnnotationPayload> : {};
+  const owners = new Set([...pageIds, ...canvasIds]);
+  for (const asset of Object.values(assets)) if (!owners.has(asset.ownerId)) invalid('asset owner is outside the workspace');
+  for (const [id, annotation] of Object.entries(annotationPayloads)) {
+    if (!pageIds.has(annotation.ownerPageId) || pages.find(page => page.id === annotation.ownerPageId)?.type !== 'pdf'
+      || !Number.isSafeInteger(annotation.sourcePage) || annotation.sourcePage < 1
+      || id !== pdfAnnotationStorageId(annotation.ownerPageId, annotation.sourcePage)
+      || !Object.prototype.hasOwnProperty.call(annotation, 'drawing') || !Object.prototype.hasOwnProperty.call(annotation, 'content')) invalid('PDF annotation ownership is invalid');
+  }
 
   const normalized: WorkspaceBackup = {
     header: {
-      version: BACKUP_VERSION,
+      version: header.version,
       type: BACKUP_TYPE,
       exportedAt: header.exportedAt,
       workspaceName: header.workspaceName,
@@ -147,12 +170,15 @@ export function validateWorkspaceBackup(input: unknown): WorkspaceBackup {
     canvases,
     pagePayloads,
     canvasPayloads,
+    assets,
+    annotationPayloads,
   };
   return clone(normalized);
 }
 
 export function parseWorkspaceBackup(input: string | unknown): WorkspaceBackup {
   if (typeof input === 'string') {
+    if (new TextEncoder().encode(input).byteLength > MAX_BACKUP_BYTES) invalid('file exceeds the 100 MiB limit');
     try {
       return validateWorkspaceBackup(JSON.parse(input));
     } catch (error) {
@@ -164,10 +190,14 @@ export function parseWorkspaceBackup(input: string | unknown): WorkspaceBackup {
 }
 
 export function serializeWorkspaceBackup(input: WorkspaceBackup): string {
-  return JSON.stringify(validateWorkspaceBackup(input), null, 2);
+  const serialized = JSON.stringify(validateWorkspaceBackup(input));
+  if (new TextEncoder().encode(serialized).byteLength > MAX_BACKUP_BYTES) invalid('file exceeds the 100 MiB limit');
+  return serialized;
 }
 
 export function buildWorkspaceBackup(source: BackupSource, exportedAt = Date.now()): WorkspaceBackup {
+  const workspace = { ...source.workspace } as Workspace & Record<string, unknown>;
+  for (const key of ['folders', 'notebooks', 'notebookSections', 'notebookPages', 'canvasFiles']) delete workspace[key];
   const backup = {
     header: {
       version: BACKUP_VERSION,
@@ -175,7 +205,7 @@ export function buildWorkspaceBackup(source: BackupSource, exportedAt = Date.now
       exportedAt,
       workspaceName: source.workspace.name,
     },
-    workspace: source.workspace,
+    workspace,
     folders: source.folders,
     notebooks: source.notebooks,
     sections: source.sections,
@@ -183,6 +213,8 @@ export function buildWorkspaceBackup(source: BackupSource, exportedAt = Date.now
     canvases: source.canvases,
     pagePayloads: source.pagePayloads,
     canvasPayloads: source.canvasPayloads,
+    assets: source.assets ?? {},
+    annotationPayloads: source.annotationPayloads ?? {},
   } satisfies WorkspaceBackup;
   return validateWorkspaceBackup(backup);
 }
@@ -198,19 +230,32 @@ export function remapWorkspaceBackup(input: WorkspaceBackup, options: BackupRema
   const sectionIds = new Map(backup.sections.map(section => [section.id, idFactory('section')]));
   const pageIds = new Map(backup.pages.map(page => [page.id, idFactory('page')]));
   const canvasIds = new Map(backup.canvases.map(canvas => [canvas.id, idFactory('canvas')]));
+  const entities = new Map([[backup.workspace.id, workspaceId], ...folderIds, ...notebookIds, ...sectionIds, ...pageIds, ...canvasIds]);
+  const assets = new Map([...new Set([...collectBackupAssetReferences(backup).keys(), ...Object.keys(backup.assets ?? {})])].map(id => [id, idFactory('asset')]));
+  const blocks = new Map([...collectBackupBlockIds([backup.pagePayloads, backup.annotationPayloads, backup.canvasPayloads])].map(id => [id, idFactory('block')]));
   const now = options.now ?? Date.now();
   const userId = options.userId === undefined ? backup.workspace.userId ?? null : options.userId;
-  const workspace = clone({ ...backup.workspace, id: workspaceId, name: options.workspaceName ?? `${backup.workspace.name} (Restored)`, userId, updatedAt: now, deletedAt: null });
-  const folders = clone(backup.folders.map(folder => ({ ...folder, id: folderIds.get(folder.id)!, workspaceId, parentId: folder.parentId ? (folderIds.get(folder.parentId) ?? null) : null, userId })));
-  const notebooks = clone(backup.notebooks.map(notebook => ({ ...notebook, id: notebookIds.get(notebook.id)!, workspaceId, folderId: notebook.folderId ? (folderIds.get(notebook.folderId) ?? null) : null, userId })));
-  const sections = clone(backup.sections.map(section => ({ ...section, id: sectionIds.get(section.id)!, notebookId: notebookIds.get(section.notebookId) ?? section.notebookId, userId })));
-  const pages = clone(backup.pages.map(page => ({ ...page, id: pageIds.get(page.id)!, notebookId: notebookIds.get(page.notebookId) ?? page.notebookId, sectionId: sectionIds.get(page.sectionId) ?? page.sectionId, userId })));
-  const canvases = clone(backup.canvases.map(canvas => ({ ...canvas, id: canvasIds.get(canvas.id)!, workspaceId, folderId: canvas.folderId ? (folderIds.get(canvas.folderId) ?? null) : null, notebookId: canvas.notebookId ? (notebookIds.get(canvas.notebookId) ?? null) : null, sectionId: canvas.sectionId ? (sectionIds.get(canvas.sectionId) ?? null) : null, userId })));
+  const workspace = clone({ ...backup.workspace, id: workspaceId, name: options.workspaceName ?? `${backup.workspace.name} (Restored)`, userId, updatedAt: now, deletedAt: null, syncStatus: 'local', isSystem: false, systemType: undefined });
+  const folders = backup.folders.map(folder => ({ ...remapBackupReferences(folder, entities, assets, blocks), id: folderIds.get(folder.id)!, userId }));
+  const notebooks = backup.notebooks.map(notebook => ({ ...remapBackupReferences(notebook, entities, assets, blocks), id: notebookIds.get(notebook.id)!, userId }));
+  const sections = backup.sections.map(section => ({ ...remapBackupReferences(section, entities, assets, blocks), id: sectionIds.get(section.id)!, userId }));
+  const pages = backup.pages.map(page => ({ ...remapBackupReferences(page, entities, assets, blocks), id: pageIds.get(page.id)!, userId }));
+  const canvases = backup.canvases.map(canvas => ({ ...remapBackupReferences(canvas, entities, assets, blocks), id: canvasIds.get(canvas.id)!, userId, isSystem: false, systemType: undefined }));
   const pagePayloads: Record<string, BackupPagePayload> = {};
-  for (const page of backup.pages) pagePayloads[pageIds.get(page.id)!] = clone(backup.pagePayloads[page.id]);
+  for (const page of backup.pages) pagePayloads[pageIds.get(page.id)!] = remapBackupReferences(clone(backup.pagePayloads[page.id]), entities, assets, blocks);
   const canvasPayloads: Record<string, CanvasData> = {};
-  for (const canvas of backup.canvases) canvasPayloads[canvasIds.get(canvas.id)!] = clone({ ...backup.canvasPayloads[canvas.id], canvasFileId: canvasIds.get(canvas.id)!, userId, updatedAt: now });
-  return validateWorkspaceBackup({ header: { ...backup.header, exportedAt: now, workspaceName: workspace.name }, workspace, folders, notebooks, sections, pages, canvases, pagePayloads, canvasPayloads });
+  for (const canvas of backup.canvases) {
+    const payload = remapBackupReferences(clone({ ...backup.canvasPayloads[canvas.id], userId, updatedAt: now }), entities, assets, blocks);
+    payload.customBlocks = (payload.customBlocks ?? []).map(block => ({ ...block, userId }));
+    canvasPayloads[canvasIds.get(canvas.id)!] = payload;
+  }
+  const annotationPayloads = Object.fromEntries(Object.values(backup.annotationPayloads ?? {}).map(annotation => [
+    pdfAnnotationStorageId(pageIds.get(annotation.ownerPageId)!, annotation.sourcePage), remapBackupReferences(annotation, entities, assets, blocks),
+  ]));
+  const assetManifest = Object.fromEntries(Object.entries(backup.assets ?? {}).map(([id, asset]) => [assets.get(id)!, { ...asset, id: assets.get(id)!, ownerId: entities.get(asset.ownerId)! }]));
+  return validateWorkspaceBackup({ header: { ...backup.header, exportedAt: now, workspaceName: workspace.name }, workspace,
+    folders, notebooks, sections, pages, canvases,
+    pagePayloads, canvasPayloads, annotationPayloads, assets: assetManifest });
 }
 
 export async function exportWorkspaceBackup(workspaceId: string, userId: string | null = null): Promise<BackupExportResult> {
@@ -232,4 +277,10 @@ export async function importWorkspaceBackupFromDialog(): Promise<(BackupImportRe
   const runtime = globalThis as any;
   if (!runtime.panvas?.backup?.importDialog) throw new Error('Native backup import is unavailable.');
   return runtime.panvas.backup.importDialog();
+}
+
+export function describeBackupError(error: unknown): string {
+  const message = error instanceof Error ? error.message : '';
+  const detail = message.match(/(?:Invalid Panvas backup:|Invalid backup asset|Backup asset|Backup is incomplete:|Backup cannot complete:|Backup assets|Backup file|Restored asset|Storage root changed)[^\r\n]{0,220}/)?.[0];
+  return detail ?? 'The workspace backup could not be completed. No existing workspace was changed.';
 }

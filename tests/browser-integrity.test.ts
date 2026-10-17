@@ -1,12 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import http from 'node:http';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import https from 'node:https';
+import { execFileSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { readFile, writeFile, mkdir, mkdtemp } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium, type Page } from 'playwright';
 
-const DIST_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist');
+// Browser reloads use the web build's root-relative asset URLs. Electron's
+// relative-base build is intended for file://, not nested web routes.
+const DIST_DIR = process.env.PANVAS_BROWSER_TEST_DIST ?? path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist');
 const TEXT_MARKER = 'Browser persistence marker';
 
 async function writeAudioFixture(): Promise<string> {
@@ -23,8 +28,8 @@ async function writeAudioFixture(): Promise<string> {
   return filePath;
 }
 
-async function startStaticServer(): Promise<{ url: string; close: () => Promise<void> }> {
-  const server = http.createServer(async (request, response) => {
+async function startStaticServer(secure = false): Promise<{ url: string; close: () => Promise<void> }> {
+  const handler = async (request: http.IncomingMessage, response: http.ServerResponse) => {
     try {
       const requestPath = decodeURIComponent((request.url ?? '/').split('?')[0]);
       if (requestPath === '/seed.html') {
@@ -41,6 +46,7 @@ async function startStaticServer(): Promise<{ url: string; close: () => Promise<
       try {
         await readFile(filePath);
       } catch {
+        if (secure && /\.[a-z0-9]+$/i.test(requestPath)) console.log('offline missing asset:', requestPath);
         filePath = path.join(DIST_DIR, 'index.html');
       }
       const extension = path.extname(filePath);
@@ -52,13 +58,21 @@ async function startStaticServer(): Promise<{ url: string; close: () => Promise<
     } catch {
       response.writeHead(404).end('not found');
     }
-  });
+  };
+  let server: http.Server | https.Server;
+  if (secure) {
+    const certDir = await mkdtemp(path.join(tmpdir(), 'panvas-offline-test-'));
+    const key = path.join(certDir, 'test.key'), cert = path.join(certDir, 'test.crt');
+    const openssl = process.env.OPENSSL_PATH ?? (process.platform === 'win32' ? 'C:\\Program Files\\Git\\usr\\bin\\openssl.exe' : 'openssl');
+    execFileSync(openssl, ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert, '-days', '1', '-subj', '/CN=panvas.test', '-addext', 'subjectAltName=DNS:panvas.test'], { stdio: 'ignore', timeout: 30000 });
+    server = https.createServer({ key: await readFile(key), cert: await readFile(cert) }, handler);
+  } else server = http.createServer(handler);
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('Static server failed to bind.');
   return {
-    url: `http://127.0.0.1:${address.port}/`,
-    close: () => new Promise(resolve => server.close(() => resolve())),
+    url: secure ? `https://panvas.test:${address.port}/` : `http://127.0.0.1:${address.port}/`,
+    close: () => new Promise(resolve => { server.close(() => resolve()); server.closeAllConnections(); }),
   };
 }
 
@@ -131,7 +145,7 @@ async function createNotebookPage(page: Page): Promise<void> {
   const notebook = sidebar.locator('[data-tree-id]').filter({ hasText: 'Browser Integrity Notebook' }).first();
   await notebook.waitFor({ state: 'visible', timeout: 15_000 });
   await notebook.click();
-  const notebookToggle = sidebar.locator('button[aria-label$="Browser Integrity Notebook"]');
+  const notebookToggle = sidebar.locator('button[data-tree-toggle][aria-label$="Browser Integrity Notebook"]');
   if ((await notebookToggle.getAttribute('aria-label'))?.startsWith('Expand')) await notebookToggle.click();
 
   await newItem.click();
@@ -145,6 +159,7 @@ async function createNotebookPage(page: Page): Promise<void> {
   await newItem.click();
   await page.getByRole('button', { name: 'New Page' }).click();
   await page.locator('#create-dialog-input').fill('Browser Integrity Page');
+  await page.getByRole('dialog', { name: 'New Page', exact: true }).getByRole('button', { name: /^Freeform/ }).click();
   await page.getByRole('button', { name: 'Create', exact: true }).click();
   await page.locator('button[title="Hide Toolbar"]').waitFor({ state: 'visible', timeout: 15_000 });
 }
@@ -192,9 +207,22 @@ async function readDrawingRecords(page: Page): Promise<any[]> {
 test('browser mode persists notebook objects in IndexedDB without Electron capabilities', async () => {
   const server = await startStaticServer();
   const browser = await chromium.launch({ headless: true });
+  let observedPage: Page | undefined;
   try {
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     const page = await context.newPage();
+    observedPage = page;
+    await page.addInitScript(() => {
+      (window as any).__drawingWrites = [];
+      const put = IDBObjectStore.prototype.put;
+      IDBObjectStore.prototype.put = function(value, ...args) {
+        if (this.name === 'notebookPageDrawings') (window as any).__drawingWrites.push({ at: performance.now(), pageId: value.pageId,
+          audio: value.data?.audioNotes?.length, layers: value.data?.layers?.length,
+          voice: value.data?.objects?.filter((item: any) => item.metadata?.isVoiceNote).length,
+          stack: new Error().stack?.split('\n').slice(1, 5) });
+        return put.call(this, value, ...args);
+      };
+    });
     await page.goto(`${server.url}#/app`, { waitUntil: 'domcontentloaded' });
     assert.equal(await page.evaluate(() => 'panvas' in window), false, 'browser renderer has no Electron preload bridge');
 
@@ -221,26 +249,19 @@ test('browser mode persists notebook objects in IndexedDB without Electron capab
     const chooserPromise = page.waitForEvent('filechooser');
     await page.getByRole('button', { name: 'Import', exact: true }).click();
     await (await chooserPromise).setFiles(audioPath);
-    await page.waitForFunction(async () => {
-      const database = await new Promise<IDBDatabase>((resolve, reject) => {
-        const request = indexedDB.open('panvas');
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
-      try {
-        const records = await new Promise<any[]>((resolve, reject) => {
-          const request = database.transaction('notebookPageDrawings', 'readonly')
-            .objectStore('notebookPageDrawings').getAll();
-          request.onsuccess = () => resolve(request.result);
-          request.onerror = () => reject(request.error);
-        });
-        return records.some(record => (record.data?.audioNotes?.length ?? 0) >= 1 || (record.data?.objects ?? []).some((o: any) => o.metadata?.isVoiceNote));
-      } finally {
-        database.close();
-      }
-    }, undefined, { timeout: 10_000 });
-
-    const records = await readDrawingRecords(page);
+    // waitForFunction treats an async predicate's Promise as truthy in this
+    // Playwright version, even when it resolves false. Poll completed IDB reads.
+    let records: any[] = [];
+    const saveDeadline = Date.now() + 10_000;
+    while (Date.now() < saveDeadline) {
+      records = await readDrawingRecords(page);
+      if (records.some(record => (record.data?.audioNotes?.length ?? 0) >= 1 && (record.data?.layers?.length ?? 0) >= 2
+        && (record.data?.objects ?? []).some((o: any) => o.type === 'stroke')
+        && (record.data?.objects ?? []).some((o: any) => o.type === 'text' && JSON.stringify(o.content).includes(TEXT_MARKER)))) break;
+      await page.waitForTimeout(100);
+    }
+    await mkdir('artifacts/critical-stabilization-20261016/browser-integrity', { recursive: true });
+    await writeFile('artifacts/critical-stabilization-20261016/browser-integrity/canonical-before-reload.json', JSON.stringify(records, null, 2));
     assert.ok(records.length >= 1, 'at least one browser-local drawing record');
     const objects = records.flatMap((r: any) => r.data?.objects ?? r.objects ?? []);
     assert.ok(objects.some((object: any) => object.type === 'stroke'), 'stroke persisted in IndexedDB');
@@ -258,7 +279,7 @@ test('browser mode persists notebook objects in IndexedDB without Electron capab
     await reloadedSection.click();
     await sidebar.locator('[data-tree-id]').filter({ hasText: 'Browser Integrity Page' }).first().click();
     await page.locator('button[title="Hide Toolbar"]').waitFor({ state: 'visible', timeout: 15_000 });
-    await page.getByText(TEXT_MARKER).waitFor({ state: 'visible', timeout: 10_000 });
+    await page.getByText(TEXT_MARKER).filter({ visible: true }).waitFor({ state: 'visible', timeout: 10_000 });
     if (await page.getByRole('button', { name: 'Local Elements' }).count() === 0) {
       await page.getByTitle('Page utilities').click();
     }
@@ -327,6 +348,13 @@ test('browser mode persists notebook objects in IndexedDB without Electron capab
     assert.deepEqual(canonical?.data?.objects, objects, 'pane and presentation state do not mutate drawing objects');
     assert.ok((canonical?.data?.audioNotes?.length ?? 0) >= 1 || (canonical?.data?.objects ?? []).some((o: any) => o.metadata?.isVoiceNote), 'pane and presentation state do not mutate attachments');
   } finally {
+    const artifactDir = path.resolve('artifacts/critical-stabilization-20261016/browser-integrity');
+    await mkdir(artifactDir, { recursive: true });
+    if (observedPage && !observedPage.isClosed()) {
+      await writeFile(path.join(artifactDir, 'write-trace.json'), JSON.stringify(await observedPage.evaluate(() => (window as any).__drawingWrites), null, 2));
+      await writeFile(path.join(artifactDir, 'last-ui.txt'), await observedPage.locator('body').innerText());
+      await observedPage.screenshot({ path: path.join(artifactDir, 'last.png') });
+    }
     await browser.close();
     await server.close();
   }
@@ -382,14 +410,29 @@ test('browser mode upgrades version 4 notebook metadata without data loss', asyn
 });
 
 test('browser shell reloads offline after one successful load', async () => {
-  const server = await startStaticServer();
-  const browser = await chromium.launch({ headless: true });
+  // Production registers SW only on HTTPS outside localhost. Keep that policy.
+  const server = await startStaticServer(true);
+  const browser = await chromium.launch({ headless: true, args: ['--host-resolver-rules=MAP panvas.test 127.0.0.1', '--no-proxy-server', '--ignore-certificate-errors'] });
   try {
-    const context = await browser.newContext({ viewport: { width: 1000, height: 760 } });
+    const context = await browser.newContext({ viewport: { width: 1000, height: 760 }, ignoreHTTPSErrors: true });
     const page = await context.newPage();
-    await page.goto(`${server.url}#/app`, { waitUntil: 'networkidle' });
+    const registrationErrors: string[] = [];
+    page.on('console', message => {
+      if (message.type() === 'warning' || message.type() === 'error') console.log('offline:', message.text());
+      if (message.text().includes('Offline shell registration failed')) registrationErrors.push(message.text());
+    });
+    page.on('response', response => { if (/\.(?:js|mjs)(?:\?|$)/.test(response.url()) && response.headers()['content-type']?.includes('text/html')) console.log('offline HTML module:', response.url()); });
+    await page.addInitScript(() => {
+      (window as any).__loadAdds = [];
+      const add = window.addEventListener;
+      window.addEventListener = function(type, listener, options) { if (type === 'load') (window as any).__loadAdds.push({ ready: document.readyState, stack: new Error().stack }); return add.call(this, type, listener, options); };
+    });
+    // A fresh deep link must register the root shell without relying on a
+    // worker installed by a previous visit to the origin root.
+    await page.goto(`${server.url}app/library`, { waitUntil: 'networkidle' });
+    console.log('offline registration observation:', await page.evaluate(async () => ({ ready: document.readyState, secure: isSecureContext, listeners: (window as any).__loadAdds, registrations: (await navigator.serviceWorker.getRegistrations()).length })));
     await page.evaluate(async () => {
-      await navigator.serviceWorker.ready;
+      await Promise.race([navigator.serviceWorker.ready, new Promise((_, reject) => setTimeout(() => reject(new Error('Offline service worker did not register')), 20000))]);
       if (!navigator.serviceWorker.controller) {
         await new Promise<void>(resolve => navigator.serviceWorker.addEventListener('controllerchange', () => resolve(), { once: true }));
       }
@@ -400,6 +443,7 @@ test('browser shell reloads offline after one successful load', async () => {
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.getByRole('button', { name: 'New item' }).waitFor({ state: 'visible', timeout: 15_000 });
     assert.equal(await page.evaluate(() => 'panvas' in window), false, 'offline browser shell does not gain Electron capabilities');
+    assert.deepEqual(registrationErrors, [], 'deep routes register the correct production service worker');
   } finally {
     await browser.close();
     await server.close();

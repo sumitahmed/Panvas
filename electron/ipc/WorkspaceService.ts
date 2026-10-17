@@ -3,7 +3,8 @@ import { promises as fsPromises, constants as fsConstants } from 'fs';
 import { app } from 'electron';
 import { writeQueue } from './write-queue.js';
 import { generateId } from '../../src/lib/utils/id.js';
-import { buildWorkspaceBackup, remapWorkspaceBackup, validateWorkspaceBackup, type BackupImportResult, type WorkspaceBackup } from '../../src/services/backup/backupService.js';
+import type { BackupAnnotationPayload, BackupImportResult, WorkspaceBackup } from '../../src/services/backup/backupService.js';
+import { sha256Bytes } from '../../src/services/cloudsync/hash.js';
 import type { CanvasData } from '../../src/types/canvas.js';
 import type { SyncEntityKind } from '../../src/services/cloudsync/types.js';
 import { parsePdfAnnotationStorageId } from '../../src/lib/pdfAnnotationStorage.js';
@@ -11,6 +12,8 @@ import { getDeletedWorkspaceItems } from './workspace-trash.js';
 import type { PanvasBootstrapSnapshot } from '../../src/types/bootstrap.js';
 import { NativeRemoteRecordApplyError, prepareRemoteWorkspaceRecords, type NativeRemoteRecord } from './workspace-sync-order.js';
 import { DEFAULT_PAGE_PROPERTY_SET } from '../../src/types/notebook.js';
+import { inspectNativeStorage } from './storage-overview.js';
+import type { StorageOverview } from '../../src/types/storageOverview.js';
 
 const SYSTEM_DEFAULT_WORKSPACE_ID = 'ws-system-default-v1';
 const SYSTEM_WELCOME_CANVAS_ID = 'canvas-system-welcome-v1';
@@ -43,6 +46,7 @@ export class WorkspaceService {
   private baseDir: string;
   private workspaceRegistry: Map<string, string> = new Map(); // workspaceId -> workspaceDir
   private persistedWorkspaceLocations: Map<string, string> = new Map();
+  private assetStorageRoots: string[] = [];
   /**
    * Cloud reconstruction can deliver records in dependency phases, but the
    * native workspace metadata is one read/modify/write JSON document. Keep
@@ -53,6 +57,8 @@ export class WorkspaceService {
   private storageRootLoaded = false;
   private storageRootUnavailable = false;
   private workspaceDiscoveryComplete = false;
+  private storageOverview: StorageOverview | null = null;
+  private storageInspection: Promise<StorageOverview> | null = null;
 
   constructor() {
     const profileRoot = process.env.PANVAS_GATE0_PROFILE === '1'
@@ -90,6 +96,9 @@ export class WorkspaceService {
   private async loadStorageRoot(): Promise<void> {
     if (this.storageRootLoaded) return;
     const settings = await this.readGlobalSettings();
+    this.assetStorageRoots = Array.isArray(settings.assetStorageRoots)
+      ? [...new Set(settings.assetStorageRoots.filter((value): value is string => typeof value === 'string' && path.isAbsolute(value)).map(value => path.resolve(value)))]
+      : [];
     const locations = settings.workspaceLocations;
     if (locations && typeof locations === 'object' && !Array.isArray(locations) && Object.keys(locations).length <= MAX_STARTUP_WORKSPACES) {
       for (const [workspaceId, workspaceDir] of Object.entries(locations)) {
@@ -133,6 +142,22 @@ export class WorkspaceService {
     };
   }
 
+  async getStorageOverview(refresh = false): Promise<StorageOverview> {
+    if (this.storageInspection) return this.storageInspection;
+    if (!refresh && this.storageOverview && Date.now() - this.storageOverview.measuredAt < 30_000) return this.storageOverview;
+    this.storageInspection = (async () => {
+      const root = await this.getStorageRootInfo();
+      const result = await inspectNativeStorage({
+        root: { ...root, activePath: this.baseDir },
+        roots: [...new Set([this.baseDir, this.defaultBaseDir, ...this.assetStorageRoots])],
+        registeredDirs: [...new Set([...this.workspaceRegistry.values(), ...this.persistedWorkspaceLocations.values()])],
+      });
+      this.storageOverview = result;
+      return result;
+    })().catch(error => { this.storageOverview = null; throw error; }).finally(() => { this.storageInspection = null; });
+    return this.storageInspection;
+  }
+
   async assertStorageRootAvailable(): Promise<void> {
     await this.loadStorageRoot();
     if (this.storageRootUnavailable) throw new Error('The configured storage folder is unavailable. Choose a new folder in Settings.');
@@ -171,13 +196,20 @@ export class WorkspaceService {
       } catch { /* ignore non-workspace folders */ }
     }
     const settings = await this.readGlobalSettings();
+    const previousRoot = typeof settings.storageRoot === 'string' && path.isAbsolute(settings.storageRoot.trim())
+      ? path.resolve(settings.storageRoot.trim()) : this.baseDir;
     const next = {
       ...settings,
       storageRoot: resolved,
+      // Retain read access to shared media; changing the root never relocates
+      // files. Persist before switching so the list also survives a restart.
+      assetStorageRoots: [...new Set([previousRoot, this.baseDir, ...this.assetStorageRoots])],
       workspaceLocations: Object.fromEntries(this.persistedWorkspaceLocations),
     };
     await this.writeGlobalSettings(next);
+    this.assetStorageRoots = next.assetStorageRoots;
     this.baseDir = resolved;
+    this.storageOverview = null;
     this.storageRootUnavailable = false;
     this.storageRootLoaded = true;
     this.workspaceDiscoveryComplete = false;
@@ -461,6 +493,7 @@ export class WorkspaceService {
     const lightSettings = Object.fromEntries(Object.entries(settings).filter(([key]) => [
       'notebook_paperColor', 'notebook_template', 'notebook_orientation',
       'notebook_pageSize', 'notebook_margins', 'notebook_scrollDirection',
+      'notebook_highlightPalette',
     ].includes(key)));
     const configuredStorageRoot = typeof settings.storageRoot === 'string' && settings.storageRoot.trim()
       ? path.resolve(settings.storageRoot.trim())
@@ -497,6 +530,30 @@ export class WorkspaceService {
 
   getAudioStoreDir(): string {
     return path.join(this.baseDir, 'Assets', 'audio-store');
+  }
+
+  async getBinaryReadDirectories(kind: 'pdf' | 'image' | 'audio'): Promise<string[]> {
+    await this.loadStorageRoot();
+    // Workspace parents also recover roots registered by versions predating
+    // assetStorageRoots. These paths originate from native settings, never IPC.
+    return [...new Set([this.baseDir, ...this.assetStorageRoots, this.defaultBaseDir,
+      ...[...this.persistedWorkspaceLocations.values()].map(directory => path.dirname(directory)),
+    ])].map(root => path.join(root, 'Assets', `${kind}-store`));
+  }
+
+  async readBinaryAsset(kind: 'pdf' | 'image' | 'audio', id: string): Promise<{ data: Buffer; fileName: string; mimeType?: string; createdAt: number } | null> {
+    if (!SAFE_SYNC_FILE_ID.test(id)) throw new Error('Invalid asset identifier.');
+    for (const directory of await this.getBinaryReadDirectories(kind)) {
+      try {
+        const meta = JSON.parse(await fsPromises.readFile(path.join(directory, `${id}.meta.json`), 'utf8'));
+        if (!meta || typeof meta !== 'object' || Array.isArray(meta) || meta.id !== undefined && meta.id !== id) throw new Error('Invalid asset metadata.');
+        return { fileName: typeof meta.fileName === 'string' ? meta.fileName : id,
+          mimeType: typeof meta.mimeType === 'string' ? meta.mimeType : undefined,
+          createdAt: Number.isFinite(meta.createdAt) ? Number(meta.createdAt) : 0,
+          data: await fsPromises.readFile(path.join(directory, `${id}.bin`)) };
+      } catch (error: any) { if (error?.code !== 'ENOENT') throw error; }
+    }
+    return null;
   }
 
   private getPanvasDir(workspaceDir: string) {
@@ -664,6 +721,9 @@ export class WorkspaceService {
   }
 
   async exportWorkspaceBackup(workspaceId: string): Promise<WorkspaceBackup> {
+    const { buildWorkspaceBackup, serializeWorkspaceBackup } = await import('../../src/services/backup/backupService.js');
+    const { collectBackupAssets } = await import('../../src/services/backup/backupAssets.js');
+    await writeQueue.flush();
     const workspaceDir = this.getWorkspaceDirById(workspaceId);
     const metadata = await this.readWorkspaceJson(workspaceDir);
     const pages = metadata.notebookPages ?? [];
@@ -686,7 +746,16 @@ export class WorkspaceService {
         canvasFileId: canvas.id, elements: [], appState: {}, files: {}, customBlocks: [], version: 1, updatedAt: canvas.updatedAt, userId: canvas.userId ?? null,
       }) as CanvasData;
     }
-    return buildWorkspaceBackup({
+    const annotationPayloads: Record<string, BackupAnnotationPayload> = {};
+    for (const record of await this.listPageDrawingRecords(workspaceId, true, true)) {
+      const annotation = parsePdfAnnotationStorageId(record.id);
+      if (!annotation) continue;
+      const pagesDir = path.join(workspaceDir, 'Notebooks', record.notebookId, 'pages');
+      annotationPayloads[record.id] = { ...annotation,
+        drawing: await this.readOptionalJson(path.join(pagesDir, `${record.id}.drawing.json`)),
+        content: await this.readOptionalJson(path.join(pagesDir, `${record.id}.content.json`)) };
+    }
+    const source = {
       workspace: metadata,
       folders: metadata.folders ?? [],
       notebooks: metadata.notebooks ?? [],
@@ -695,31 +764,51 @@ export class WorkspaceService {
       canvases: metadata.canvasFiles ?? [],
       pagePayloads,
       canvasPayloads,
+      annotationPayloads,
+    };
+    const assets = await collectBackupAssets(source, async reference => {
+      return this.readBinaryAsset(reference.kind, reference.id);
     });
+    const backup = buildWorkspaceBackup({ ...source, assets });
+    serializeWorkspaceBackup(backup);
+    return backup;
   }
 
   async importWorkspaceBackup(input: unknown): Promise<BackupImportResult> {
+    const { validateWorkspaceBackup, serializeWorkspaceBackup, remapWorkspaceBackup } = await import('../../src/services/backup/backupService.js');
+    const { verifyBackupAssets } = await import('../../src/services/backup/backupAssets.js');
     const backup = validateWorkspaceBackup(input);
+    serializeWorkspaceBackup(backup);
+    const verified = await verifyBackupAssets(backup);
     await this.ensureBaseDir();
     await this.assertStorageRootAvailable();
-    const baseName = backup.header.workspaceName.trim();
+    const baseRoot = path.resolve(this.baseDir);
+    const baseName = backup.header.workspaceName.trim().slice(0, 140);
     let workspaceName = `${baseName} (Restored)`;
     let suffix = 2;
     while (true) {
       try {
-        await fsPromises.access(this.getWorkspaceDirByName(workspaceName));
+        await fsPromises.access(path.join(baseRoot, workspaceName));
         workspaceName = `${baseName} (Restored ${suffix++})`;
       } catch {
         break;
       }
     }
     const restored = remapWorkspaceBackup(backup, { idFactory: prefix => generateId(prefix), workspaceName, userId: null, now: Date.now() });
-    const workspaceDir = this.getWorkspaceDirByName(workspaceName);
-    await Promise.all([
-      fsPromises.mkdir(path.join(workspaceDir, '.panvas', 'recovery'), { recursive: true }),
-      fsPromises.mkdir(path.join(workspaceDir, 'Notebooks'), { recursive: true }),
-      fsPromises.mkdir(path.join(workspaceDir, 'Canvas'), { recursive: true }),
-    ]);
+    const workspaceDir = path.join(baseRoot, workspaceName);
+    const stagingDir = path.join(baseRoot, `.restore-${restored.workspace.id}`);
+    const requireOwnedPath = (target: string) => {
+      if (!path.resolve(target).startsWith(baseRoot + path.sep)) throw new Error('Restore target is outside its storage root.');
+      return target;
+    };
+    requireOwnedPath(workspaceDir); requireOwnedPath(stagingDir);
+    const createdFiles: string[] = [];
+    let ownsStaging = false, ownsWorkspace = false, published = false;
+    const bytesByHash = new Map(Object.entries(backup.assets ?? {}).map(([id, asset]) => [asset.sha256, verified.bytes.get(id)!]));
+    try {
+    await fsPromises.mkdir(stagingDir); ownsStaging = true;
+    await fsPromises.mkdir(path.join(stagingDir, 'Notebooks'));
+    await fsPromises.mkdir(path.join(stagingDir, 'Canvas'));
     const metadata = {
       ...restored.workspace,
       name: workspaceName,
@@ -730,29 +819,61 @@ export class WorkspaceService {
       notebookSections: restored.sections,
       notebookPages: restored.pages,
     };
-    await this.writeWorkspaceJson(workspaceDir, metadata);
     for (const page of restored.pages) {
-      const pagesDir = path.join(workspaceDir, 'Notebooks', page.notebookId, 'pages');
+      const pagesDir = path.join(stagingDir, 'Notebooks', page.notebookId, 'pages');
       await fsPromises.mkdir(pagesDir, { recursive: true });
       const payload = restored.pagePayloads[page.id];
       if (payload.content !== null && payload.content !== undefined) await writeQueue.enqueue(path.join(pagesDir, `${page.id}.content.json`), JSON.stringify(payload.content, null, 2));
       if (payload.drawing !== null && payload.drawing !== undefined) await writeQueue.enqueue(path.join(pagesDir, `${page.id}.drawing.json`), JSON.stringify(payload.drawing, null, 2));
     }
     for (const canvas of restored.canvases) {
-      await writeQueue.enqueue(path.join(workspaceDir, 'Canvas', `${canvas.id}.json`), JSON.stringify(restored.canvasPayloads[canvas.id], null, 2));
+      await writeQueue.enqueue(path.join(stagingDir, 'Canvas', `${canvas.id}.json`), JSON.stringify(restored.canvasPayloads[canvas.id], null, 2));
     }
+    for (const [id, annotation] of Object.entries(restored.annotationPayloads ?? {})) {
+      const owner = restored.pages.find(page => page.id === annotation.ownerPageId)!;
+      const pagesDir = path.join(stagingDir, 'Notebooks', owner.notebookId, 'pages');
+      if (annotation.drawing !== null) await writeQueue.enqueue(path.join(pagesDir, `${id}.drawing.json`), JSON.stringify(annotation.drawing));
+      if (annotation.content !== null) await writeQueue.enqueue(path.join(pagesDir, `${id}.content.json`), JSON.stringify(annotation.content));
+    }
+    for (const asset of Object.values(restored.assets ?? {})) {
+      const directory = path.join(baseRoot, 'Assets', `${asset.kind}-store`);
+      await fsPromises.mkdir(directory, { recursive: true });
+      const binary = requireOwnedPath(path.join(directory, `${asset.id}.bin`));
+      const meta = requireOwnedPath(path.join(directory, `${asset.id}.meta.json`));
+      // Reserve with wx: rollback may remove only files created by this restore.
+      for (const target of [binary, meta]) { const handle = await fsPromises.open(target, 'wx'); createdFiles.push(target); await handle.close(); }
+      await writeQueue.enqueue(binary, bytesByHash.get(asset.sha256)!);
+      if (await sha256Bytes(await fsPromises.readFile(binary)) !== asset.sha256) throw new Error('Restored asset failed its on-disk integrity check.');
+      await writeQueue.enqueue(meta, JSON.stringify({ id: asset.id, ownerId: asset.ownerId, fileName: asset.fileName, mimeType: asset.mimeType, createdAt: asset.createdAt }));
+    }
+    if (path.resolve(this.baseDir) !== baseRoot) throw new Error('Storage root changed during restore. Retry the import.');
+    await fsPromises.mkdir(workspaceDir); ownsWorkspace = true;
+    await fsPromises.rename(path.join(stagingDir, 'Notebooks'), path.join(workspaceDir, 'Notebooks'));
+    await fsPromises.rename(path.join(stagingDir, 'Canvas'), path.join(workspaceDir, 'Canvas'));
+    await fsPromises.mkdir(path.join(workspaceDir, '.panvas', 'recovery'), { recursive: true });
+    // workspace.json is the publication point. No discoverable partial workspace.
+    await this.writeWorkspaceJson(workspaceDir, metadata);
+    published = true;
     this.registerWorkspace(restored.workspace.id, workspaceDir);
     await this.rememberWorkspaceLocation(restored.workspace.id, workspaceDir);
-    return { workspaceId: restored.workspace.id, workspaceName };
+    return { workspaceId: restored.workspace.id, workspaceName, ...(verified.warnings.length ? { warnings: verified.warnings } : {}) };
+    } finally {
+      if (!published) {
+        for (const file of createdFiles) await fsPromises.unlink(requireOwnedPath(file)).catch(error => { if (error?.code !== 'ENOENT') console.warn('[backup] Restore cleanup failed.', error); });
+        if (ownsWorkspace) await fsPromises.rm(requireOwnedPath(workspaceDir), { recursive: true, force: true });
+      }
+      if (ownsStaging) await fsPromises.rm(requireOwnedPath(stagingDir), { recursive: true, force: true }).catch(error => console.warn('[backup] Restore staging cleanup failed.', error));
+    }
   }
 
   /** Enumerates persisted drawing identities without exposing their contents. */
-  async listPageDrawingRecords(workspaceId: string): Promise<Array<{ id: string; notebookId: string; ownerPageId: string }>> {
+  async listPageDrawingRecords(workspaceId: string, includeContent = false, includeDeleted = false): Promise<Array<{ id: string; notebookId: string; ownerPageId: string }>> {
     const workspaceDir = this.getWorkspaceDirById(workspaceId);
     const metadata = await this.readWorkspaceJson(workspaceDir);
-    const activePages = (metadata.notebookPages ?? []).filter((page: any) => !page.deletedAt && SAFE_SYNC_FILE_ID.test(String(page.id)) && SAFE_SYNC_FILE_ID.test(String(page.notebookId)));
+    const activePages = (metadata.notebookPages ?? []).filter((page: any) => (includeDeleted || !page.deletedAt) && SAFE_SYNC_FILE_ID.test(String(page.id)) && SAFE_SYNC_FILE_ID.test(String(page.notebookId)));
     const pagesById = new Map<string, any>(activePages.map((page: any) => [String(page.id), page]));
     const records: Array<{ id: string; notebookId: string; ownerPageId: string }> = [];
+    const seen = new Set<string>();
 
     for (const notebookId of [...new Set<string>(activePages.map((page: any) => String(page.notebookId)))]) {
       const pagesDir = path.join(workspaceDir, 'Notebooks', notebookId, 'pages');
@@ -760,14 +881,16 @@ export class WorkspaceService {
       try { entries = await fsPromises.readdir(pagesDir, { withFileTypes: true }); }
       catch (error: any) { if (error?.code === 'ENOENT') continue; throw error; }
       for (const entry of entries) {
-        if (!entry.isFile() || !entry.name.endsWith('.drawing.json')) continue;
-        const id = entry.name.slice(0, -'.drawing.json'.length);
+        const suffix = entry.name.endsWith('.drawing.json') ? '.drawing.json' : includeContent && entry.name.endsWith('.content.json') ? '.content.json' : null;
+        if (!entry.isFile() || !suffix) continue;
+        const id = entry.name.slice(0, -suffix.length);
         if (!SAFE_SYNC_FILE_ID.test(id)) continue;
         const annotation = parsePdfAnnotationStorageId(id);
         const ownerPageId = annotation?.ownerPageId ?? id;
         const owner = pagesById.get(ownerPageId) as any;
         if (!owner || owner.notebookId !== notebookId || (annotation && owner.type !== 'pdf')) continue;
-        records.push({ id, notebookId, ownerPageId });
+        if (!seen.has(id)) records.push({ id, notebookId, ownerPageId });
+        seen.add(id);
       }
     }
     return records.sort((a, b) => a.id.localeCompare(b.id));

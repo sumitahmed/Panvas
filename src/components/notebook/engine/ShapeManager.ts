@@ -63,7 +63,7 @@ export class ShapeManager {
   /** Render all shapes onto the given context. */
   renderShapes(ctx: CanvasRenderingContext2D, layerId?: string): void {
     for (const shape of this.shapes) {
-      if (layerId && shape.layerId !== layerId) continue;
+      if (!this.viewport.intersectsRenderWindow(shape)) continue;
       const shapeLayerId = shape.layerId ?? DEFAULT_PAGE_LAYER_ID;
       if (layerId && shapeLayerId !== layerId) continue;
       this.renderShape(ctx, shape);

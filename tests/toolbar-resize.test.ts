@@ -254,8 +254,8 @@ test('live resize across roadmap breakpoints satisfies the toolbar contract', as
         // The existing laptop/mobile presentation has a fixed compact writing
         // row. Wider windows use the measured, deterministic group resolver.
         const expected = width <= 1023 ? {
-          visible: ['history', 'primary', 'select', 'primary'],
-          overflow: ['primary', 'pencil', 'hand', 'handwriting', 'image', 'shapes', 'ruler', 'laser', 'gestures', 'format'],
+          visible: ['history', 'primary', 'select', 'hand', 'primary'],
+          overflow: ['handwriting', 'primary', 'pencil', 'image', 'shapes', 'ruler', 'laser', 'gestures', 'format'],
           compact: true,
         } : resolveToolbarLayout(snap.cellWidth, activeGroup);
 

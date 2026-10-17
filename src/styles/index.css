@@ -2,6 +2,9 @@
 @tailwind components;
 @tailwind utilities;
 
+.tippy-box[data-theme='panvas-blocks'] { background: transparent; box-shadow: none; }
+.tippy-box[data-theme='panvas-blocks'] .tippy-content { padding: 0; }
+
 /* ============================================
    PANVAS — Global Design System
    ============================================ */
@@ -539,6 +542,24 @@
   color: #e8e8ed;
 }
 
+/* Notebook node presentation; canvas Markdown/LaTeX blocks keep their own styles. */
+.panvas-document-text .katex,
+.panvas-document-text .katex .katex-html { color: inherit; }
+.panvas-document-text .panvas-document-callout {
+  display: flex; gap: .75em; padding: .65em .85em;
+  border-left: 3px solid currentColor; border-radius: .25em;
+}
+.panvas-document-text .panvas-callout-icon { flex: none; }
+.panvas-document-text .panvas-document-reference { cursor: pointer; text-decoration: underline; }
+.panvas-document-text .panvas-document-asset { display: inline-block; max-width: 100%; }
+.panvas-document-text details > summary { cursor: pointer; }
+.panvas-document-text summary[data-heading-level] { font-weight: 600; }
+.panvas-document-text .tiptap-mathematics-render { background: transparent; color: inherit; border-radius: 3px; }
+.panvas-document-text .tiptap-mathematics-render[data-type="inline-math"] { display: inline; padding: 0 .08em; }
+.panvas-document-text .tiptap-mathematics-render[data-type="block-math"] { overflow-x: auto; max-width: 100%; margin: .65em 0; padding: .15em .25em; }
+.panvas-document-text .tiptap-mathematics-render .katex-display { margin: .35em 0; }
+.panvas-document-text .tiptap-mathematics-render.ProseMirror-selectednode { outline: 1px solid rgb(var(--accent-blue) / .6); outline-offset: 2px; }
+
 /* Markdown block styles */
 .markdown-content {
   @apply text-panvas-text-primary leading-relaxed;
@@ -925,6 +946,66 @@
   border-radius: 0.45rem;
 }
 
+.panvas-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  width: 100%;
+  padding-right: 6px;
+  border-radius: 4px;
+  color: rgb(var(--text-secondary));
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.panvas-tree-row:hover {
+  background: rgb(var(--bg-hover));
+  color: rgb(var(--text-primary));
+}
+
+.panvas-tree-row[data-state='ancestor'] {
+  color: rgb(var(--text-primary));
+  font-weight: 500;
+}
+
+.panvas-tree-row[data-state='selected'] {
+  background: rgb(var(--bg-active));
+  color: rgb(var(--text-primary));
+  box-shadow: inset 2px 0 rgb(var(--accent-blue));
+}
+
+.panvas-tree-row:focus-visible {
+  outline: 2px solid rgb(var(--accent-blue));
+  outline-offset: -2px;
+}
+
+.panvas-tree-branch {
+  position: relative;
+}
+
+.panvas-tree-branch::before {
+  content: '';
+  position: absolute;
+  left: var(--tree-guide-left, 14px);
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgb(var(--border-default) / 0.65);
+  pointer-events: none;
+}
+
+.panvas-tree-actions {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.panvas-tree-row:hover .panvas-tree-actions,
+.panvas-tree-row:focus-within .panvas-tree-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 .panvas-library {
   background:
     radial-gradient(circle at 80% -15%, rgb(var(--accent-violet) / 0.05), transparent 34rem),
@@ -1075,7 +1156,9 @@
 
 /* Full Dark View adapts known document surfaces, never a parent containing UI
    or photographs. Inline TipTap paint remains its original stored value. */
-.dark.full-dark-view .panvas-document-text {
+.dark.full-dark-view .panvas-document-text,
+.dark.full-dark-view .panvas-document-text .prose,
+.dark.full-dark-view .panvas-document-content {
   color: #dce3eb;
   --tw-prose-body: #dce3eb;
   --tw-prose-headings: #dce3eb;
@@ -1189,6 +1272,29 @@
   color: rgb(var(--text-primary)); background: rgb(var(--bg-primary));
   border-bottom: 1px solid rgb(var(--border-subtle));
 }
+/* Formatting belongs to the notebook chrome, never the selected text. Reserving
+   the toolbar region keeps the paper below it; the mobile dock already reserves
+   its own height in the workspace flex layout. */
+.panvas-floating-toolbar:has(> .panvas-text-formatting-strip) {
+  flex-direction: column; align-items: center; gap: 6px;
+}
+.panvas-notebook-workspace:has(> .panvas-notebook-chrome .panvas-text-formatting-strip),
+.panvas-notebook-workspace:has(> .panvas-fullscreen-toolbar-host .panvas-text-formatting-strip) {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto minmax(0, 1fr);
+}
+.panvas-notebook-workspace:has(> .panvas-notebook-chrome .panvas-text-formatting-strip) > .notebook-viewport,
+.panvas-notebook-workspace:has(> .panvas-fullscreen-toolbar-host .panvas-text-formatting-strip) > .notebook-viewport { grid-column: 1; grid-row: 2; }
+.panvas-notebook-workspace:has(.panvas-text-formatting-strip) > .panvas-properties-panel { grid-column: 2; grid-row: 1 / span 2; }
+.panvas-text-formatting-strip > button { width: 34px; height: 36px; min-height: 36px; border-radius: 8px; }
+.panvas-notebook-chrome:has(.panvas-text-formatting-strip) {
+  position: relative; inset: auto; flex-shrink: 0;
+  grid-column: 1; grid-row: 1;
+  background: rgb(var(--bg-primary)); border-bottom: 1px solid rgb(var(--border-subtle));
+}
+.panvas-fullscreen-toolbar-host:has(.panvas-text-formatting-strip) {
+  position: relative; inset: auto; flex-shrink: 0; padding: 12px; grid-column: 1; grid-row: 1;
+}
+.panvas-transparent-swatch { border: 1px solid rgb(var(--border-default)); background: linear-gradient(135deg, transparent 40%, currentColor 45%, currentColor 55%, transparent 60%); }
 .panvas-mobile-document-header button { min-height: 44px; }
 .panvas-app-shell[data-touch-input='true'] {
   height: var(--panvas-visual-height, 100dvh);
@@ -1331,3 +1437,72 @@
   }
   .panvas-canvas-toolbar [role='menu'] button { min-height: 44px; }
 }
+.panvas-document-content { outline: none; min-height: 72px; overflow-wrap: anywhere; color: #20242a; padding-top: 3px; }
+.panvas-document-content > :first-child { margin-top: 0; }
+.panvas-document-content pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.panvas-document-content .tiptap-mathematics-render { color: inherit; }
+.ProseMirror .tableWrapper, .panvas-table-scroll { max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; }
+.ProseMirror .tableWrapper::-webkit-scrollbar, .panvas-table-scroll::-webkit-scrollbar { height: 9px; }
+.ProseMirror .tableWrapper::-webkit-scrollbar-track, .panvas-table-scroll::-webkit-scrollbar-track { background: rgb(var(--bg-secondary)); }
+.ProseMirror .tableWrapper::-webkit-scrollbar-thumb, .panvas-table-scroll::-webkit-scrollbar-thumb { background: rgb(var(--border-strong)); border-radius: 4px; }
+.panvas-table th, .panvas-table td { min-width: 120px; word-break: normal; overflow-wrap: break-word; }
+.panvas-table-scroll:focus-visible, .ProseMirror .tableWrapper:focus-visible { outline: 2px solid rgb(var(--border-strong)); outline-offset: 2px; }
+.panvas-page-gap { pointer-events: none; user-select: none; padding: 0 !important; margin: 0 !important; border: 0 !important; }
+.panvas-code-block { position: relative; container-type: inline-size; margin: .9em 0; min-width: 0; max-width: 100%; border: 1px solid rgb(var(--border-strong) / .8); border-radius: 8px; background: color-mix(in srgb, rgb(var(--bg-secondary)) 8%, white); color: rgb(var(--text-primary)); }
+.panvas-code-block:focus-within { border-color: rgb(var(--accent-blue) / .65); }
+@media (hover:hover) and (pointer:fine) { .panvas-code-block:hover { border-color: rgb(var(--border-strong)); } }
+.panvas-code-controls { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 8px; min-height: 40px; padding: 4px 8px; border-bottom: 1px solid rgb(var(--border-default)); border-radius: 8px 8px 0 0; font: 12px/24px Inter, sans-serif; color: rgb(var(--text-secondary)); }
+.panvas-code-actions { display: flex; align-items: center; gap: 4px; }
+.panvas-code-controls button, .panvas-code-language summary { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 30px; cursor: pointer; border: 0; border-radius: 4px; padding: 2px 7px; background: transparent; color: inherit; font: inherit; white-space: nowrap; }
+.panvas-code-language summary { justify-content: flex-start; max-width: 100%; list-style: none; font-weight: 500; color: inherit; }
+.panvas-code-language summary::-webkit-details-marker { display: none; }
+.panvas-code-language summary span { overflow: hidden; text-overflow: ellipsis; }
+.panvas-code-language summary svg { flex: none; }
+.panvas-code-controls .panvas-code-copy { min-width: 55px; }
+.panvas-code-controls button:active, .panvas-code-controls button[aria-pressed="true"] { background: rgb(var(--bg-hover)); color: rgb(var(--text-primary)); }
+@media (hover:hover) and (pointer:fine) { .panvas-code-controls button:hover, .panvas-code-language summary:hover { background: rgb(var(--bg-hover)); color: rgb(var(--text-primary)); } }
+.panvas-code-controls button:focus-visible, .panvas-code-language summary:focus-visible, .panvas-code-language-popup :focus-visible { outline: 2px solid rgb(var(--accent-blue)); outline-offset: 2px; }
+.panvas-code-controls button:disabled { opacity: .5; cursor: default; }
+.panvas-code-language { position: relative; }
+.panvas-code-language-popup { position: fixed; width: 260px; padding: 8px; font: 12px/24px Inter, sans-serif; color: rgb(var(--text-secondary)); background: rgb(var(--bg-elevated)); border: 1px solid rgb(var(--border-default)); border-radius: 8px; box-shadow: 0 4px 16px #0002; }
+.panvas-code-language-popup input { width: 100%; min-height: 32px; padding: 4px 8px; background: rgb(var(--bg-secondary)); color: rgb(var(--text-primary)); border: 1px solid rgb(var(--border-default)); border-radius: 4px; }
+.panvas-code-language-popup [role="listbox"] { max-height: 190px; overflow-y: auto; margin-top: 4px; }
+.panvas-code-language-popup [role="option"] { display: block; width: 100%; min-height: 30px; text-align: left; border: 0; border-radius: 4px; padding: 3px 8px; }
+.panvas-code-language-popup [role="option"]:hover, .panvas-code-language-popup [role="option"]:focus { background: rgb(var(--bg-hover)); color: rgb(var(--text-primary)); }
+.panvas-code-language-popup [aria-selected="true"] { font-weight: 600; color: rgb(var(--text-primary)); }
+.panvas-code-block pre { margin: 0 !important; min-width: 0; max-width: 100%; border: 0 !important; border-radius: 0 0 7px 7px !important; background: transparent !important; color: inherit !important; padding: .75rem .875rem !important; font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important; tab-size: 2; overflow-x: auto; overscroll-behavior-x: contain; box-shadow: none !important; }
+.panvas-code-block pre code { color: inherit !important; padding: 0 !important; background: none !important; font-family: inherit; font-size: 13px !important; display: block; }
+.panvas-code-caption { font: 12px/24px Inter, sans-serif; color: rgb(var(--text-secondary)); width: 100%; min-height: 30px; padding: 3px 8px; border: 0; border-radius: 0 0 7px 7px; background: transparent; text-align: left; }
+.panvas-code-caption:focus-visible { outline: 2px solid rgb(var(--accent-blue)); outline-offset: -2px; }
+@container (max-width:230px) { .panvas-code-controls { grid-template-columns: 1fr; gap: 2px; } .panvas-code-actions { justify-content: flex-end; } }
+@media (pointer:coarse) { .panvas-code-controls button, .panvas-code-language summary { min-height: 40px; } .panvas-code-language-popup [role="option"] { min-height: 40px; } }
+.panvas-code-controls { background: rgb(var(--accent-blue) / .035); color: var(--code-comment); border-bottom-color: rgb(var(--border-strong) / .55); }
+.panvas-code-controls button:active, .panvas-code-controls button[aria-pressed="true"] { background: rgb(var(--accent-blue) / .12); color: inherit; }
+@media (hover:hover) and (pointer:fine) { .panvas-code-controls button:hover, .panvas-code-language summary:hover { background: rgb(var(--accent-blue) / .09); color: inherit; } }
+.panvas-code-caption { color: var(--code-comment); }
+/* Dark application chrome can surround light paper. Match the paper, not the toolbar. */
+.dark:not(.full-dark-view) .panvas-code-block {
+  color: #272a28;
+  --code-comment: #5b6472; --code-keyword: #5b21b6; --code-string: #047857;
+  --code-function: #075985; --code-number: #9a3412; --code-variable: #9f1239;
+  --code-built-in: #9a6700; --code-type: #0f766e; --code-property: #0e7490; --code-operator: #334155;
+}
+.dark.full-dark-view .panvas-code-block { background: rgb(var(--bg-elevated) / .65); }
+.panvas-code-block pre span:not([class*="hljs-"]) { color: inherit !important; }
+.panvas-code-block :is(.hljs-comment,.hljs-quote) { color: var(--code-comment) !important; }
+.panvas-code-block :is(.hljs-keyword,.hljs-selector-tag,.hljs-doctag) { color: var(--code-keyword) !important; }
+.panvas-code-block :is(.hljs-string,.hljs-title,.hljs-section,.hljs-attribute,.hljs-literal,.hljs-template-tag,.hljs-template-variable,.hljs-addition) { color: var(--code-string) !important; }
+.panvas-code-block :is(.hljs-type,.hljs-class,.hljs-title.class_) { color: var(--code-type) !important; }
+.panvas-code-block :is(.hljs-function,.hljs-title.function_,.hljs-tag,.hljs-name) { color: var(--code-function) !important; }
+.panvas-code-block :is(.hljs-number,.hljs-regexp,.hljs-link,.hljs-char.escape_) { color: var(--code-number) !important; }
+.panvas-code-block :is(.hljs-variable,.hljs-params) { color: var(--code-variable) !important; }
+.panvas-code-block :is(.hljs-built_in,.hljs-meta) { color: var(--code-built-in) !important; }
+.panvas-code-block :is(.hljs-property,.hljs-attr) { color: var(--code-property) !important; }
+.panvas-code-block :is(.hljs-operator,.hljs-symbol,.hljs-bullet,.hljs-subst,.hljs-punctuation) { color: var(--code-operator) !important; }
+.panvas-code-block .hljs-deletion { color: var(--code-variable) !important; }
+.panvas-code-block pre[data-code-wrap="true"], .panvas-code-block pre[data-code-wrap="true"] code { white-space: pre-wrap; overflow-wrap: anywhere; }
+.panvas-code-block pre[data-code-wrap="false"], .panvas-code-block pre[data-code-wrap="false"] code { white-space: pre; overflow-wrap: normal; }
+.panvas-document-layout-issue { font-size: 12px; padding: 8px; background: #fff4d6; color: #5c4200; }
+.panvas-document-page-break { height: 0; margin: 0; position: relative; }
+.panvas-document-page-break::before { content: 'Page break'; position: absolute; right: 0; top: -22px; color: #64748b; font: 10px Inter, sans-serif; }
+[data-infinite-document="true"] .panvas-document-page-break::before { content: none; }

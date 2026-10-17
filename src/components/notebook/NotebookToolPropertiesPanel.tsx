@@ -21,12 +21,15 @@ import { WorkspaceViewInspector } from '@/components/workspace/WorkspaceViewCont
 import { NoteSpaceControl } from './NoteSpaceControl';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { OverlayManager } from '@/components/ui/OverlayManager';
+import { NotebookWritingModeControl } from './NotebookWritingModeControl';
 
 interface NotebookToolPropertiesPanelProps {
   viewportEngine: ViewportManager;
   zoom: number;
   properties: PageProperties;
   onUpdateProperties: (updates: Partial<PageProperties>) => void;
+  onConvertText?: () => void;
+  canConvertText?: boolean;
   onApplyPropertiesToAll: (updates: Partial<PageProperties>) => Promise<NotebookPropertyBatchSnapshot>;
   onRestorePropertiesBatch: (snapshot: NotebookPropertyBatchSnapshot) => Promise<void>;
   /**
@@ -58,7 +61,7 @@ const lineColorSwatches: { label: string; color: string }[] = [
   { label: 'Violet', color: '#c4b5fd' },
 ];
 
-const pageSizes: PageSizeOption[] = ['A3', 'A4', 'A5', 'Letter'];
+const pageSizes: PageSizeOption[] = ['A3', 'A4', 'A5', 'Letter', 'Infinite'];
 const marginsOptions: PageMarginOption[] = ['No Margin', 'Narrow', 'Normal', 'Wide'];
 
 export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelProps> = ({ 
@@ -66,6 +69,8 @@ export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelPr
   zoom, 
   properties, 
   onUpdateProperties,
+  onConvertText,
+  canConvertText,
   onApplyPropertiesToAll,
   onRestorePropertiesBatch,
   onZoom,
@@ -434,6 +439,7 @@ export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelPr
             </div>
             <div className="flex gap-2">
               <button 
+                disabled={properties.pageSize === 'Infinite'}
                 onClick={() => handleUpdate({ orientation: 'portrait' })}
                 className={`flex-1 rounded-md border px-2 py-1.5 text-xs transition-colors focus-ring ${
                   properties.orientation === 'portrait'
@@ -444,6 +450,7 @@ export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelPr
                 Portrait
               </button>
               <button 
+                disabled={properties.pageSize === 'Infinite'}
                 onClick={() => handleUpdate({ orientation: 'landscape' })}
                 className={`flex-1 rounded-md border px-2 py-1.5 text-xs transition-colors focus-ring ${
                   properties.orientation === 'landscape'
@@ -458,6 +465,11 @@ export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelPr
 
           {/* Page Size */}
           <div>
+            <div className="mb-2 font-medium text-panvas-text-primary">Writing Layout</div>
+            <NotebookWritingModeControl properties={properties} onChange={onUpdateProperties} onConvert={onConvertText} canConvert={canConvertText} />
+            <p className="mt-2 text-[11px] leading-relaxed text-panvas-text-secondary">Document flows across sheets. Freeform keeps movable text boxes and handwriting.</p>
+          </div>
+          <div>
             <div className="mb-2 flex items-center justify-between">
               <span className="font-medium text-panvas-text-primary">Page Size</span>
               {applyToAllPages && (
@@ -465,12 +477,21 @@ export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelPr
               )}
             </div>
             <select 
+              aria-label="Page Size"
               value={properties.pageSize} 
               onChange={(e) => handleUpdate({ pageSize: e.target.value as PageSizeOption })}
               className="w-full rounded-md border border-panvas-border-default bg-panvas-bg-secondary px-2.5 py-1.5 text-xs text-panvas-text-primary focus-ring"
             >
               {pageSizes.map(s => <option key={s} value={s}>{s}</option>)}
             </select>
+            {properties.pageSize === 'Infinite' && <form className="mt-3 flex gap-2" onSubmit={event => {
+              event.preventDefault();
+              const y = Number(new FormData(event.currentTarget).get('logicalY'));
+              document.dispatchEvent(new CustomEvent('panvas:go-to-logical-y', { detail: { y } }));
+            }}>
+              <input name="logicalY" type="number" min="0" aria-label="Vertical position" placeholder="Vertical position (px)" className="min-w-0 flex-1 rounded border border-panvas-border-default bg-panvas-bg-secondary p-1 text-xs" />
+              <button type="submit" className="rounded border border-panvas-border-default px-2 text-xs focus-ring">Go</button>
+            </form>}
           </div>
 
           {/* Margins */}

@@ -4,8 +4,9 @@ import path from 'node:path';
 import { gzipSync } from 'node:zlib';
 
 const root = process.cwd();
-const dist = path.join(root, 'dist');
+const dist = path.resolve(process.argv.find(arg => arg.startsWith('--dist='))?.slice(7) ?? 'dist');
 const electronDist = path.join(root, 'dist-electron');
+const webOnly = process.argv.includes('--web');
 // The current feature-frozen application build is 1,743,841 bytes gzip for
 // support chunks. There is no duplicate/accidental chunk to remove without
 // refactoring UI routes, so 1.8 MB is the narrow release budget for this build.
@@ -20,7 +21,7 @@ async function filesBelow(directory) {
 }
 
 const rendererFiles = await filesBelow(dist);
-const electronFiles = await filesBelow(electronDist);
+const electronFiles = webOnly ? [] : await filesBelow(electronDist);
 const relative = rendererFiles.map(file => path.relative(dist, file));
 assert.ok(relative.includes('index.html'), 'renderer index exists');
 assert.ok(relative.includes('service-worker.js'), 'offline service worker is packaged');
@@ -50,9 +51,16 @@ assert.ok(mainEntryGzipBytes <= 1_500_000, `main renderer gzip budget exceeded: 
 assert.ok(supportGzipBytes <= APPLICATION_SUPPORT_GZIP_BUDGET, `renderer support JavaScript gzip budget exceeded: ${supportGzipBytes} bytes`);
 assert.ok(appGzipBytes <= 3_000_000, `total Panvas application JavaScript gzip budget exceeded: ${appGzipBytes} bytes`);
 
-const packagedMain = path.join(electronDist, 'main.js');
-const packagedMainBytes = (await stat(packagedMain)).size;
-assert.ok(packagedMainBytes <= 250_000, `Electron main-process bundle exceeds reviewable budget: ${packagedMainBytes} bytes`);
+let packagedMainBytes = null;
+let largestElectronChunkBytes = null;
+if (!webOnly) {
+  packagedMainBytes = (await stat(path.join(electronDist, 'main.js'))).size;
+  // The entry can be a tiny import facade. Inspect actual implementation
+  // chunks too, rather than accidentally measuring only that facade.
+  const chunks = await Promise.all(electronFiles.filter(file => /\.(?:m?js|cjs)$/.test(file)).map(async file => ({ name: path.basename(file), bytes: (await stat(file)).size })));
+  largestElectronChunkBytes = Math.max(...chunks.map(chunk => chunk.bytes));
+  for (const chunk of chunks) assert.ok(chunk.bytes <= 250_000, `Electron chunk exceeds reviewable budget: ${chunk.name}: ${chunk.bytes} bytes`);
+}
 
 const rendererText = (await Promise.all(javascript.map(file => readFile(file, 'utf8')))).join('\n');
 for (const forbidden of ['PANVAS_KNOWLEDGE_VAULT', 'OBSIDIAN_API_KEY', 'MCP_ENDPOINT']) {
@@ -67,6 +75,7 @@ console.log(JSON.stringify({
   totalRendererJavaScriptGzipBytes: totalRendererGzipBytes,
   excalidrawAssetJavaScriptGzipBytes: vendorAssetGzipBytes,
   electronMainBytes: packagedMainBytes,
+  largestElectronChunkBytes,
   sourceMaps: 0,
   sensitiveConfigFiles: 0,
 }, null, 2));

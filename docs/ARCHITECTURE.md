@@ -32,6 +32,10 @@ flowchart LR
 
 ## Notebook hierarchy
 
+Documentation uses the existing `TextObject.content` Tiptap/ProseMirror JSON and the same page/drawing persistence as ink. `DocumentFlowEditor` lays that document across logical sheets; it does not introduce a second database/editor or unbounded physical canvas. Text gestures dispatch existing mark commands once per completed selection. Code wrap/language/caption belong to the code node, while the code toolbar is transient view state.
+
+The public landing, legal and download routes share this renderer and load independently of editor engines. Public download metadata represents an already published version; the application version comes from the package/native runtime. Docker serves a static web build; see [DOCKER.md](DOCKER.md).
+
 ```mermaid
 flowchart TD
     Workspace --> Folder

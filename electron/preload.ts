@@ -1,6 +1,9 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
 contextBridge.exposeInMainWorld('panvas', {
+  clipboard: {
+    writeText: (text: string) => ipcRenderer.invoke('clipboard:writeText', text),
+  },
   workspace: {
     create: (name: string) => ipcRenderer.invoke('workspace:create', name),
     openDialog: () => ipcRenderer.invoke('workspace:openDialog'),
@@ -13,10 +16,12 @@ contextBridge.exposeInMainWorld('panvas', {
     getSnapshot: () => ipcRenderer.invoke('workspace:getStartupSnapshot'),
   },
   storage: {
+    getOverview: (refresh = false) => ipcRenderer.invoke('storage:getOverview', refresh),
     getRoot: () => ipcRenderer.invoke('storage:getRoot'),
     setRoot: (folderPath: string) => ipcRenderer.invoke('storage:setRoot', folderPath),
     chooseRoot: () => ipcRenderer.invoke('storage:chooseRoot'),
   },
+  appInfo: () => ipcRenderer.invoke('app:getInfo'),
   folder: {
     create: (wsId: string, name: string, parentId: string | null) => ipcRenderer.invoke('folder:create', wsId, name, parentId),
     update: (wsId: string, folderId: string, updates: any) => ipcRenderer.invoke('folder:update', wsId, folderId, updates),
@@ -46,6 +51,8 @@ contextBridge.exposeInMainWorld('panvas', {
     savePage: (wsId: string, notebookId: string, pageId: string, data: any) => ipcRenderer.invoke('notebook:savePage', wsId, notebookId, pageId, data),
     loadPage: (wsId: string, notebookId: string, pageId: string) => ipcRenderer.invoke('notebook:loadPage', wsId, notebookId, pageId),
     saveDrawing: (wsId: string, notebookId: string, pageId: string, drawingData: any) => ipcRenderer.invoke('notebook:saveDrawing', wsId, notebookId, pageId, drawingData),
+    saveDrawingJson: (wsId: string, notebookId: string, pageId: string, json: string) => ipcRenderer.invoke('notebook:saveDrawing', wsId, notebookId, pageId, json),
+    loadDrawingJson: (wsId: string, notebookId: string, pageId: string) => ipcRenderer.invoke('notebook:loadDrawing', wsId, notebookId, pageId, true),
     loadDrawing: (wsId: string, notebookId: string, pageId: string) => ipcRenderer.invoke('notebook:loadDrawing', wsId, notebookId, pageId),
     applyPageDefaults: (wsId: string, notebookId: string, updates: Partial<import('../src/types/notebook').PagePropertySet>) => ipcRenderer.invoke('notebook:applyPageDefaults', wsId, notebookId, updates),
     restorePageDefaults: (wsId: string, snapshot: import('../src/types/notebook').NotebookPropertyBatchSnapshot) => ipcRenderer.invoke('notebook:restorePageDefaults', wsId, snapshot),

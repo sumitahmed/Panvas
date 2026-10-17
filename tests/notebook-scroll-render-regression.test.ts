@@ -127,7 +127,7 @@ test('scroll focus detaches interaction but engine destruction remains owner-onl
   assert.match(renderer, /const incomingData = sectionDataCacheRef\.current\[targetPageId\];/);
   assert.match(renderer, /if \(!incomingData\)[\s\S]*setActivePage\(targetPageId\);[\s\S]*return;/);
   assert.doesNotMatch(renderer, /sectionDataCacheRef\.current\[targetPageId\] \|\| \{/);
-  assert.match(renderer, /notebookEngine\.unmount\(\);[\s\S]*notebookEngine\.setDrawingData\(incomingData, targetPageId\);/);
+  assert.match(renderer, /notebookEngine\.unmount\(\);[\s\S]*notebookEngine\.setDrawingData\(incomingData, targetPageId, incomingDrawing\);/);
   assert.match(engine, /mount\([\s\S]*if \(!this\.unsubscribeDrawingRevision\)[\s\S]*if \(!this\.unsubscribeHistoryRevision\)/);
 });
 
@@ -149,7 +149,7 @@ test('shared interaction handoff preserves page-owned visual and ownership guard
   assert.match(pageView, /visibility: liveSceneReady \? 'visible' : 'hidden'/);
   assert.match(pageView, /const liveSceneReady = isFocused && sceneReady/);
   assert.match(pageView, /\{liveSceneReady && layeredDrawing && orderedLayers\.map/);
-  assert.match(pageView, /\{liveSceneReady && liveTextObjects\.map/);
+  assert.match(pageView, /\{liveSceneReady && liveTextObjects\.filter/);
   assert.match(pageView, /if \(!liveSceneReady/);
   assert.match(pageView, /getCanvasElement\(\) === canvas/);
 });

@@ -47,6 +47,7 @@ Panvas bridges structured notebooks and infinite canvases into a single, distrac
 ## Features
 
 ✦ **Structured notebooks**: Full workspace hierarchy (`Workspace → Folder → Notebook → Section → Page`) with rich-text editing, paper templates, and multi-layer drawing.  
+✦ **Technical documents**: Tiptap rich text with A4 continuation, code languages, copy/wrap controls, tables, math, and a persistent text highlighter.<br />
 ✦ **Natural handwriting & ink**: Pressure-aware vector pen engine, palm rejection, stroke smoothing, smart erasing, and precision ruler tools.  
 ✦ **PDF annotation**: In-place PDF viewer with vector ink markup, text highlights, and high-fidelity annotated PDF export powered by `pdf-lib`.  
 ✦ **Infinite visual canvas**: Spatial diagramming powered by Excalidraw, integrated with custom Panvas cards and visual note objects.  
@@ -83,7 +84,7 @@ Panvas bridges structured notebooks and infinite canvases into a single, distrac
 Your data stays on your machine:
 - **Desktop**: Workspaces, pages, and media attachments are saved directly to `Documents/Panvas/` (or a custom root folder configured in Settings). Writes use an atomic queue with retry logic to avoid corruption.
 - **Web**: Workspaces are saved to origin-scoped IndexedDB via Dexie.
-- **Cloud Sync**: Google Drive sync is release-gated and disabled by default. When enabled, your local machine remains the primary source of record.
+- **Cloud Sync**: Optional Google Drive sync uses content hashes, common baselines and explicit conflict decisions. The example configuration disables it; ordinary editing needs no account. A local test provider is not evidence of live Google Drive acceptance.
 
 For complete data schemas and persistence flow, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/STORAGE_AND_PERSISTENCE.md](docs/STORAGE_AND_PERSISTENCE.md).
 
@@ -91,7 +92,7 @@ For complete data schemas and persistence flow, see [docs/ARCHITECTURE.md](docs/
 
 ## Build from source
 
-Prerequisites: **Node.js 20 or 22 LTS**, **npm**, and **Git**.
+Prerequisites: **Node.js 24 LTS** (the CI/container toolchain uses 24.21.0), **npm**, and **Git**. Node 22.18+ is also declared compatible. Node 20 cannot run the current TypeScript test workflow.
 
 ```bash
 # 1. Clone the repository
@@ -103,7 +104,7 @@ npm ci
 
 # 3. Start local development
 # Web / Vite dev server (open http://localhost:3000/app)
-npm run dev
+npm run dev:web
 
 # Desktop / Electron app
 npm start
@@ -112,9 +113,37 @@ npm start
 npm run typecheck
 npm test
 npm run build
+
+# Web production bundle (includes the landing/public routes and /app)
+npm run build:web
+
+# Native Windows installer; optional additional portable executable
+npm run package:win -- --portable
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed development workflows and debugging guidelines.
+
+## Docker
+
+Docker runs the web app. Electron remains a native Windows application. There is no Panvas API/database container to provision.
+
+```bash
+docker compose --env-file .env.example up --build -d --wait
+# Open http://localhost:8080/app (landing page: http://localhost:8080/)
+docker compose logs --tail=100
+docker compose down
+
+# Development with source hot reload on http://localhost:3000/app
+docker compose --env-file .env.example -f compose.dev.yaml up --build
+```
+
+Workspace data is stored in **your browser**, scoped to the origin, and survives container restarts. Changing hostname/port creates another browser storage origin. Back up before changing origins or clearing site data. Remote access needs HTTPS for clipboard, recording, OAuth and offline-shell APIs. See [Docker operations](docs/DOCKER.md) for configuration, health checks, updates and development tests.
+
+## Local release candidate
+
+The working tree is preparing **0.1.8-rc.1**, an unpublished manual-review candidate. Public download buttons above still identify the published **0.1.7** installer and its checksum. No RC download URL is advertised.
+
+Build/review instructions: [release readiness](docs/RELEASE_READINESS.md), [candidate notes](docs/RELEASE_NOTES_CANDIDATE.md), [troubleshooting](docs/TROUBLESHOOTING.md). Commits, tags, uploads, hosting changes and public release require the owner's explicit approval after manual testing.
 
 ---
 

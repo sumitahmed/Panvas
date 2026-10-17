@@ -269,6 +269,8 @@ export interface HistoryCommand {
   description: string;
   /** IDs introduced by this command, used when a later atomic transform consumes them. */
   createdObjectIds?: readonly string[];
+  /** Explicit page-layout transitions may follow an exhausted editor history. */
+  documentLayoutPageId?: string;
   /** Execute the command (or re-execute on redo). */
   execute: () => void;
   /** Reverse the command on undo. */

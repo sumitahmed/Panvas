@@ -95,3 +95,27 @@ media-master/
 # Local agent instructions and generated viewport captures
 /.agents/
 /tests/screenshots/
+
+# Local release candidates, test recordings, and tool caches
+/release-candidate/
+/playwright-report/
+/test-results/
+/.cache/
+/.vite/
+/.eslintcache
+*.exe
+*.exe.blockmap
+*.dmp
+*.pid
+*.tmp
+*.bak
+*.backup
+
+# Local database files; application schemas and JSON fixtures stay visible
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm

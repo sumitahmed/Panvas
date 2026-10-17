@@ -1,0 +1,44 @@
+# Standalone development configuration. No Windows node_modules bind mount.
+services:
+  web-dev:
+    build:
+      context: .
+      target: development
+    ports:
+      - "127.0.0.1:${PANVAS_DEV_PORT:-3000}:3000"
+    environment:
+      VITE_MARKETING_ONLY: "false"
+      VITE_ENABLE_CLOUD_SYNC: "false"
+      VITE_PANVAS_SYNC_V2: "false"
+      VITE_ENABLE_ANALYTICS: "false"
+      CHOKIDAR_USEPOLLING: "true"
+      BROWSER: none
+    volumes:
+      - ./src:/app/src:ro
+      - ./electron:/app/electron:ro
+      - ./public:/app/public:ro
+      - ./tests:/app/tests:ro
+      - ./index.html:/app/index.html:ro
+      - ./vite.config.ts:/app/vite.config.ts:ro
+      - ./tailwind.config.ts:/app/tailwind.config.ts:ro
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    init: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 3g
+    cpus: 2.0
+    stop_grace_period: 10s
+    networks: [development]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  development:

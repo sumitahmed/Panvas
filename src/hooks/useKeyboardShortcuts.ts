@@ -18,6 +18,7 @@ export function useKeyboardShortcuts() {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       const isCtrl = e.ctrlKey || e.metaKey;
 
       // Ctrl+K → Command Palette

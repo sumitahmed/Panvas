@@ -33,4 +33,6 @@ The browser build is origin-scoped. Browser storage and any enabled network inte
 
 These controls reduce risk but are not a security guarantee. Keep your operating system updated, download releases only from the project release page, verify release checksums, and maintain independent backups of important work.
 
+For self-hosting, use HTTPS in front of the stateless web server and treat all `VITE_` settings as public. No service-role key, refresh token or password belongs in that configuration. See [Docker operation](docs/DOCKER.md). The current candidate's [security review](docs/research/production-readiness-security-2026-10-17.md) distinguishes production dependencies, outstanding development advisories, package checks and unverified live-provider/host configuration.
+
 For architecture details, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/STORAGE_AND_PERSISTENCE.md](docs/STORAGE_AND_PERSISTENCE.md).

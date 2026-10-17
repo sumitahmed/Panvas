@@ -14,8 +14,13 @@ export function textFromTipTap(value: unknown): string {
   if (typeof value !== 'object') return '';
   const record = value as Record<string, unknown>;
   const direct = typeof record.text === 'string' ? record.text : '';
+  const attrs = record.attrs && typeof record.attrs === 'object' ? record.attrs as Record<string, unknown> : {};
+  const semantic = ['inlineMath', 'blockMath', 'math'].includes(String(record.type))
+    ? typeof attrs.latex === 'string' ? attrs.latex : ''
+    : ['image', 'inlineImage'].includes(String(record.type)) ? typeof attrs.alt === 'string' ? attrs.alt : ''
+      : record.type === 'pageReference' && typeof attrs.label === 'string' ? attrs.label : '';
   const nested = textFromTipTap(record.content);
-  return `${direct} ${nested}`.replace(/\s+/g, ' ').trim();
+  return `${direct} ${semantic} ${nested}`.replace(/\s+/g, ' ').trim();
 }
 
 export function normalizeSearchText(value: string): string {

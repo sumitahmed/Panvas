@@ -45,7 +45,11 @@ interface UIState {
   createDialogType: 'workspace' | 'folder' | 'notebook' | 'section' | 'page' | 'canvas' | null;
   createDialogParentId: string | null;
   createDialogParentType: 'folder' | 'notebook' | 'section' | null;
-  openCreateDialog: (type: 'workspace' | 'folder' | 'notebook' | 'section' | 'page' | 'canvas', parentId?: string | null, parentType?: 'folder' | 'notebook' | 'section' | null) => void;
+  createDialogLayoutMode: 'document' | 'freeform' | null;
+  createDialogAfterPageId: string | null;
+  pendingDocumentFocusPageId: string | null;
+  setDocumentFocusPageId: (pageId: string | null) => void;
+  openCreateDialog: (type: 'workspace' | 'folder' | 'notebook' | 'section' | 'page' | 'canvas', parentId?: string | null, parentType?: 'folder' | 'notebook' | 'section' | null, layoutMode?: 'document' | 'freeform', afterPageId?: string | null) => void;
   closeCreateDialog: () => void;
   inlineCreate: { type: 'page' | 'canvas'; parentId: string | null; parentType: 'folder' | 'notebook' | 'section' | null } | null;
   closeInlineCreate: () => void;
@@ -122,11 +126,15 @@ export const useUIStore = create<UIState>()(
   createDialogType: null,
   createDialogParentId: null,
   createDialogParentType: null,
+  createDialogLayoutMode: null,
+  createDialogAfterPageId: null,
+  pendingDocumentFocusPageId: null,
+  setDocumentFocusPageId: pageId => set({ pendingDocumentFocusPageId: pageId }),
   inlineCreate: null,
-  openCreateDialog: (type, parentId = null, parentType = null) => type === 'page' || type === 'canvas'
-    ? set({ isSidebarOpen: true, isCreateDialogOpen: false, createDialogType: null, createDialogParentId: null, createDialogParentType: null, inlineCreate: { type, parentId, parentType } })
-    : set({ isCreateDialogOpen: true, createDialogType: type, createDialogParentId: parentId, createDialogParentType: parentType, inlineCreate: null }),
-  closeCreateDialog: () => set({ isCreateDialogOpen: false, createDialogType: null, createDialogParentId: null, createDialogParentType: null }),
+  openCreateDialog: (type, parentId = null, parentType = null, layoutMode, afterPageId = null) => type === 'canvas'
+    ? set({ isSidebarOpen: true, isCreateDialogOpen: false, createDialogType: null, createDialogParentId: null, createDialogParentType: null, createDialogLayoutMode: null, createDialogAfterPageId: null, inlineCreate: { type, parentId, parentType } })
+    : set({ isCreateDialogOpen: true, createDialogType: type, createDialogParentId: parentId, createDialogParentType: parentType, createDialogLayoutMode: layoutMode ?? (type === 'page' ? 'document' : null), createDialogAfterPageId: afterPageId, inlineCreate: null }),
+  closeCreateDialog: () => set({ isCreateDialogOpen: false, createDialogType: null, createDialogParentId: null, createDialogParentType: null, createDialogLayoutMode: null, createDialogAfterPageId: null }),
   closeInlineCreate: () => set({ inlineCreate: null }),
 
   // Context menu

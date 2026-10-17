@@ -5,7 +5,8 @@ import { useWorkspaceStore } from '@/stores/workspaceStore';
 import { useUIStore } from '@/stores/uiStore';
 import { useAuthStore } from '@/stores/authStore';
 import { FOLDER_COLOR_PRESETS, type Folder as WorkspaceFolder, type FolderIconId } from '@/types/workspace';
-import { exportWorkspaceBackup, importWorkspaceBackup, importWorkspaceBackupFromDialog } from '@/services/backup/backupService';
+import { exportWorkspaceBackup, importWorkspaceBackup, importWorkspaceBackupFromDialog, serializeWorkspaceBackup, describeBackupError } from '@/services/backup/backupService';
+import { MAX_BACKUP_BYTES } from '@/services/backup/backupAssets';
 import { FilePreviewCard, type LibraryFile } from './FilePreviewCards';
 import { CloudSyncPanel } from './CloudSyncPanel';
 import { filterAndSortLibraryFiles, getLibraryTags, projectActiveLibraryFiles, projectLibraryTrashFiles, type LibraryFilter, type LibrarySort, type LibraryView } from './libraryModel';
@@ -261,7 +262,7 @@ export function LibraryWorkspace() {
       const result = await exportWorkspaceBackup(store.activeWorkspaceId, user?.id ?? null);
       if (result.canceled) return;
       if (!result.savedPath) {
-        const blob = new Blob([JSON.stringify(result.backup, null, 2)], { type: 'application/json' });
+        const blob = new Blob([serializeWorkspaceBackup(result.backup)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const anchor = document.createElement('a');
         anchor.href = url;
@@ -272,7 +273,7 @@ export function LibraryWorkspace() {
       showToast('Workspace backup exported.', 'success');
     } catch (error) {
       console.warn('[LibraryWorkspace] Backup export failed:', error);
-      showToast('Could not export workspace backup.', 'error');
+      showToast(describeBackupError(error), 'error');
     } finally {
       setBackupBusy(false);
     }
@@ -284,15 +285,16 @@ export function LibraryWorkspace() {
     if (!file) return;
     setBackupBusy(true);
     try {
+      if (file.size > MAX_BACKUP_BYTES) throw new Error('Backup file exceeds the 100 MiB limit.');
       const text = await file.text();
       const result = await importWorkspaceBackup(text, user?.id ?? null);
       await store.loadWorkspaces();
       store.setActiveWorkspace(result.workspaceId);
       await store.loadWorkspaceContents(result.workspaceId);
-      showToast(`Backup restored as “${result.workspaceName}”.`, 'success');
+      showToast(`Backup restored as “${result.workspaceName}”. ${result.warnings?.join(' ') ?? ''}`, result.warnings?.length ? 'info' : 'success');
     } catch (error) {
       console.warn('[LibraryWorkspace] Backup import failed:', error);
-      showToast('This file is not a valid Panvas workspace backup.', 'error');
+      showToast(describeBackupError(error), 'error');
     } finally {
       setBackupBusy(false);
     }
@@ -310,10 +312,10 @@ export function LibraryWorkspace() {
       await store.loadWorkspaces();
       store.setActiveWorkspace(result.workspaceId);
       await store.loadWorkspaceContents(result.workspaceId);
-      showToast(`Backup restored as “${result.workspaceName}”.`, 'success');
+      showToast(`Backup restored as “${result.workspaceName}”. ${result.warnings?.join(' ') ?? ''}`, result.warnings?.length ? 'info' : 'success');
     } catch (error) {
       console.warn('[LibraryWorkspace] Backup dialog import failed:', error);
-      showToast('This file is not a valid Panvas workspace backup.', 'error');
+      showToast(describeBackupError(error), 'error');
     } finally {
       setBackupBusy(false);
     }

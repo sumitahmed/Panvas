@@ -10,6 +10,7 @@ import TaskItem from '@tiptap/extension-task-item';
 import { TextStyle } from '@tiptap/extension-text-style';
 import Color from '@tiptap/extension-color';
 import FontFamily from '@tiptap/extension-font-family';
+import { AllSelection, NodeSelection } from '@tiptap/pm/state';
 import { FontSize } from '../src/components/notebook/FontSizeExtension.ts';
 import {
   captureFormattingSelection,
@@ -150,6 +151,26 @@ test('inline formatting repeatedly targets and preserves the same selected range
     assert.ok(mark(editor, type), `${type} should apply again without reselecting`);
   }
 
+  disposeEditor(editor);
+});
+
+test('formatting sessions retain native all/node selections and backward text direction', () => {
+  const editor = createEditor();
+  editor.commands.selectAll();
+  runFormattingCommand(editor, captureFormattingSelection(editor), chain => chain.toggleBold());
+  assert.ok(editor.state.selection instanceof AllSelection);
+  editor.commands.setTextSelection({ from: 6, to: 1 });
+  const backward = captureFormattingSelection(editor);
+  editor.commands.setTextSelection(8);
+  runFormattingCommand(editor, backward, chain => chain.toggleItalic());
+  assert.equal(editor.state.selection.anchor, 6); assert.equal(editor.state.selection.head, 1);
+  editor.commands.setContent({ type: 'doc', content: [{ type: 'horizontalRule' }, { type: 'paragraph' }] });
+  editor.commands.setNodeSelection(0); const node = captureFormattingSelection(editor);
+  editor.commands.setTextSelection(2);
+  runFormattingCommand(editor, node, chain => chain.command(({ tr }: any) => {
+    assert.ok(tr.selection instanceof NodeSelection); return true;
+  }));
+  assert.ok(editor.state.selection instanceof NodeSelection);
   disposeEditor(editor);
 });
 

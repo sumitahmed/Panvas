@@ -168,7 +168,7 @@ test('ShapeManager and LayerManager fallback undefined layerId to DEFAULT_PAGE_L
     rotate: () => {},
     beginPath: () => {},
     rect: () => { rendered = true; },
-    roundRect: () => {},
+    roundRect: () => { rendered = true; },
     strokeRect: () => {},
     fillRect: () => {},
     stroke: () => {},
@@ -245,7 +245,8 @@ test('LocalElementRepository prevents saving duplicate identical snapshots', () 
 // 5. Sticky Notes: Colors, Shapes, Opacity, and Persistence
 // ----------------------------------------------------
 test('Sticky notes support expanded palette, custom hex colors, 6 shapes, and opacity', () => {
-  assert.equal(STICKY_NOTE_COLORS.length, 7);
+  assert.ok(STICKY_NOTE_COLORS.length >= 7);
+  assert.ok(STICKY_NOTE_COLORS.every(color => isValidHexColor(color.value)));
   const colorNames = STICKY_NOTE_COLORS.map(c => c.name);
   assert.ok(colorNames.includes('Warm Yellow'));
   assert.ok(colorNames.includes('Soft Green'));

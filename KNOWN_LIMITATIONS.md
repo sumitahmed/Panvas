@@ -6,6 +6,7 @@ This list describes the current release scope. It is intentionally short; a beha
 
 - The Windows installer is unsigned. Windows SmartScreen may show an unrecognized-app warning on first launch.
 - Verify the installer against the `SHA256SUMS.txt` manifest supplied with the same GitHub Release. Do not use a hash copied from another page or mirror.
+- For an unpublished local candidate, use its local checksum manifest. Clean install/upgrade/uninstall and the final native custom-color popup interaction require owner review in an isolated environment.
 
 ## Browser storage and compatibility
 
@@ -24,6 +25,11 @@ This list describes the current release scope. It is intentionally short; a beha
 ## Cloud Sync
 
 - Google Drive Cloud Sync is controlled by build-time flags, disabled in the example environment (`VITE_ENABLE_CLOUD_SYNC=false` and `VITE_PANVAS_SYNC_V2=false`). It is not required for local editing, and local storage remains authoritative.
+- Deterministic two-replica/fault tests do not establish live Google Drive or Supabase acceptance. Provider credentials and approved disposable accounts are required for that release gate.
+
+## Build tooling
+
+- The development toolchain currently has unpatched/upgrade-dependent denial-of-service advisories. Production dependency audit is a separate check. Use trusted source/configuration, keep dev servers on loopback and consult the candidate security/QA report before release. Do not use `npm audit fix --force` to migrate the UI/build stack implicitly.
 
 ## Scope boundaries
 

@@ -15,8 +15,9 @@ import {
   Trash2,
   FileUp,
   LayoutGrid,
+  Library,
+  ChevronRight,
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
 import { useWorkspaceStore } from '@/stores/workspaceStore';
 import { useUIStore } from '@/stores/uiStore';
 import { useAuthStore } from '@/stores/authStore';
@@ -28,6 +29,8 @@ import { useLocation } from 'wouter';
 import { validatePdfImport } from '@/services/pdf/validatePdfImport';
 import { useDismissibleLayer } from '@/components/ui/useDismissibleLayer';
 import { navigateToLibraryView } from '@/services/library/libraryRouteState';
+import { focusWorkspaceTree, navigateWorkspaceTree } from '@/components/workspace/workspaceTreeKeyboard';
+import { validateEntityName } from '@/lib/entityName';
 
 export function Sidebar() {
   const [, navigate] = useLocation();
@@ -60,6 +63,13 @@ export function Sidebar() {
   const { user } = useAuthStore();
   const [isNewMenuOpen, setIsNewMenuOpen] = useState(false);
   const newMenuRef = useRef<HTMLDivElement>(null);
+  const treeRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const rows = [...treeRef.current?.querySelectorAll<HTMLElement>('[role="treeitem"]') ?? []];
+    const focused = document.activeElement?.closest<HTMLElement>('[role="treeitem"]');
+    const entry = focused && treeRef.current?.contains(focused) ? focused : rows.find(row => row.getAttribute('aria-current') === 'page') ?? rows[0];
+    for (const row of rows) row.tabIndex = row === entry ? 0 : -1;
+  }, [workspaces, activePageId, activeCanvasId, expandedWorkspaceIds]);
 
   useDismissibleLayer(isNewMenuOpen, newMenuRef, () => setIsNewMenuOpen(false));
   const fileInputRef = React.useRef<HTMLInputElement>(null);
@@ -155,7 +165,6 @@ export function Sidebar() {
       <div className="px-3 pt-3 pb-2.5 flex-shrink-0">
         <div className="flex items-center justify-between px-1 mb-2.5">
           <span className="text-[10px] font-semibold tracking-[0.13em] text-panvas-text-tertiary uppercase">Library</span>
-          <span className="text-2xs text-panvas-text-tertiary">Local</span>
         </div>
         <div ref={newMenuRef} className="relative">
           <button
@@ -177,7 +186,7 @@ export function Sidebar() {
               <NewItemAction icon={<Folder size={14} />} label="New Folder" description="Organize related work" onClick={() => openCreateDialog('folder')} close={() => setIsNewMenuOpen(false)} />
               <NewItemAction icon={<BookOpen size={14} />} label="New Notebook" description="Pages, sections, and handwriting" onClick={() => openCreateDialog('notebook')} close={() => setIsNewMenuOpen(false)} />
               <NewItemAction icon={<ListTree size={14} />} label="New Section" description="Add a section to this notebook" onClick={() => activeNotebookId ? openCreateDialog('section', activeNotebookId) : showToast('Select a notebook first', 'info')} close={() => setIsNewMenuOpen(false)} />
-              <NewItemAction icon={<FileText size={14} />} label="New Page" description="Start a page in this section" onClick={() => activeNotebookSectionId ? openCreateDialog('page', activeNotebookSectionId) : showToast('Select a section first', 'info')} close={() => setIsNewMenuOpen(false)} />
+              <NewItemAction icon={<FileText size={14} />} label="New Page" description="Document sheets or Freeform handwriting" onClick={() => activeNotebookSectionId ? openCreateDialog('page', activeNotebookSectionId) : showToast('Select a section first', 'info')} close={() => setIsNewMenuOpen(false)} />
               <div className="my-1 h-px bg-panvas-border-subtle" />
               <NewItemAction icon={<LayoutGrid size={14} />} label="New Canvas" description="An infinite visual workspace" onClick={() => activeNotebookSectionId
                 ? openCreateDialog('canvas', activeNotebookSectionId, 'section')
@@ -216,18 +225,12 @@ export function Sidebar() {
               <Plus size={14} />
             </button>
           </div>
-          <div className="space-y-0.5">
+          <div ref={treeRef} role="tree" aria-label="Workspaces" onFocusCapture={focusWorkspaceTree} onKeyDown={navigateWorkspaceTree}>
             {workspaces.map(workspace => (
               <SidebarSection
                 key={workspace.id}
                 title={workspace.name}
-                icon={
-                  <div className={`w-4 h-4 rounded-[3px] flex items-center justify-center text-[9px] font-semibold
-                    ${activeWorkspaceId === workspace.id ? 'bg-panvas-text-primary text-panvas-bg-primary' : 'bg-panvas-bg-active text-panvas-text-secondary'}
-                  `}>
-                    {workspace.name.charAt(0)}
-                  </div>
-                }
+                icon={<Library size={16} />}
                 actions={
                   <button
                     type="button"
@@ -237,20 +240,20 @@ export function Sidebar() {
                       e.stopPropagation();
                       openContextMenu(e.clientX, e.clientY, workspace.id, 'workspace');
                     }}
-                    className="btn-icon p-1 opacity-0 group-hover:opacity-100"
+                    tabIndex={-1}
+                    className="panvas-tree-actions flex h-5 w-5 shrink-0 items-center justify-center text-panvas-text-tertiary hover:bg-panvas-bg-active focus-ring"
                   >
                     <MoreHorizontal size={14} />
                   </button>
                 }
                 onHeaderClick={() => setActiveWorkspace(workspace.id)}
+                onContextMenu={event => openContextMenu(event.clientX, event.clientY, workspace.id, 'workspace')}
                 isActive={activeWorkspaceId === workspace.id}
                 isExpanded={expandedWorkspaceIds.has(workspace.id)}
                 onToggleExpanded={() => toggleWorkspaceExpanded(workspace.id)}
                 workspaceId={workspace.id}
               >
-                <div className="ml-2.5 border-l border-panvas-border-subtle/70 pl-0.5">
-                  <WorkspaceTree workspaceId={workspace.id} />
-                </div>
+                <WorkspaceTree workspaceId={workspace.id} />
               </SidebarSection>
             ))}
           </div>
@@ -260,11 +263,11 @@ export function Sidebar() {
 
       </div>
 
-      <div className="px-3 py-2.5 border-t border-panvas-border-subtle bg-panvas-bg-primary flex-shrink-0">
-        <div className="flex items-center gap-2 text-2xs text-panvas-text-tertiary">
-          <HardDrive size={13} />
-          <div className="min-w-0"><div className="font-medium text-panvas-text-secondary">Local storage</div><div className="mt-0.5">Stored on this device</div></div>
-        </div>
+      <div className="px-2.5 border-t border-panvas-border-subtle flex-shrink-0">
+        <button type="button" aria-label="Local storage details" title="Stored on this device. View storage location, usage and backup controls. Google Drive sync is optional."
+          onClick={() => navigate('/app/settings/workspace')} className="flex h-8 w-full items-center gap-2 px-2 text-[11px] text-panvas-text-tertiary hover:text-panvas-text-primary focus-ring">
+          <HardDrive size={14} aria-hidden="true" /><span>On this device</span><ChevronRight size={12} className="ml-auto" aria-hidden="true" />
+        </button>
       </div>
     </aside>
   );
@@ -305,6 +308,7 @@ interface SidebarSectionProps {
   actions?: React.ReactNode;
   children: React.ReactNode;
   onHeaderClick?: () => void;
+  onContextMenu?: (event: React.MouseEvent) => void;
   isActive?: boolean;
   defaultExpanded?: boolean;
   isExpanded?: boolean;
@@ -318,12 +322,30 @@ function SidebarSection({
   actions,
   children,
   onHeaderClick,
+  onContextMenu,
   isActive,
   defaultExpanded = true,
   isExpanded: controlledIsExpanded,
   onToggleExpanded,
   workspaceId,
 }: SidebarSectionProps) {
+  const childrenId = React.useId();
+  const isRenaming = useUIStore(state => Boolean(workspaceId && state.renamingId === workspaceId));
+  const [nameDraft, setNameDraft] = useState(title);
+  const renameFinished = useRef(false);
+  useEffect(() => { if (isRenaming) { setNameDraft(title); renameFinished.current = false; } }, [isRenaming, title]);
+  const saveName = async () => {
+    if (!workspaceId || renameFinished.current) return;
+    try {
+      const name = validateEntityName(nameDraft, 'workspace');
+      renameFinished.current = true;
+      if (name !== title) await useWorkspaceStore.getState().renameWorkspace(workspaceId, name);
+      useUIStore.getState().setRenamingId(null);
+    } catch (error) {
+      renameFinished.current = false;
+      useUIStore.getState().showToast(error instanceof Error ? error.message : 'Could not rename workspace.', 'error');
+    }
+  };
   const [localIsExpanded, setLocalIsExpanded] = React.useState(defaultExpanded);
   const isExpanded = controlledIsExpanded !== undefined ? controlledIsExpanded : localIsExpanded;
   
@@ -374,10 +396,18 @@ function SidebarSection({
   };
 
   return (
-    <div className="group">
+    <div>
       <div
-        role="button"
-        tabIndex={0}
+        data-tree-id={workspaceId}
+        role="treeitem"
+        aria-level={1}
+        aria-label={title}
+        aria-expanded={isExpanded}
+        aria-owns={isExpanded ? childrenId : undefined}
+        aria-selected={false}
+        data-state={isActive ? 'ancestor' : undefined}
+        tabIndex={-1}
+        onContextMenu={onContextMenu}
         onClick={() => {
           handleToggle();
           onHeaderClick?.();
@@ -386,43 +416,34 @@ function SidebarSection({
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
         onKeyDown={(event) => {
-          if (event.key === 'Enter' || event.key === ' ') {
+          if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
             event.preventDefault();
             handleToggle();
             onHeaderClick?.();
           }
         }}
-        className={`w-full h-7 flex items-center gap-2 px-2 rounded-md border-l-2 text-xs font-medium
-                    hover:bg-panvas-bg-hover transition-colors duration-150 group cursor-pointer
-                    ${isActive ? 'border-panvas-text-primary bg-panvas-bg-hover text-panvas-text-primary' : 'border-transparent text-panvas-text-secondary'}
+        className={`panvas-tree-row pl-1.5
                     ${isDragOver ? 'outline outline-1 outline-panvas-border-strong bg-panvas-bg-hover' : ''}`}
       >
-        <ChevronDown
-          size={13}
-          className={`transition-transform duration-150 text-panvas-text-tertiary hover:text-panvas-text-primary ${isExpanded ? '' : '-rotate-90'}`}
+        <button type="button" data-tree-toggle tabIndex={-1} aria-label={`${isExpanded ? 'Collapse' : 'Expand'} ${title}`}
+          className="flex h-4 w-4 shrink-0 items-center justify-center text-panvas-text-tertiary hover:text-panvas-text-primary focus-ring"
           onClick={(e) => {
             e.stopPropagation();
             handleToggle();
           }}
-        />
-        {icon}
-        <span className="truncate flex-1 text-left">{title}</span>
+        ><ChevronRight size={13} className={isExpanded ? 'rotate-90' : ''} /></button>
+        <span className="flex w-4 shrink-0 items-center justify-center" aria-hidden="true">{icon}</span>
+        <span className="min-w-0 flex-1 truncate text-left" title={title}>{isRenaming ? <input autoFocus aria-label="Workspace name" value={nameDraft}
+          onChange={event => setNameDraft(event.target.value)} onClick={event => event.stopPropagation()} onBlur={() => { void saveName(); }}
+          onKeyDown={event => {
+            event.stopPropagation();
+            if (event.key === 'Enter') { event.preventDefault(); void saveName(); }
+            if (event.key === 'Escape') { event.preventDefault(); renameFinished.current = true; useUIStore.getState().setRenamingId(null); }
+          }} className="w-full bg-transparent text-panvas-text-primary outline-none" /> : title}</span>
         <div className="flex items-center">{actions}</div>
       </div>
 
-      <AnimatePresence>
-        {isExpanded && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.16, ease: 'easeInOut' }}
-            className="overflow-hidden"
-          >
-            <div className="mt-0.5">{children}</div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {isExpanded && <div id={childrenId} role="group" className="panvas-tree-branch">{children}</div>}
     </div>
   );
 }

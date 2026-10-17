@@ -1,13 +1,53 @@
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import electron from 'vite-plugin-electron/simple';
 import path from 'path';
-import { cpSync, createReadStream, existsSync, statSync } from 'node:fs';
+import { appendFileSync, cpSync, createReadStream, existsSync, statSync } from 'node:fs';
 import dotenv from 'dotenv';
 import { applyDevelopmentBrowserCsp } from './src/config/browserCsp';
 
 dotenv.config();
 dotenv.config({ path: path.resolve(__dirname, '.env.local') });
+
+// Optional release verification journal, outside the packaged output. It records
+// actual rendered modules (including worker/main builds), without source code.
+function moduleAuditPlugin(): Plugin {
+  return { name: 'panvas-module-audit', apply: 'build', generateBundle: { order: 'post', handler(_options, bundle) {
+    const target = process.env.PANVAS_BUNDLE_MODULE_AUDIT;
+    if (!target) return;
+    const resolved = path.resolve(target), artifacts = path.resolve(__dirname, 'artifacts') + path.sep;
+    if (!resolved.startsWith(artifacts)) throw new Error('Bundle audit output must be inside artifacts.');
+    const chunks = Object.values(bundle).filter(item => item.type === 'chunk').map(item => ({
+      file: item.fileName, imports: item.imports, dynamicImports: item.dynamicImports,
+      modules: Object.entries(item.modules).filter(([, value]) => value.renderedLength > 0).map(([id]) => id.replaceAll('\\', '/')),
+    }));
+    appendFileSync(resolved, JSON.stringify({ chunks }) + '\n');
+  } } };
+}
+
+/** Vite builds URL workers before Rollup removes disabled development callers.
+ * Keep every worker referenced by live output; omit only unreachable worker assets.
+ */
+function pruneUnreferencedWorkerAssets(): Plugin {
+  return {
+    name: 'panvas-prune-unreferenced-workers', apply: 'build', enforce: 'post',
+    generateBundle: { order: 'post', handler(_options, bundle) {
+      const names = Object.keys(bundle);
+      const pending = names.filter(name => bundle[name].type === 'chunk' || /\.(?:html|css)$/.test(name));
+      const reachable = new Set(pending);
+      while (pending.length) {
+        const item = bundle[pending.pop()!];
+        const text = item.type === 'chunk' ? item.code : typeof item.source === 'string' ? item.source : new TextDecoder().decode(item.source);
+        for (const name of names) if (!reachable.has(name) && text.includes(path.posix.basename(name))) {
+          reachable.add(name); pending.push(name);
+        }
+      }
+      const omitted = names.filter(name => bundle[name].type === 'asset' && /\.(?:js|wasm)$/.test(name) && !reachable.has(name));
+      for (const name of omitted) delete bundle[name];
+      if (omitted.length) this.info(`Omitted unreferenced worker assets: ${omitted.join(', ')}`);
+    } },
+  };
+}
 
 const defaultWebClientId = '486992017517-uog6ucb24pkidgp5tcg1icuif4a3sprc.apps.googleusercontent.com';
 const googleWebClientId = process.env.VITE_PANVAS_GOOGLE_WEB_CLIENT_ID || defaultWebClientId;
@@ -92,13 +132,16 @@ export default defineConfig(({ command, mode }) => {
         transformIndexHtml: html => applyDevelopmentBrowserCsp(html, command === 'serve'),
       },
       localExcalidrawAssets(),
+      pruneUnreferencedWorkerAssets(),
+      moduleAuditPlugin(),
       ...(!isWebOnly
         ? [
             electron({
               main: {
                 entry: 'electron/main.ts',
                 vite: {
-                  plugins: [cleanElectronRollupOptions()],
+                  plugins: [cleanElectronRollupOptions(), moduleAuditPlugin()],
+                  build: { emptyOutDir: true },
                   define: {
                     'process.env.PANVAS_GOOGLE_CLIENT_ID': JSON.stringify(googleClientId),
                     'process.env.PANVAS_GOOGLE_CLIENT_SECRET': JSON.stringify(googleClientSecret),
@@ -108,7 +151,8 @@ export default defineConfig(({ command, mode }) => {
               preload: {
                 input: 'electron/preload.ts',
                 vite: {
-                  plugins: [cleanElectronRollupOptions()],
+                  plugins: [cleanElectronRollupOptions(), moduleAuditPlugin()],
+                  build: { emptyOutDir: false },
                 },
               },
               renderer: {},
@@ -127,6 +171,7 @@ export default defineConfig(({ command, mode }) => {
     // only fetched when local recognition is first used), which requires ES
     // module worker output instead of the default IIFE bundle.
     format: 'es',
+    plugins: () => [moduleAuditPlugin()],
   },
   define: {
     'process.env': {
@@ -149,6 +194,9 @@ export default defineConfig(({ command, mode }) => {
   build: {
     target: 'esnext',
     sourcemap: false,
+    // Standard compression passes; keep the existing release budgets intact.
+    minify: 'terser',
+    terserOptions: { maxWorkers: 2, compress: { passes: 2 } },
     rollupOptions: {
       output: {
         // Keep the shared runtime explicit; let dynamic route imports determine

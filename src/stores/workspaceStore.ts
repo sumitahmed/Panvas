@@ -5,7 +5,7 @@
 
 import { create } from 'zustand';
 import type { Workspace, Folder, CanvasFile } from '@/types/workspace';
-import type { Notebook, NotebookPage, NotebookSection, NotebookCover, PageTemplateId as PageTemplate } from '@/types/notebook';
+import type { Notebook, NotebookPage, NotebookSection, NotebookCover, PagePropertySet, PageTemplateId as PageTemplate } from '@/types/notebook';
 import { workspaceRepository } from '@/repositories/WorkspaceRepository';
 import { folderRepository } from '@/repositories/FolderRepository';
 import { canvasRepository } from '@/repositories/CanvasRepository';
@@ -18,7 +18,13 @@ import { purgeEligibleRoots } from '@/services/cloudsync/trash';
 import type { SyncEntityKind } from '@/services/cloudsync/types';
 import type { PanvasBootstrapSnapshot } from '@/types/bootstrap';
 import { getNextGeneratedPageTitle, isGeneratedPagePlaceholder } from '@/lib/notebookPageNaming';
-import { getNotebookPageDefaults } from '@/lib/pageProperties';
+import { derivePagePropertyOverrides, getNotebookPageDefaults } from '@/lib/pageProperties';
+import { generateId } from '@/lib/utils/id';
+
+export interface NewDocumentPageOptions {
+  layoutMode: 'document' | 'freeform';
+  pageSize: Exclude<PagePropertySet['pageSize'], 'Custom'>;
+}
 
 const ACTIVE_WORKSPACE_KEY = 'panvas.activeWorkspaceId';
 const ACTIVE_CANVAS_KEY = 'panvas.activeCanvasId';
@@ -139,7 +145,7 @@ interface WorkspaceState {
 
   createNotebook: (folderId: string | null, name: string, cover?: NotebookCover, template?: PageTemplate) => Promise<Notebook>;
   createNotebookSection: (notebookId: string, name: string) => Promise<NotebookSection>;
-  createNotebookPage: (sectionId: string, title: string) => Promise<NotebookPage>;
+  createNotebookPage: (sectionId: string, title: string, options?: NewDocumentPageOptions) => Promise<NotebookPage>;
   reorderPages: (itemIds: string[]) => Promise<void>;
   toggleNotebookExpanded: (id: string) => Promise<void>;
   toggleNotebookSectionExpanded: (id: string) => Promise<void>;
@@ -266,8 +272,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       ? currentActiveId
       : data.workspaces.find(item => item.id === storedWorkspaceId)?.id ?? data.workspaces[0]?.id ?? null;
     if (snapshot) {
-      pendingBootstrapSnapshot = snapshot;
-      pendingBootstrapWorkspaceId = activeWorkspaceId;
+      // The startup snapshot can serve startup reads only. A later workspace
+      // refresh (including deferred legacy import) must not cache mutable
+      // metadata across creations and edits.
+      pendingBootstrapSnapshot = get().initialDocumentRestoreComplete ? null : snapshot;
+      pendingBootstrapWorkspaceId = pendingBootstrapSnapshot ? activeWorkspaceId : null;
       useNotebookSettingsStore.getState().hydrateSettings(snapshot.settings);
     } else {
       pendingBootstrapSnapshot = null;
@@ -936,7 +945,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     return section;
   },
 
-  createNotebookPage: async (sectionId: string, title: string) => {
+  createNotebookPage: async (sectionId: string, title: string, options?: NewDocumentPageOptions) => {
     const section = get().notebookSections.find(item => item.id === sectionId);
     if (!section) throw new Error('Notebook section not found');
     const userId = useAuthStore.getState().user?.id ?? null;
@@ -952,6 +961,18 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const owningNotebook = get().notebooks.find(item => item.id === section.notebookId);
     const defaults = getNotebookPageDefaults(owningNotebook);
     const defaultData = createDefaultDrawingData(defaults);
+    if (options) {
+      defaultData.properties = { ...defaultData.properties, layoutMode: options.layoutMode, pageSize: options.pageSize, orientation: 'portrait' };
+      if (options.pageSize === 'Infinite') defaultData.properties.infiniteWidth = 794;
+      if (options.layoutMode === 'document') defaultData.objects!.push({
+        id: generateId('document'), type: 'text', x: 0, y: 0, width: 0, height: 0,
+        content: { type: 'doc', content: [{ type: 'paragraph' }] }, createdAt: Date.now(),
+        metadata: { documentRole: 'body', richTextSchemaVersion: 3 },
+      });
+      const overrides = derivePagePropertyOverrides(defaultData.properties, owningNotebook);
+      await notebookRepository.setPagePropertyOverrides(workspaceId, page.id, overrides);
+      page.pagePropertyOverrides = overrides;
+    }
     await notebookRepository.saveDrawingData(workspaceId, section.notebookId, page.id, defaultData);
     journalChange({ entityType: 'notebookPage', entityId: page.id, workspaceId, operation: 'create', payload: { title: page.title, notebookId: section.notebookId, sectionId } });
 

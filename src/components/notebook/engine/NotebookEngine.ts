@@ -104,7 +104,7 @@ export class NotebookEngine {
   private unsubscribeDrawingRevision: (() => void) | null = null;
   private unsubscribeHistoryRevision: (() => void) | null = null;
   private sceneMutations = new SceneMutationCoordinator();
-  private sceneMutationListeners = new Set<() => void>();
+  private sceneMutationListeners = new Set<(reason?: 'document-text') => void>();
 
   constructor(options: NotebookEngineOptions = {}) {
     this.viewport = new ViewportManager();
@@ -142,8 +142,8 @@ export class NotebookEngine {
     this.unsubscribeHandwritingTool = this.tools.subscribe(state => {
       this.handwriting.setActive(state.handwritingToTextEnabled);
     });
-    this.unsubscribeDrawingRevision = this.input.onDrawingChange(() => {
-      this.publishSceneMutation('drawing');
+    this.unsubscribeDrawingRevision = this.input.onDrawingChange(reason => {
+      this.publishSceneMutation('drawing', reason);
     });
     this.unsubscribeHistoryRevision = this.history.subscribe((_canUndo, _canRedo, source) => {
       if (source === 'user') {
@@ -181,8 +181,8 @@ export class NotebookEngine {
       this.handwriting.setActive(this.tools.getState().handwritingToTextEnabled);
     }
     if (!this.unsubscribeDrawingRevision) {
-      this.unsubscribeDrawingRevision = this.input.onDrawingChange(() => {
-        this.publishSceneMutation('drawing');
+      this.unsubscribeDrawingRevision = this.input.onDrawingChange(reason => {
+        this.publishSceneMutation('drawing', reason);
       });
     }
     if (!this.unsubscribeHistoryRevision) {
@@ -200,6 +200,7 @@ export class NotebookEngine {
     this.handwriting.invalidateScope();
     this.input.detach();
     this.drawing.detachCanvas();
+    this.viewport.setRenderWindowOrigin(0);
   }
 
   /** Handle canvas resize. */
@@ -239,7 +240,7 @@ export class NotebookEngine {
   }
 
   /** One notification per logical committed scene mutation. */
-  onSceneMutation(listener: () => void): () => void {
+  onSceneMutation(listener: (reason?: 'document-text') => void): () => void {
     this.sceneMutationListeners.add(listener);
     return () => this.sceneMutationListeners.delete(listener);
   }
@@ -248,19 +249,27 @@ export class NotebookEngine {
     return this.input.onDrawingGestureLifecycle(listener);
   }
 
-  private publishSceneMutation(channel: 'drawing' | 'history'): void {
+  private publishSceneMutation(channel: 'drawing' | 'history', reason?: 'document-text'): void {
     // Commands can intentionally notify both managers in one stack. The first channel is
     // the committed boundary; its paired compatibility notification is not a new mutation.
     // Snapshot listeners still run synchronously here, before any mutable state can drift.
     if (!this.sceneMutations.accept(channel)) return;
     this.drawingRevision += 1;
-    this.sceneMutationListeners.forEach(listener => listener());
+    this.sceneMutationListeners.forEach(listener => listener(reason));
   }
 
   /** Load drawing data (e.g., from disk). Replaces current state. */
-  setDrawingData(data: DrawingData | null, pageId: string | null = null): void {
+  setDrawingData(data: DrawingData | null, pageId: string | null = null, pathSource?: DrawingEngine): void {
     this.input.setEraserPageOwner(pageId);
-    const ownedData = data ? structuredClone(data) : null;
+    // Numeric stroke samples already have a detached, lossless snapshot path.
+    // Generic structuredClone of the entire populated scene stalls navigation.
+    const ownedData = data ? (() => {
+      const { objects, strokes, ...rest } = data;
+      return { ...structuredClone(rest),
+        ...(objects ? { objects: objects.map(object => object.type === 'stroke' ? cloneStrokeSnapshot(object) : structuredClone(object)) } : {}),
+        ...(strokes ? { strokes: strokes.map(cloneStrokeSnapshot) } : {}),
+      };
+    })() : null;
     this.sceneOwnerPageId = pageId;
     this.drawingRevision += 1;
     this.selection.resetPageScope();
@@ -285,13 +294,13 @@ export class NotebookEngine {
         layerId: object.layerId && validLayerIds.has(object.layerId) ? object.layerId : fallbackLayerId,
       });
       if (ownedData.version === 1) {
-        this.drawing.setStrokes((ownedData.strokes || []).map(normalizeLayer));
+        this.drawing.setStrokes((ownedData.strokes || []).map(normalizeLayer), pathSource);
         this.shapes.setShapes((ownedData.shapes || []).map(normalizeLayer));
         this.texts.setTexts([]);
         this.images.clearImages();
       } else {
         const objects = (ownedData.objects || []).map(normalizeLayer);
-        this.drawing.setStrokes(objects.filter(o => o.type === 'stroke') as Stroke[]);
+        this.drawing.setStrokes(objects.filter(o => o.type === 'stroke') as Stroke[], pathSource);
         this.shapes.setShapes(objects.filter(o => o.type === 'shape') as Shape[]);
         this.texts.setTexts(objects.filter(o => o.type === 'text') as any[]);
         this.images.setImages(objects.filter(o => o.type === 'image') as any[]);

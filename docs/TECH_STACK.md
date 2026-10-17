@@ -6,8 +6,8 @@ This table is a concise map of the current `package.json`. The lockfile and inst
 
 | Technology | Declared version | Role |
 | --- | --- | --- |
-| Node.js | 20/22 LTS recommended | Build, scripts, and Electron tooling |
-| Electron | `^43.3.0` | Windows desktop host and privileged main process |
+| Node.js | 24 LTS; CI/container 24.21.0 | Build, scripts, and Electron tooling |
+| Electron | `43.5.0` | Windows desktop host and privileged main process |
 | React / React DOM | `^18.3.1` | Renderer UI |
 | TypeScript | `^5.7.3` | Static checking for renderer and Electron code |
 | Vite | `^6.4.3` | Development server and renderer bundler |
@@ -26,11 +26,11 @@ This table is a concise map of the current `package.json`. The lockfile and inst
 
 | Technology | Declared version | Role |
 | --- | --- | --- |
-| TipTap extensions | `3.30.2` | Structured rich text and editor features |
+| TipTap extensions | `3.30.5` | Structured rich text and editor features |
 | `@excalidraw/excalidraw` | `^0.17.6` | Infinite canvas scene and drawing surface |
 | PDF.js (`pdfjs-dist`) | `^4.10.38` | PDF rendering and text extraction |
 | `pdf-lib` | `^1.17.1` | Annotated-PDF export |
-| KaTeX / `rehype-katex` | `^0.16.21` / `^7.0.1` | Formula rendering |
+| KaTeX / `rehype-katex` | `0.18.2` / `^7.0.1` | Formula rendering |
 | `lowlight` / `highlight.js` | `^3.3.0` / `11.11.2` | Code-block highlighting |
 | `polygon-clipping` | `^0.15.7` | Geometry operations used by ink tools |
 

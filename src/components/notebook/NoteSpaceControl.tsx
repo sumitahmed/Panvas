@@ -39,13 +39,13 @@ export function NoteSpaceControl({ properties, onChange }: {
       <div className="flex items-center gap-3 rounded-lg border border-panvas-border-subtle bg-panvas-bg-primary p-2.5">
         <SpaceMap noteSpace={noteSpace} />
         <div className="grid min-w-0 flex-1 grid-cols-2 gap-1.5" aria-label="Research space directions">
-          {sides.map(([label, key]) => {
+          {sides.filter(([label]) => properties.pageSize !== 'Infinite' || label === 'Top' || label === 'Bottom').map(([label, key]) => {
             const value = noteSpace[label.toLowerCase() as keyof typeof noteSpace];
             return <SideButton key={key} label={label} value={value} onDecrease={() => updateSide(key, value - STEP)} onIncrease={() => updateSide(key, value + STEP)} />;
           })}
         </div>
       </div>
-      <button type="button" onClick={() => onChange({ extraTop: Math.min(MAX_SPACE, noteSpace.top + STEP), extraRight: Math.min(MAX_SPACE, noteSpace.right + STEP), extraBottom: Math.min(MAX_SPACE, noteSpace.bottom + STEP), extraLeft: Math.min(MAX_SPACE, noteSpace.left + STEP), extraHeight: 0 })} className="mt-2 w-full rounded-md border border-panvas-border-default bg-panvas-bg-primary px-2 py-1.5 text-xs font-medium text-panvas-text-primary hover:bg-panvas-bg-hover focus-ring">Add {STEP} px around page</button>
+      <button type="button" onClick={() => onChange({ extraTop: Math.min(MAX_SPACE, noteSpace.top + STEP), extraRight: properties.pageSize === 'Infinite' ? noteSpace.right : Math.min(MAX_SPACE, noteSpace.right + STEP), extraBottom: Math.min(MAX_SPACE, noteSpace.bottom + STEP), extraLeft: properties.pageSize === 'Infinite' ? noteSpace.left : Math.min(MAX_SPACE, noteSpace.left + STEP), extraHeight: 0 })} className="mt-2 w-full rounded-md border border-panvas-border-default bg-panvas-bg-primary px-2 py-1.5 text-xs font-medium text-panvas-text-primary hover:bg-panvas-bg-hover focus-ring">Add {STEP} px around page</button>
       </div>}
     </section>
   );

@@ -30,7 +30,7 @@ import { InkSamples } from './inkSamples.ts';
 import { startHandwritingTrace, finishHandwritingTrace, type HandwritingTrace } from '../../../dev/handwritingTrace.ts';
 import { NavigationGestureLifecycle } from './NavigationGestureLifecycle.ts';
 
-export type DrawingChangeListener = () => void;
+export type DrawingChangeListener = (reason?: 'document-text') => void;
 export type DrawingGestureListener = (active: boolean) => void;
 export type InkStrokeLifecycleEvent =
   | { type: 'start'; instrument: 'pen' | 'pencil' }
@@ -150,6 +150,13 @@ export class InputManager {
     this.drawingGestureListeners.add(listener);
     return () => this.drawingGestureListeners.delete(listener);
   }
+  /** Preserve a captured pointer when a bounded raster changes its DOM origin. */
+  refreshCanvasGeometry(): void {
+    if (!this.canvas || !this.cachedCanvasRect) return;
+    this.cachedCanvasRect = this.canvas.getBoundingClientRect();
+    this.cachedCssWidth = this.canvas.clientWidth;
+    this.cachedCssHeight = this.canvas.clientHeight;
+  }
 
   /** Promote an incomplete single-pointer edit into a two-finger viewport gesture. */
   cancelActivePointerInteraction(): void {
@@ -166,10 +173,10 @@ export class InputManager {
     for (const listener of this.drawingGestureListeners) listener(active);
   }
 
-  notifyChange(): void {
+  notifyChange(reason?: 'document-text'): void {
     const startedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
     for (const listener of this.changeListeners) {
-      listener();
+      listener(reason);
     }
     if (startedAt) gate0Profiler.event('drawing-notification', performance.now() - startedAt, { listeners: this.changeListeners.size });
   }
@@ -571,6 +578,11 @@ export class InputManager {
   }
 
   private createTextBox(e: PointerEvent): void {
+    const bodyId = this.textManager.getDocumentBodyId();
+    if (bodyId) {
+      document.dispatchEvent(new CustomEvent('panvas:focus-text', { detail: { id: bodyId } }));
+      return;
+    }
     const point = this.getCanvasPoint(e);
     
     // Check if we hit an existing text box first

@@ -1,4 +1,5 @@
 import * as notebookDB from '@/database/notebookDB';
+import Dexie from 'dexie';
 import type { Notebook, NotebookPage, NotebookPropertyBatchSnapshot, NotebookSection, PagePropertySet, NotebookCover, PdfPageState } from '@/types/notebook';
 import { db } from '@/database/schema';
 import { queuePageSearchSave, type PageSearchSaveContext } from '@/services/search/searchIndexEvents';
@@ -6,6 +7,8 @@ import { clearAncestorDeletion } from '@/services/library/trashModel';
 import { recordLocalChangeDetached } from '@/services/cloudsync/recordLocalChange';
 import { parsePdfAnnotationStorageId } from '@/lib/pdfAnnotationStorage';
 import { gate0Profiler } from '@/dev/gate0Profiler';
+import { saveLargeDrawingOffThread } from '@/services/storage/drawingSaveWorkerClient';
+import { drawingSnapshotJson } from '@/services/storage/drawingSnapshotJson';
 
 export class NotebookRepository {
   async getAll(userId: string | null): Promise<Notebook[]> {
@@ -202,9 +205,12 @@ export class NotebookRepository {
       } catch { /* store fallback */ }
     }
     if (typeof window !== 'undefined' && window.panvas?.notebook) {
-      await window.panvas.notebook.saveDrawing(effectiveWorkspaceId, effectiveNotebookId, pageId, data);
+      if (window.panvas.notebook.saveDrawingJson) await window.panvas.notebook.saveDrawingJson(effectiveWorkspaceId, effectiveNotebookId, pageId, drawingSnapshotJson(data));
+      else await window.panvas.notebook.saveDrawing(effectiveWorkspaceId, effectiveNotebookId, pageId, data);
     } else {
-      await notebookDB.saveDrawingData(effectiveWorkspaceId, effectiveNotebookId, pageId, data);
+      if (Dexie.currentTransaction || !await saveLargeDrawingOffThread(effectiveWorkspaceId, effectiveNotebookId, pageId, drawingSnapshotJson(data))) {
+        await notebookDB.saveDrawingData(effectiveWorkspaceId, effectiveNotebookId, pageId, data);
+      }
     }
     recordLocalChangeDetached({ entityType: 'pageDrawing', entityId: pageId, workspaceId: effectiveWorkspaceId, operation: 'update', payload: data });
     queuePageSearchSave({ workspaceId: effectiveWorkspaceId, notebookId: effectiveNotebookId, pageId, kind: 'drawing', data, ...searchContext });
@@ -213,7 +219,9 @@ export class NotebookRepository {
   async loadDrawingData(workspaceId: string, notebookId: string, pageId: string): Promise<any> {
     const startedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
     if (typeof window !== 'undefined' && window.panvas?.notebook) {
-      const result = await window.panvas.notebook.loadDrawing(workspaceId, notebookId, pageId);
+      const result = window.panvas.notebook.loadDrawingJson
+        ? await window.panvas.notebook.loadDrawingJson(workspaceId, notebookId, pageId).then(json => json === null ? null : JSON.parse(json))
+        : await window.panvas.notebook.loadDrawing(workspaceId, notebookId, pageId);
       if (startedAt) gate0Profiler.event('notebook-repository-read', performance.now() - startedAt, { pageId, source: 'electron' });
       return result;
     }

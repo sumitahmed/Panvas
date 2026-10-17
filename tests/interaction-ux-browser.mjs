@@ -12,7 +12,7 @@ const errors = [];
 let passed = 0;
 const pass = name => { passed++; console.log(`PASS: ${name}`); };
 const count = name => `window.__documentWork?.bump('${name}');`;
-const server = await createServer({ mode: 'web', cacheDir: path.join(directory, 'vite-cache'), server: { port: 0, open: false }, plugins: [{
+const server = await createServer({ mode: 'web', cacheDir: path.join(directory, 'vite-cache'), optimizeDeps: { entries: ['tests/fixtures/document-input.html'] }, server: { port: 0, open: false }, plugins: [{
   name: 'document-work-counters', enforce: 'pre', transform(code, id) {
     id = id.replaceAll('\\', '/').split('?')[0];
     if (id.endsWith('/PdfWorkspace.tsx')) {

@@ -2,7 +2,7 @@
 // Panvas — Settings Layout
 // ============================================
 
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { useRoute, useLocation, Link } from 'wouter';
 import { User, Palette, HardDrive, Info, X } from 'lucide-react';
 import { AccountSection } from './sections/AccountSection';
@@ -18,31 +18,40 @@ const SETTINGS_TABS = [
 ];
 
 export function SettingsLayout() {
-  const [match, params] = useRoute('/app/settings/:tab*');
+  const [, params] = useRoute('/app/settings/:tab*');
   const [, navigate] = useLocation();
   
   // Default to account tab if no specific tab is provided
-  const activeTab = params?.['tab*'] || 'account';
+  const activeTab = SETTINGS_TABS.some(tab => tab.id === params?.['tab*']) ? params!['tab*'] : 'account';
+  const dialogRef = useRef<HTMLDivElement>(null);
 
   // Handle escape key to close settings
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' && !e.defaultPrevented) {
+        e.preventDefault();
         navigate('/app');
       }
+      if (e.key !== 'Tab' || !dialogRef.current) return;
+      const controls = [...dialogRef.current.querySelectorAll<HTMLElement>('button:not([disabled]),a[href],input:not([disabled])')].filter(element => element.getClientRects().length > 0);
+      const first = controls[0], last = controls[controls.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
     };
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    dialogRef.current?.querySelector<HTMLElement>('[aria-current="page"]')?.focus();
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    return () => { window.removeEventListener('keydown', handleKeyDown); if (previous?.isConnected) previous.focus(); };
   }, [navigate]);
 
   return (
-    <div className="panvas-layer-modal fixed inset-0 flex flex-col overflow-hidden bg-panvas-bg-primary animate-in fade-in duration-200 sm:flex-row" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div ref={dialogRef} className="panvas-layer-modal fixed inset-0 flex flex-col overflow-hidden bg-panvas-bg-primary animate-in fade-in duration-200 sm:flex-row" role="dialog" aria-modal="true" aria-labelledby="settings-title">
       
       {/* Sidebar Navigation */}
-      <aside className="flex w-full shrink-0 flex-col border-b border-panvas-border-subtle bg-panvas-bg-secondary/78 pt-4 sm:w-64 sm:border-b-0 sm:border-r sm:pt-8">
+      <aside className="flex w-full shrink-0 flex-col border-b border-panvas-border-subtle bg-panvas-bg-secondary/78 pt-4 sm:w-52 sm:border-b-0 sm:border-r sm:pt-6">
         <div className="mb-3 flex items-center justify-between px-5 sm:mb-7 sm:px-6">
           <div>
-            <p className="text-2xs font-semibold uppercase tracking-[0.14em] text-panvas-text-tertiary">Panvas</p>
+            <p className="text-2xs font-semibold uppercase tracking-[0.14em] text-panvas-text-secondary">Panvas</p>
             <h1 id="settings-title" className="mt-1 text-xl font-semibold tracking-tight text-panvas-text-primary">Settings</h1>
           </div>
         </div>
@@ -52,15 +61,13 @@ export function SettingsLayout() {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id;
             return (
-              <Link key={tab.id} href={`/app/settings/${tab.id}`}>
-                <a aria-current={isActive ? 'page' : undefined} className={`flex shrink-0 items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors focus-ring ${
+              <Link key={tab.id} href={`/app/settings/${tab.id}`} aria-current={isActive ? 'page' : undefined} className={`flex shrink-0 items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors focus-ring ${
                   isActive 
                     ? 'bg-panvas-bg-tertiary text-panvas-text-primary' 
                     : 'text-panvas-text-secondary hover:text-panvas-text-primary hover:bg-panvas-bg-tertiary/50'
                 }`}>
                   <Icon size={16} className={isActive ? 'text-panvas-text-primary' : 'text-panvas-text-muted'} />
                   {tab.label}
-                </a>
               </Link>
             );
           })}
@@ -68,7 +75,7 @@ export function SettingsLayout() {
       </aside>
 
       {/* Main Content Area */}
-      <main className="relative flex flex-1 flex-col overflow-y-auto bg-panvas-bg-primary">
+      <main className="relative flex min-w-0 flex-1 flex-col overflow-y-auto bg-panvas-bg-primary">
         <div className="absolute right-4 top-4 sm:right-6 sm:top-6">
           <button 
             type="button"
@@ -81,7 +88,7 @@ export function SettingsLayout() {
           </button>
         </div>
 
-        <div className="w-full max-w-2xl flex-1 px-5 py-14 sm:mx-auto sm:px-8 sm:py-16">
+        <div className="w-full max-w-2xl flex-1 px-5 pb-8 pt-14 sm:mx-auto sm:px-8 sm:pt-10">
           {activeTab === 'account' && <AccountSection />}
           {activeTab === 'appearance' && <AppearanceSection />}
           {activeTab === 'workspace' && <WorkspaceSection />}

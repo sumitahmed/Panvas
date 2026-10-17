@@ -11,6 +11,7 @@ import { SyncRunAuthority } from '../src/services/cloudsync/runAuthority.ts';
 import { LocalStorageSyncV2BaselineStore } from '../src/services/cloudsync/v2/baselineStore.ts';
 import { planAccountAdoption } from '../src/services/cloudsync/v2/accountAdoption.ts';
 import { browserRecordApplyFailureCode } from '../src/services/cloudsync/browserApply.ts';
+import { copyWorkspaceGraph } from '../src/services/cloudsync/v2/workspaceCopy.ts';
 import type { ScannedSyncEntity } from '../src/services/cloudsync/engine.ts';
 import type { SyncV2BaselineRecord, SyncV2BaselineStore, SyncV2Catalog, SyncV2ConflictStore, SyncV2LocalAdapter, SyncV2LocalSource, SyncV2Manifest, SyncV2MigrationConflict, SyncV2Profile, SyncV2ProfileState, SyncV2Provider, SyncV2RemoteRead } from '../src/services/cloudsync/v2/types.ts';
 
@@ -121,6 +122,72 @@ function richDevice() {
 }
 
 const sync = (provider: MemoryProvider, device: Device, account = 'account-A') => runCloudSyncV2({ accountIdentifier: account, provider, source: device.source, adapter: device.adapter, baselines: device.baselines, conflictStore: device.conflicts });
+
+const documentationDrawing = (pageSize = 'A4') => ({
+  properties: { layoutMode: 'document', pageSize, infiniteWidth: 794 },
+  objects: [{ id: 'body-1', type: 'text', metadata: { documentRole: 'body', richTextSchemaVersion: 3 }, content: { type: 'doc', content: [
+    { type: 'heading', attrs: { level: 2, blockId: 'heading-1' }, content: [{ type: 'text', text: 'page-pdf is ordinary prose' }] },
+    { type: 'paragraph', content: [{ type: 'text', text: 'marked link', marks: [{ type: 'bold' }, { type: 'italic' }, { type: 'highlight', attrs: { color: '#9b59b6' } },
+      { type: 'textStyle', attrs: { color: '#123456' } }, { type: 'link', attrs: { href: 'file:///C:/Panvas/dist/index.html?panvasPage=page-pdf&panvasBlock=heading-2' } }] }] },
+    { type: 'pageReference', attrs: { targetPageId: 'page-pdf', targetBlockId: 'heading-2' } },
+    { type: 'callout', content: [{ type: 'paragraph', content: [{ type: 'inlineImage', attrs: { fileId: 'image-page' } }] }] },
+    { type: 'image', attrs: { source: 'https://external.invalid/image.png' } },
+    { type: 'codeBlock', attrs: { language: 'rust', wrap: false }, content: [{ type: 'text', text: 'fn main() {}' }] },
+    { type: 'blockMath', attrs: { latex: 'E=mc^2' } },
+    { type: 'table', content: [{ type: 'tableRow', content: [{ type: 'tableCell', attrs: { colspan: 1, rowspan: 1, colwidth: [140] }, content: [{ type: 'paragraph', content: [{ type: 'text', text: 'table content' }] }] }] }] },
+  ] } }],
+});
+
+test('native sync scanner includes nested documentation images without fetching external references', async () => {
+  const previousWindow = (globalThis as any).window, requested: string[] = [];
+  const bytes = new Uint8Array([137, 80, 78, 71]).buffer;
+  const document = documentationDrawing();
+  (globalThis as any).window = { panvas: {
+    workspace: { getAll: async () => [{ id: 'ws-doc', userId: null }] }, folder: { getAll: async () => [] },
+    notebook: { getAll: async () => [{ id: 'nb-doc', workspaceId: 'ws-doc' }], loadPage: async () => null, loadDrawing: async () => document },
+    notebookSection: { getAll: async () => [{ id: 'sec-doc', notebookId: 'nb-doc' }] },
+    notebookPage: { getAll: async () => [{ id: 'page-doc', notebookId: 'nb-doc', sectionId: 'sec-doc' }] },
+    canvasFile: { getAll: async () => [] }, cloudsync: { listPageDrawingRecords: async () => [] },
+    binary: { getImage: async (id: string) => { requested.push(id); return { data: bytes, fileName: 'figure.png', mimeType: 'image/png' }; } },
+  } };
+  try {
+    const entities = await new LocalSyncPayloadSource().scanWorkspace('ws-doc');
+    assert.deepEqual(requested, ['image-page']);
+    const asset = entities.find(entity => entity.entityType === 'asset')!;
+    assert.equal(asset.parentId, 'page-doc'); assert.deepEqual([...decodeAssetEnvelope(asset.bytes!)!.bytes], [137, 80, 78, 71]);
+  } finally { (globalThis as any).window = previousWindow; }
+});
+
+test('workspace copies remap documentation references and internal links while retaining prose and binary bytes', async () => {
+  const device = richDevice(); device.edit('pageDrawing', 'page-1', { pageId: 'page-1', data: documentationDrawing('Infinite') });
+  const graph = [...device.entities.values()], copied = await copyWorkspaceGraph('profile-doc', 'ws-A', graph);
+  const copyOf = (kind: string, id: string) => copied.entities[graph.findIndex(entity => entity.entityType === kind && entity.entityId === id)]!;
+  const drawing = JSON.parse(new TextDecoder().decode(copyOf('pageDrawing', 'page-1').bytes!)).data;
+  const nodes = drawing.objects[0].content.content;
+  assert.equal(nodes[0].content[0].text, 'page-pdf is ordinary prose');
+  assert.deepEqual(nodes[1].content[0].marks.slice(0, 4), documentationDrawing().objects[0].content.content[1].content![0].marks!.slice(0, 4));
+  const targetPage = copyOf('notebookPage', 'page-pdf').entityId;
+  assert.equal(nodes[2].attrs.targetPageId, targetPage); assert.equal(nodes[2].attrs.targetBlockId, 'heading-2');
+  assert.equal(new URL(nodes[1].content[0].marks[4].attrs.href).searchParams.get('panvasPage'), targetPage);
+  assert.equal(nodes[4].attrs.source, 'https://external.invalid/image.png');
+  assert.deepEqual(drawing.properties, documentationDrawing('Infinite').properties);
+  const image = decodeAssetEnvelope(copyOf('asset', 'image-page').bytes!)!;
+  assert.deepEqual([...image.bytes], [137, 80, 78, 71]); assert.equal(image.metadata.ownerId, copyOf('notebookPage', 'page-1').entityId);
+});
+
+test('rich A4 and Infinite documentation survives interrupted upload retry and a fresh replica', async () => {
+  const provider = new InterruptibleProvider(), desktop = richDevice();
+  desktop.edit('pageDrawing', 'page-1', { pageId: 'page-1', data: documentationDrawing() });
+  desktop.add('notebookPage', 'infinite-doc', 'sec-1', { id: 'infinite-doc', notebookId: 'nb-1', sectionId: 'sec-1', type: 'default' });
+  desktop.add('pageDrawing', 'infinite-doc', 'infinite-doc', { pageId: 'infinite-doc', data: documentationDrawing('Infinite') });
+  provider.failUploadAt = 3;
+  assert.equal((await sync(provider, desktop)).status, 'error');
+  assert.equal((await sync(provider, desktop)).status, 'synced');
+  const browser = new Device(); assert.equal((await sync(provider, browser)).status, 'synced');
+  for (const id of ['page-1', 'infinite-doc']) assert.deepEqual(browser.value('pageDrawing', id), desktop.value('pageDrawing', id));
+  assert.deepEqual(browser.asset('image-page')!.bytes, desktop.asset('image-page')!.bytes);
+  assert.equal((await sync(provider, browser)).status, 'synced');
+});
 
 test('returning browser with legacy baselines downloads remote pages and contents despite local bookkeeping', async () => {
   const provider = new MemoryProvider();

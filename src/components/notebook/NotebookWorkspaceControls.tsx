@@ -43,7 +43,7 @@ export const NotebookWorkspaceControls: React.FC<{ focusOnly?: boolean; embedded
   const isLeftPanelActive = notebookModeLevel === 0 ? isSidebarOpen : isNotebookPaneVisible;
 
   return (
-    <div className={`flex items-center gap-1.5 text-panvas-text-primary select-none ${showLabel ? 'w-full' : 'w-max'} max-[599px]:gap-1 ${embedded ? (showLabel ? '' : 'p-1') : 'panvas-workspace-controls panvas-floating-surface p-1.5 max-[599px]:p-1'}`} role="toolbar" aria-label="Notebook workspace controls">
+    <div className={`relative flex items-center gap-1.5 text-panvas-text-primary select-none ${showLabel ? 'w-full' : 'w-max'} max-[599px]:gap-1 ${embedded ? (showLabel ? '' : 'p-1') : 'panvas-workspace-controls panvas-floating-surface p-1.5 max-[599px]:p-1'}`} role="toolbar" aria-label="Notebook workspace controls">
       {/* Full Page View */}
       <button
         type="button"

@@ -7,6 +7,9 @@ import type { TextObject } from './drawingTypes.ts';
 import { LayerManager } from './LayerManager.ts';
 
 export class TextManager {
+  private documentBodyId?: string;
+  setDocumentBodyId(id: string | undefined): void { this.documentBodyId = id; }
+  getDocumentBodyId(): string | undefined { return this.documentBodyId; }
   private defaultFontFamily = 'Inter, sans-serif';
   getDefaultFontFamily(): string { return this.defaultFontFamily; }
   setDefaultFontFamily(fontFamily: string): void { this.defaultFontFamily = fontFamily || 'Inter, sans-serif'; }

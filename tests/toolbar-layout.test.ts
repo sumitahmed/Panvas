@@ -284,7 +284,7 @@ test('writing presets are outside the primary toolbar flex flow', async () => {
 test('text formatting and writing presets are mutually exclusive contextual surfaces', async () => {
   const toolbar = await readFile(new URL('../src/components/notebook/NotebookFloatingToolbar.tsx', import.meta.url), 'utf8');
   assert.match(toolbar, /<TextFormattingStrip editor=\{editor\} engine=\{engine\} enabled=\{activeTool === 'text'\}/);
-  assert.match(toolbar, /if \(!enabled \|\| !resolvedEditor\) return null/);
+  assert.match(toolbar, /if \(!enabled\) return null/);
 });
 
 test('Select exposes the existing freehand lasso behavior contextually without adding a primary tool', async () => {

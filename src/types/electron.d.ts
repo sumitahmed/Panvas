@@ -13,10 +13,13 @@ type CloudDriveResult<T> =
   | { success: false; errorCode: import('@/services/cloudsync/errors').CloudErrorCode; diagnostic: import('@/services/cloudsync/types').SafeCloudDiagnostic };
 
 export interface PanvasDomainAPI {
+  appInfo: () => Promise<{ version: string; platform: string; electron: string; chromium: string }>;
+  clipboard: { writeText: (text: string) => Promise<void> };
   bootstrap: {
     getSnapshot: () => Promise<PanvasBootstrapSnapshot>;
   };
   storage: {
+    getOverview: (refresh?: boolean) => Promise<import('./storageOverview').StorageOverview>;
     getRoot: () => Promise<{ path: string; configuredPath: string | null; isDefault: boolean; available: boolean }>;
     setRoot: (folderPath: string) => Promise<{ path: string; configuredPath: string; isDefault: boolean; available: boolean }>;
     chooseRoot: () => Promise<{ path: string; configuredPath: string; isDefault: boolean; available: boolean } | null>;
@@ -58,6 +61,8 @@ export interface PanvasDomainAPI {
     savePage: (wsId: string, notebookId: string, pageId: string, data: any) => Promise<void>;
     loadPage: (wsId: string, notebookId: string, pageId: string) => Promise<any>;
     saveDrawing: (wsId: string, notebookId: string, pageId: string, drawingData: any) => Promise<void>;
+    saveDrawingJson?: (wsId: string, notebookId: string, pageId: string, json: string) => Promise<void>;
+    loadDrawingJson?: (wsId: string, notebookId: string, pageId: string) => Promise<string | null>;
     loadDrawing: (wsId: string, notebookId: string, pageId: string) => Promise<any>;
     applyPageDefaults: (wsId: string, notebookId: string, updates: Partial<PagePropertySet>) => Promise<NotebookPropertyBatchSnapshot>;
     restorePageDefaults: (wsId: string, snapshot: NotebookPropertyBatchSnapshot) => Promise<boolean>;

@@ -1,0 +1,88 @@
+name: Verify
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  source:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.21.0
+          cache: npm
+      - run: npm ci
+      - run: git diff --check
+      - run: npm run build
+      - run: npm test
+      - run: npm run test:release-units
+      - run: npm run check:release
+      - run: npm audit --omit=dev --audit-level=moderate
+      - run: npx playwright install chromium
+      - run: node tests/storage-root-assets-browser.mjs
+      - run: npm run build:web -- --outDir=artifacts/production-readiness-20261017/web-build
+      - run: node tests/code-block-release-browser.mjs --web-dir=artifacts/production-readiness-20261017/web-build
+      - run: node tests/code-block-release-browser.mjs --electron
+      - run: npm run build:web
+      - run: npm run check:release:web
+      - run: node scripts/archive-web.mjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verified-web
+          path: release/Panvas-*-Web.zip
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: verification-evidence
+          path: artifacts/production-readiness-20261017/
+          retention-days: 14
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: docker compose --env-file .env.example config --quiet
+      - run: docker compose --env-file .env.example -f compose.dev.yaml config --quiet
+      - run: docker compose --env-file .env.example build
+      - run: docker compose --env-file .env.example up -d --wait
+      - run: |
+          curl --fail http://127.0.0.1:8080/healthz
+          curl --fail http://127.0.0.1:8080/app/library
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/assets/missing.js)" = 404
+      - if: always()
+        run: docker compose --env-file .env.example logs
+      - if: always()
+        run: docker compose --env-file .env.example down
+  windows-package:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.21.0
+          cache: npm
+      - run: npm ci
+      - run: npm run package:win -- --portable
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      - run: npm run check:release
+      - run: node scripts/audit-package.mjs
+      - run: node tests/code-block-release-browser.mjs --electron --executable=release/win-unpacked/Panvas.exe --out=artifacts/production-readiness-20261017/packaged-code
+      - run: npm run checksum
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-candidate
+          path: |
+            release/Panvas-*.exe
+            release/SHA256SUMS.txt
+          retention-days: 14

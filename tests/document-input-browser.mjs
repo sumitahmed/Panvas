@@ -11,7 +11,7 @@ const errors = [];
 let passed = 0;
 const pass = name => { passed++; console.log(`PASS: ${name}`); };
 const count = name => `window.__documentWork?.bump('${name}');`;
-const server = await createServer({ mode: 'web', cacheDir: path.join(directory, 'vite-cache'), server: { port: 0, open: false }, plugins: [{
+const server = await createServer({ mode: 'web', cacheDir: path.join(directory, 'vite-cache'), optimizeDeps: { entries: ['tests/fixtures/document-input.html'] }, server: { port: 0, open: false }, plugins: [{
   name: 'document-work-counters', enforce: 'pre', transform(code, id) {
     id = id.replaceAll('\\', '/').split('?')[0];
     if (id.endsWith('/PdfWorkspace.tsx')) {
@@ -118,7 +118,7 @@ try {
         });
         if (result.count !== pos.before + 1) console.log('INPUT DIAGNOSTIC', JSON.stringify({ extent, scale, pos, result, detail: await page.evaluate(() => ({ events: window.__documentPointerEvents, trace: window.__panvasHandwritingTraces?.at(-1), tool: window.documentFixture.engine().tools.getState(), ink: Boolean(window.documentFixture.engine().input.inkSamples) })) }));
         assert.equal(result.count, pos.before + 1, `${pointerType} pointerdown at ${x},${y}`);
-        assert.ok(Math.abs(result.point.x - x) < 1 && Math.abs(result.point.y - y) < 1, 'canonical coordinate mapping');
+        assert.ok(Math.abs(result.point.x - x) < 1 && Math.abs(result.point.y - y) < 1, 'canonical coordinate mapping: ' + JSON.stringify({ extent, scale, pointerType, x, y, pos, result }));
         if (pointerType === 'pen') assert.ok(Math.abs(result.point.pressure - .65) < .001, 'native pen pressure survives');
         research.push({ extent, scale, pointerType, x, y, point: result.point });
       }

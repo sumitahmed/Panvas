@@ -15,7 +15,7 @@ const label = `${electronMode ? 'electron' : 'chromium'}-${dpr}`;
 let browser, app, passed = 0;
 const errors = [], report = { mode: label, synthetic: true };
 const pass = message => { passed++; console.log(`PASS: ${message}`); };
-const server = await createServer({ mode: 'web', cacheDir: path.join(temporary, 'cache'), server: { port: 0, open: false } });
+const server = await createServer({ mode: 'web', cacheDir: path.join(temporary, 'cache'), optimizeDeps: { entries: ['tests/fixtures/ink-quality.html', 'tests/fixtures/document-input.html'] }, server: { port: 0, open: false } });
 await server.listen();
 const url = server.resolvedUrls.local[0];
 try {

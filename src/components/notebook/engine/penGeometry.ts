@@ -12,11 +12,11 @@ export function unionInkBounds(a: InkBounds | null, b: InkBounds): InkBounds {
 export class PenGeometry {
   points: StrokePoint[] = [];
   readonly distances: number[] = [];
-  update(points: StrokePoint[]): boolean {
+  update(points: StrokePoint[], measureDistances = true): boolean {
     const reset = this.points !== points || points.length < this.distances.length;
     if (reset) this.distances.length = 0;
     this.points = points;
-    for (let i = this.distances.length; i < points.length; i++) {
+    for (let i = this.distances.length; measureDistances && i < points.length; i++) {
       this.distances.push(i ? this.distances[i - 1] + Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y) : 0);
     }
     return reset;
@@ -46,11 +46,11 @@ export class PenGeometry {
     return bounds;
   }
   /** All primitives have the same winding, so a single fill unions overlaps. */
-  trace(path: Pick<Path2D, 'moveTo' | 'lineTo' | 'arc' | 'rect' | 'closePath'>, stroke: Stroke, start = 0, end = this.points.length): void {
+  trace(path: Pick<Path2D, 'moveTo' | 'lineTo' | 'arc' | 'rect' | 'closePath'>, stroke: Stroke, start = 0, end = this.points.length, closeSubpaths = true): void {
     const disk = (p: StrokePoint, radius: number) => {
       path.moveTo(p.x + radius, p.y);
       path.arc(p.x, p.y, radius, 0, Math.PI * 2);
-      path.closePath();
+      if (closeSubpaths) path.closePath();
     };
     for (let i = start; i < end; i++) {
       const b = this.points[i], rb = this.width(stroke, i) / 2;
@@ -67,8 +67,11 @@ export class PenGeometry {
       path.lineTo(a.x - nx * ra, a.y - ny * ra);
       path.lineTo(b.x - nx * rb, b.y - ny * rb);
       path.lineTo(b.x + nx * rb, b.y + ny * rb);
-      path.closePath();
-      if (stroke.inkFamily !== 'felt' || i > 1) disk(a, ra);
+      if (closeSubpaths) path.closePath();
+      // fill() closes subpaths implicitly. Cached filled paths also need each
+      // shared disk only once; explicit closure of every primitive is costly
+      // in Chromium's Path2D. Wet-ink primitive ranges keep their existing path.
+      if ((closeSubpaths || i === start) && (stroke.inkFamily !== 'felt' || i > 1)) disk(a, ra);
       if (stroke.inkFamily !== 'felt' || i < this.points.length - 1) disk(b, rb);
     }
   }

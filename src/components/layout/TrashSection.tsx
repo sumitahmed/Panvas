@@ -138,26 +138,6 @@ export function TrashSection() {
                   onDelete={() => permanentlyDeleteItem(n.id, 'notebook')}
                 />
               ))}
-              {deletedSections.map(sec => (
-                <TrashItemRow
-                  key={sec.id}
-                  name={sec.name}
-                  icon={<ListTree size={12} className="text-panvas-text-tertiary" />}
-                  retentionLabel={sec.deletedAt ? trashCountdown(sec.deletedAt, Date.now()).label : undefined}
-                  onRestore={() => restoreItem(sec.id, 'section')}
-                  onDelete={() => permanentlyDeleteItem(sec.id, 'section')}
-                />
-              ))}
-              {deletedPages.map(pg => (
-                <TrashItemRow
-                  key={pg.id}
-                  name={pg.title || 'Untitled Page'}
-                  icon={<FileText size={12} className="text-panvas-text-tertiary" />}
-                  retentionLabel={pg.deletedAt ? trashCountdown(pg.deletedAt, Date.now()).label : undefined}
-                  onRestore={() => restoreItem(pg.id, 'page')}
-                  onDelete={() => permanentlyDeleteItem(pg.id, 'page')}
-                />
-              ))}
               {deletedSections.map(sec => {
                 const nb = nbMap.get(sec.notebookId);
                 return (

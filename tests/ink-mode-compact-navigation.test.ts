@@ -455,6 +455,6 @@ test('22. Page/grid/template colors are not unintentionally modified by the Ink 
   assert.match(fullDarkHook, /state\.theme === 'dark' && state\.fullDarkView && !state\.isPrinting/);
   assert.match(pageRenderer, /const effectiveBgColor = fullDarkView \? fullDarkSurfaceColor\(renderModel\.paperColor\) : renderModel\.paperColor;/);
   assert.match(pageRenderer, /const effectiveLineColor = fullDarkView \? fullDarkRuleLineColor\(renderModel\.lineColor\) : renderModel\.lineColor;/);
-  assert.match(pageRenderer, /backgroundColor: effectiveBgColor/);
+  assert.match(pageRenderer, /backgroundColor: paged \? 'transparent' : effectiveBgColor/);
 });
 

@@ -6,7 +6,7 @@ import { useNotebookSettingsStore } from '@/stores/notebookSettingsStore';
 // Panvas — Create Dialog
 // ============================================
 
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, FileText, Folder, Briefcase, BookOpen, ListTree } from 'lucide-react';
 import { useUIStore } from '@/stores/uiStore';
@@ -15,6 +15,8 @@ import type { NotebookCover } from '@/types/notebook';
 import { DEFAULT_NOTEBOOK_COVER } from '@/components/library/notebookCovers';
 import { NotebookCoverPicker } from '@/components/library/NotebookCoverPicker';
 import { validateEntityName } from '@/lib/entityName';
+import { useLocation } from 'wouter';
+import type { NewDocumentPageOptions } from '@/stores/workspaceStore';
 
 export function CreateDialog() {
   const {
@@ -22,24 +24,32 @@ export function CreateDialog() {
     createDialogType,
     createDialogParentId,
     createDialogParentType,
+    createDialogLayoutMode,
+    createDialogAfterPageId,
+    setDocumentFocusPageId,
     closeCreateDialog,
     showToast,
   } = useUIStore();
 
-  const { createWorkspace, createFolder, createNotebook, createNotebookSection, createNotebookPage, createCanvas, setActiveCanvas, setActivePage } = useWorkspaceStore();
+  const { createWorkspace, createFolder, createNotebook, createNotebookSection, createNotebookPage, createCanvas, setActiveCanvas, setActivePage, reorderPages } = useWorkspaceStore();
   const [name, setName] = useState('');
   const [cover, setCover] = useState<NotebookCover>(DEFAULT_NOTEBOOK_COVER);
   const [template, setTemplate] = useState<PageTemplate>('Blank');
+  const [layoutMode, setLayoutMode] = useState<'document' | 'freeform'>('document');
+  const [pageSize, setPageSize] = useState<NewDocumentPageOptions['pageSize']>('A4');
+  const [, navigate] = useLocation();
   const inputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (isCreateDialogOpen) {
       setName('');
       setTemplate(useNotebookSettingsStore.getState().template);
       setCover({ ...DEFAULT_NOTEBOOK_COVER });
+      setLayoutMode(createDialogLayoutMode ?? 'document');
+      setPageSize('A4');
       setTimeout(() => inputRef.current?.focus(), 50);
     }
-  }, [isCreateDialogOpen]);
+  }, [isCreateDialogOpen, createDialogLayoutMode]);
 
   // Handle Escape key to close dialog
   useEffect(() => {
@@ -76,8 +86,16 @@ export function CreateDialog() {
       } else if (createDialogType === 'section' && createDialogParentId) {
         await createNotebookSection(createDialogParentId, validated);
       } else if (createDialogType === 'page' && createDialogParentId) {
-        const page = await createNotebookPage(createDialogParentId, validated);
+        const page = await createNotebookPage(createDialogParentId, validated, { layoutMode, pageSize });
+        if (createDialogAfterPageId) {
+          const ids = useWorkspaceStore.getState().notebookPages.filter(item => !item.deletedAt && item.sectionId === createDialogParentId && item.id !== page.id).sort((a, b) => a.order - b.order).map(item => item.id);
+          const previousIndex = ids.indexOf(createDialogAfterPageId);
+          ids.splice(previousIndex >= 0 ? previousIndex + 1 : ids.length, 0, page.id);
+          await reorderPages(ids);
+        }
+        if (layoutMode === 'document') setDocumentFocusPageId(page.id);
         setActivePage(page.id);
+        navigate('/app');
       } else if (createDialogType === 'canvas') {
         const folderId = (!createDialogParentType || createDialogParentType === 'folder') ? createDialogParentId : null;
         const notebookId = createDialogParentType === 'notebook' ? createDialogParentId : null;
@@ -127,7 +145,7 @@ export function CreateDialog() {
     page: {
       icon: <FileText size={18} className="text-panvas-accent-violet" />,
       title: 'New Page',
-      description: 'Start a fresh page with your current notebook defaults.',
+      description: 'Write across automatic sheets, or choose a Freeform page.',
       placeholder: 'Page title...',
       defaultName: 'Untitled Page',
     },
@@ -200,6 +218,17 @@ export function CreateDialog() {
               />
             </div>
             {createDialogType === 'notebook' && <NotebookCoverPicker value={cover} onChange={setCover} title={name || 'Notebook'} />}
+            {createDialogType === 'page' && <div className="space-y-3 text-xs text-panvas-text-secondary">
+              <fieldset><legend className="mb-1.5">Writing layout</legend><div className="grid grid-cols-2 gap-2">
+                {(['document', 'freeform'] as const).map(mode => <button key={mode} type="button" aria-pressed={layoutMode === mode} onClick={() => setLayoutMode(mode)} className={`rounded-lg border p-3 text-left focus-ring ${layoutMode === mode ? 'border-panvas-accent-blue bg-panvas-accent-blue/10 text-panvas-text-primary' : 'border-panvas-border-default hover:bg-panvas-bg-hover'}`}>
+                  <span className="block font-medium">{mode === 'document' ? 'Document' : 'Freeform'}</span><span className="mt-1 block text-2xs text-panvas-text-secondary">{mode === 'document' ? 'Text flows across sheets' : 'Text boxes and handwriting'}</span>
+                </button>)}
+              </div></fieldset>
+              <fieldset><legend className="mb-1.5">Paper size</legend><div className="flex flex-wrap gap-1">
+                {(['A4', 'A3', 'A5', 'Letter', 'Infinite'] as const).map(size => <button key={size} type="button" aria-pressed={pageSize === size} onClick={() => setPageSize(size)} className={`min-h-8 rounded-md border px-3 focus-ring ${pageSize === size ? 'border-panvas-accent-blue bg-panvas-accent-blue/10 text-panvas-text-primary' : 'border-panvas-border-default hover:bg-panvas-bg-hover'}`}>{size}</button>)}
+              </div></fieldset>
+              <p className="text-2xs leading-relaxed">{layoutMode === 'freeform' ? 'Place text boxes and handwriting anywhere on the page.' : pageSize === 'Infinite' ? 'One continuous document with a fixed writing width.' : 'Text continues onto the next sheet automatically.'}</p>
+            </div>}
             {createDialogType === 'notebook' && <fieldset className="mt-3 min-w-0"><legend className="mb-2 text-xs font-medium text-panvas-text-secondary">Paper for new pages</legend>
               <div className="relative min-w-0">
                 <div className="flex max-w-full snap-x snap-proximity gap-2 overflow-x-auto pb-2 pr-8 [scrollbar-color:var(--color-panvas-border-strong)_transparent] [scrollbar-width:thin]">

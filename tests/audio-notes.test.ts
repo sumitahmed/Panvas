@@ -14,6 +14,7 @@ import {
   samePageAudioOwner,
 } from '../src/services/audio/audioLifecycle.ts';
 import { PageAudioPersistenceCoordinator } from '../src/services/audio/pageAudioPersistence.ts';
+import { drawingSnapshotJson, rememberDrawingSnapshotJson } from '../src/services/storage/drawingSnapshotJson.ts';
 import {
   VOICE_NOTE_MIN_HEIGHT,
   VOICE_NOTE_MIN_WIDTH,
@@ -28,6 +29,23 @@ import { createEmptyDrawingData, type AudioNote, type DrawingData } from '../src
 
 const ownerA = { workspaceId: 'workspace-real', notebookId: 'notebook-real', pageId: 'page-a' };
 const ownerB = { workspaceId: 'workspace-real', notebookId: 'notebook-real', pageId: 'page-b' };
+
+test('encoded immutable drawing snapshots cannot override a newer queued audio edit', async () => {
+  const repository = new MemoryDrawingRepository(), persistence = new PageAudioPersistenceCoordinator(repository);
+  const snapshot = createEmptyDrawingData(), json = JSON.stringify(snapshot);
+  rememberDrawingSnapshotJson(snapshot, json);
+  const first = await persistence.saveDrawing(ownerA, snapshot);
+  assert.equal(first, snapshot);
+  assert.equal(drawingSnapshotJson(first), json);
+  await persistence.append(ownerA, note('new-audio'));
+  const merged = await persistence.saveDrawing(ownerA, snapshot);
+  assert.notEqual(merged, snapshot);
+  assert.deepEqual(JSON.parse(drawingSnapshotJson(merged)).audioNotes.map((item: AudioNote) => item.id), ['new-audio']);
+  const mutable = createEmptyDrawingData();
+  assert.equal(JSON.parse(drawingSnapshotJson(mutable)).properties.paperColor, mutable.properties.paperColor);
+  mutable.properties.paperColor = '#abc123';
+  assert.equal(JSON.parse(drawingSnapshotJson(mutable)).properties.paperColor, '#abc123', 'unmarked mutable callers are encoded afresh');
+});
 
 class MemoryDrawingRepository {
   readonly pages = new Map<string, DrawingData>();

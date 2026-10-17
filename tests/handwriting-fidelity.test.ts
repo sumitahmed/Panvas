@@ -8,6 +8,22 @@ import { InkInputFilter, mapPointerPressure } from '../src/components/notebook/e
 import { PenGeometry } from '../src/components/notebook/engine/penGeometry.ts';
 import { DrawingSaveScheduler } from '../src/components/notebook/drawingSaveScheduler.ts';
 import { handwritingPaths, handwritingPath, geometryMetrics, pathDistance } from './fixtures/handwritingPaths.ts';
+import { cloneStrokeSnapshot } from '../src/components/notebook/engine/cloneStrokeSnapshot.ts';
+
+test('stroke snapshots detach pressure samples, clips and extensible metadata without changing scalar values', () => {
+  const source: Stroke = { id: 'snapshot', type: 'stroke', tool: 'pen', color: '#1745aa', thickness: 2, opacity: .4, createdAt: 17,
+    points: [{ x: 2 ** 24, y: -0, pressure: .23, t: 123.5 }], inkClip: [[[[1,2],[3,4],[5,6],[1,2]]]] };
+  const detached = cloneStrokeSnapshot(source);
+  assert.deepEqual(detached, source);
+  detached.points[0].x = 9; detached.inkClip![0][0][0][0] = 10;
+  assert.equal(source.points[0].x, 2 ** 24); assert.equal(source.inkClip![0][0][0][0], 1);
+  const shared = { nested: [1,2,3] };
+  const extended = { ...source, customA: shared, customB: shared };
+  const result = cloneStrokeSnapshot(extended) as typeof extended;
+  assert.deepEqual(result.customA, shared); assert.notEqual(result.customA, shared); assert.equal(result.customA, result.customB);
+  result.customA.nested.push(4); assert.deepEqual(shared.nested, [1,2,3]);
+  assert.throws(() => cloneStrokeSnapshot({ ...source, invalid: () => {} } as Stroke), { name: 'DataCloneError' });
+});
 
 for (const name of Object.keys(handwritingPaths)) test(`${name}: 0% preserves physical trajectories at 60/120/240Hz`, () => {
   const reference = handwritingPath(name, 960);

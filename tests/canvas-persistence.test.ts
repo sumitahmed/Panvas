@@ -206,9 +206,10 @@ test('browser IndexedDB path and sync queue remain unchanged', async () => {
 
 test('backup/restore uses the canonical filesystem scenes in Electron', async () => {
   const service = await read('../electron/ipc/WorkspaceService.ts');
-  // Export reads the canonical files; restore writes them through the queue.
+  // Export reads canonical files; restore queues unpublished staging payloads.
   assert.match(service, /path\.join\(workspaceDir, 'Canvas', `\$\{canvas\.id\}\.json`\)/);
-  assert.match(service, /writeQueue\.enqueue\(path\.join\(workspaceDir, 'Canvas', `\$\{canvas\.id\}\.json`\)/);
+  assert.match(service, /writeQueue\.enqueue\(path\.join\(stagingDir, 'Canvas', `\$\{canvas\.id\}\.json`\)/);
+  assert.ok(service.indexOf("fsPromises.rename(path.join(stagingDir, 'Canvas')") < service.indexOf('this.writeWorkspaceJson(workspaceDir, metadata)'), 'scene promotion precedes metadata publication');
   const backupService = await read('../src/services/backup/backupService.ts');
   assert.match(backupService, /runtime\.panvas\?\.backup\)\s*return runtime\.panvas\.backup\.export\(workspaceId\)/);
 });

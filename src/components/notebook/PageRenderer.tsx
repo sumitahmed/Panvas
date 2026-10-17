@@ -5,7 +5,7 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import type { PageProperties } from './engine/drawingTypes';
 import { TEMPLATE_REGISTRY } from './templates/TemplateRegistry.tsx';
-import { resolvePageTemplateRenderModel } from '@/lib/pageProperties';
+import { resolvePageTemplateRenderModel, resolveBasePageDimensions, resolvePageNoteSpace } from '@/lib/pageProperties';
 import { useFullDarkView } from '@/hooks/useFullDarkView';
 import { fullDarkSurfaceColor, fullDarkRuleLineColor } from '@/lib/fullDarkView';
 
@@ -21,6 +21,8 @@ export interface PageRendererProps {
   pageNumberText?: string;
   editable?: boolean;
   onUpdateProperties?: (updates: Partial<PageProperties>) => void;
+  renderWindow?: { top: number; height: number };
+  logicalBase?: number;
 }
 
 type TemplateField = { key: string; placeholder: string; x: number; y: number; width: number; fontSize?: number; weight?: number };
@@ -80,7 +82,7 @@ function TemplateFieldInput({ field, template, scale, value, color, editable, on
   );
 }
 
-export const PageRenderer: React.FC<PageRendererProps> = ({ id, width, height, properties, className = '', children, pageNumberText, editable = false, onUpdateProperties }) => {
+export const PageRenderer: React.FC<PageRendererProps> = ({ id, width, height, properties, className = '', children, pageNumberText, editable = false, onUpdateProperties, renderWindow, logicalBase = 0 }) => {
   const templateResourceScope = useId();
   const fullDarkView = useFullDarkView();
   const { template, margins } = properties;
@@ -112,27 +114,49 @@ export const PageRenderer: React.FC<PageRendererProps> = ({ id, width, height, p
 
   // Retrieve template definition from registry
   const templateDef = TEMPLATE_REGISTRY[template] || TEMPLATE_REGISTRY.Blank;
+  const baseHeight = resolveBasePageDimensions(properties).height;
+  const notes = resolvePageNoteSpace(properties);
+  const sheetHeight = baseHeight + notes.top + notes.bottom;
+  const paged = properties.layoutMode === 'document' && properties.pageSize !== 'Infinite' && height > sheetHeight + 1;
+  let paperFrames: React.ReactNode = null;
+  let sheetCount = 1;
+  if (paged) {
+    const stride = sheetHeight + 32;
+    const count = Math.max(1, Math.round(((properties.layoutExtent ?? (height - notes.top - notes.bottom)) + notes.top + notes.bottom + 32) / stride));
+    const first = Math.max(0, Math.floor(((renderWindow?.top ?? 0) + logicalBase) / stride) - 1);
+    const last = Math.min(count - 1, Math.ceil(((renderWindow?.top ?? 0) + logicalBase + (renderWindow?.height ?? height)) / stride));
+    sheetCount = count;
+    paperFrames = <>{Array.from({ length: Math.max(0, last - first + 1) }, (_, offset) => {
+        const index = first + offset;
+        return <div key={index} data-document-sheet={index + 1} className="absolute" style={{ top: index * stride - logicalBase, width, height: sheetHeight }}>
+          <PageRenderer id={`${id}-sheet-${index + 1}`} width={width} height={sheetHeight} properties={{ ...properties, layoutMode: 'freeform', layoutExtent: undefined }} pageNumberText={`${index + 1} / ${count}`} />
+        </div>;
+      })}</>;
+  }
 
   return (
     <div
       id={`page-${id}`}
       data-page-id={id}
+      data-document-sheet-count={properties.layoutMode === 'document' ? sheetCount : undefined}
       className={`relative shadow-2xl transition-colors duration-200 overflow-hidden ${className}`}
       style={{
         width: `${width}px`,
         height: `${height}px`,
-        backgroundColor: effectiveBgColor,
+        backgroundColor: paged ? 'transparent' : effectiveBgColor,
       }}
     >
+      <div key="paper-background" className="absolute inset-0">
+      {paged ? paperFrames : <>
       {/* Background Template SVG Layer */}
       <svg 
         className="panvas-colored-content absolute inset-0 pointer-events-none select-none"
         width="100%"
-        height="100%"
-        viewBox={`0 0 ${geometry.width} ${geometry.height}`}
-        style={{ width: '100%', height: '100%' }}
+        height={renderWindow?.height ?? height}
+        viewBox={`0 0 ${geometry.width} ${renderWindow?.height ?? geometry.height}`}
+        style={{ width: '100%', height: renderWindow?.height ?? '100%', top: renderWindow?.top ?? 0 }}
       >
-        {templateDef.renderSVG(geometry.width, geometry.height, effectiveLineColor, false, templateResourceScope)}
+        {templateDef.renderSVG(geometry.width, renderWindow?.height ?? geometry.height, effectiveLineColor, false, templateResourceScope)}
       </svg>
 
       {editableTemplateFields(template, geometry.source.width).map(field => (
@@ -170,12 +194,14 @@ export const PageRenderer: React.FC<PageRendererProps> = ({ id, width, height, p
           style={{ left: source.left, top: source.top, width: source.width, height: source.height }}
         />
       )}
+      </>}
+      </div>
 
       {/* Structured Content & Drawing Layer */}
-      {children}
+      <div key="page-content" className="absolute inset-0">{children}</div>
 
       {/* Page Number Indicator */}
-      {pageNumberText && (
+      {pageNumberText && !paged && properties.pageSize !== 'Infinite' && (
         <div 
           className="absolute pointer-events-none select-none whitespace-nowrap text-right text-[11px] font-mono font-medium tabular-nums text-panvas-text-tertiary"
           style={{

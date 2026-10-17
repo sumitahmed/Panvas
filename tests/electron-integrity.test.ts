@@ -149,6 +149,7 @@ test('mixed note survives restart; trash restores; save failures are honest', as
     await domClick(newItem);
     await domClick(page.getByRole('button', { name: 'New Page' }));
     await page.locator('#create-dialog-input').fill('Integrity Page');
+    await page.getByRole('dialog', { name: 'New Page', exact: true }).getByRole('button', { name: /^Freeform/ }).click();
     await domClick(page.getByRole('button', { name: 'Create', exact: true }));
     await page.locator('button[title="Hide Toolbar"]').waitFor({ state: 'visible', timeout: 15000 });
 
@@ -187,18 +188,18 @@ test('mixed note survives restart; trash restores; save failures are honest', as
     const reopenedPageRecord = reopenedWorkspace.notebookPages.find((item: any) => item.id === pageId);
     const reopenedNotebookRecord = reopenedWorkspace.notebooks.find((item: any) => item.id === reopenedPageRecord.notebookId);
     const reopenedSectionRecord = reopenedWorkspace.notebookSections.find((item: any) => item.id === reopenedPageRecord.sectionId);
-    const reopenedWorkspaceRow = sidebar.getByRole('button', { name: new RegExp(WORKSPACE_NAME.slice(0, 20)) }).first();
+    const reopenedWorkspaceRow = sidebar.getByRole('treeitem', { name: WORKSPACE_NAME, exact: true });
     await domClick(reopenedWorkspaceRow);
     await page.waitForTimeout(900);
     const reopenedNotebookRow = sidebar.locator(`[data-tree-id="${reopenedNotebookRecord.id}"]`);
     try {
       await reopenedNotebookRow.waitFor({ state: 'visible', timeout: 2500 });
     } catch {
-      await domClick(reopenedWorkspaceRow);
+      await domClick(sidebar.getByRole('button', { name: `Expand ${WORKSPACE_NAME}`, exact: true }));
       await reopenedNotebookRow.waitFor({ state: 'visible', timeout: 12000 });
     }
     await domClick(reopenedNotebookRow);
-    const notebookToggle = sidebar.locator(`button[aria-label$="${reopenedNotebookRecord.name}"]`);
+    const notebookToggle = sidebar.locator(`button[data-tree-toggle][aria-label$="${reopenedNotebookRecord.name}"]`);
     if ((await notebookToggle.count()) > 0 && (await notebookToggle.getAttribute('aria-label'))?.startsWith('Expand')) {
       await domClick(notebookToggle);
       await page.waitForTimeout(500);
@@ -207,7 +208,7 @@ test('mixed note survives restart; trash restores; save failures are honest', as
     const reopenedSectionRow = sidebar.locator(`[data-tree-id="${reopenedSectionRecord.id}"]`);
     await reopenedSectionRow.waitFor({ state: 'visible', timeout: 12000 });
     await domClick(reopenedSectionRow);
-    const sectionToggle = sidebar.locator(`button[aria-label$="${reopenedSectionRecord.name}"]`);
+    const sectionToggle = sidebar.locator(`button[data-tree-toggle][aria-label$="${reopenedSectionRecord.name}"]`);
     if ((await sectionToggle.count()) > 0 && (await sectionToggle.getAttribute('aria-label'))?.startsWith('Expand')) {
       await domClick(sectionToggle);
       await page.waitForTimeout(500);
@@ -220,7 +221,7 @@ test('mixed note survives restart; trash restores; save failures are honest', as
 
     // Text content restored into the DOM.
     try {
-      await page.getByText(TEXT_MARKER).waitFor({ state: 'visible', timeout: 10000 });
+      await page.getByText(TEXT_MARKER).filter({ visible: true }).waitFor({ state: 'visible', timeout: 10000 });
     } catch (error) {
       const reopenedWorkspace = readWorkspaceJson();
       const reopenedPage = reopenedWorkspace.notebookPages.find((item: any) => item.id === pageId);
@@ -275,11 +276,12 @@ test('mixed note survives restart; trash restores; save failures are honest', as
     // Trash section lists it; restore brings it back with content intact.
     const trashSection = page.locator('section[aria-labelledby="trash-heading"]');
     await trashSection.waitFor({ state: 'visible', timeout: 8000 });
-    await domClick(trashSection.getByRole('button', { name: /Trash/i }));
+    await domClick(trashSection.getByRole('button', { name: /^Trash(?: \d+)?$/i }));
     await page.waitForTimeout(500);
-    const trashRow = trashSection.locator('div', { hasText: 'Integrity Page' }).filter({ has: page.locator('button[title="Restore"]') }).first();
-    await trashRow.locator('button[title="Restore"]').waitFor({ state: 'visible', timeout: 8000 });
-    await domClick(trashRow.locator('button[title="Restore"]'));
+    const restorePage = trashSection.getByRole('button', { name: 'Restore Integrity Page', exact: true });
+    await restorePage.waitFor({ state: 'visible', timeout: 8000 });
+    assert.equal(await restorePage.count(), 1, 'each deleted page has exactly one Trash row');
+    await domClick(restorePage);
     await page.waitForTimeout(1200);
 
     const afterRestore = readWorkspaceJson().notebookPages.find((p: any) => p.id === pageId);
@@ -289,7 +291,7 @@ test('mixed note survives restart; trash restores; save failures are honest', as
     await domClick(restoredRow);
     await page.waitForTimeout(1800);
     try {
-      await page.getByText(TEXT_MARKER).waitFor({ state: 'visible', timeout: 10000 });
+      await page.getByText(TEXT_MARKER).filter({ visible: true }).waitFor({ state: 'visible', timeout: 10000 });
     } catch (error) {
       const restoredWorkspace = readWorkspaceJson();
       const restoredPage = restoredWorkspace.notebookPages.find((item: any) => item.id === pageId);

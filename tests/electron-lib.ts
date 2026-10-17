@@ -5,19 +5,17 @@
 // All helpers assume a freshly built app (npm run build) and clean up after
 // themselves.
 
-import { spawn, execSync, type ChildProcess } from 'node:child_process';
+import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { tmpdir } from 'node:os';
 import { chromium } from 'playwright';
 
-// Documents may be OneDrive-redirected; resolve the real base directory.
+const disposableRoot = fs.mkdtempSync(path.join(tmpdir(), 'panvas-native-regression-'));
+const ownedProcesses = new Set<ChildProcess>();
+// These integration tests must never discover or modify a user's workspace.
 export function resolvePanvasBase(): string {
-  const home = process.env.USERPROFILE ?? '';
-  const candidates = [
-    path.join(home, 'OneDrive', 'Documents', 'Panvas'),
-    path.join(home, 'Documents', 'Panvas'),
-  ];
-  return candidates.find(c => fs.existsSync(c)) ?? candidates[1];
+  return path.join(disposableRoot, 'workspaces');
 }
 
 export const PANVAS_BASE = resolvePanvasBase();
@@ -40,6 +38,9 @@ export function launchElectron(port: number, windowSize?: string): ChildProcess 
   // must not be launched as though it were another test worker process.
   delete env.NODE_TEST_CONTEXT;
   delete env.NODE_TEST_WORKER_ID;
+  env.PANVAS_GATE0_PROFILE = '1';
+  env.PANVAS_GATE0_USER_DATA = path.join(disposableRoot, 'profile');
+  env.PANVAS_GATE0_WORKSPACE_ROOT = PANVAS_BASE;
   if (windowSize) env.PANVAS_TEST_WINDOW = windowSize;
   const command = process.platform === 'win32'
     ? path.join(process.cwd(), 'node_modules', 'electron', 'dist', 'electron.exe')
@@ -47,28 +48,26 @@ export function launchElectron(port: number, windowSize?: string): ChildProcess 
   const args = process.platform === 'win32'
     ? ['.', `--remote-debugging-port=${port}`]
     : ['electron', '.', `--remote-debugging-port=${port}`];
-  return spawn(command, args, {
+  const child = spawn(command, args, {
     cwd: process.cwd(),
     shell: false,
     stdio: 'ignore',
     detached: false,
     env,
   });
+  ownedProcesses.add(child);
+  return child;
 }
 
-// npx->electron means proc.kill() only kills the shell; electron survives and
-// then answers CDP with a stale build. Kill every instance and WAIT for the
-// kill to complete — an async taskkill fired by a previous run's stop
-// reliably murders the next run's freshly spawned Electron.
+// Stop only processes launched by this test file, including their children.
 export async function stopAllElectron(): Promise<void> {
-  for (let attempt = 0; attempt < 10; attempt++) {
-    try { execSync('taskkill /IM electron.exe /T /F', { stdio: 'ignore' }); } catch { /* none left */ }
-    try {
-      const out = execSync('tasklist /FI "IMAGENAME eq electron.exe"', { encoding: 'utf8' });
-      if (!out.toLowerCase().includes('electron.exe')) return;
-    } catch { return; }
-    await new Promise(r => setTimeout(r, 700));
+  for (const child of ownedProcesses) {
+    if (child.exitCode === null && child.pid) {
+      if (process.platform === 'win32') { try { execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' }); } catch { /* Already closed. */ } }
+      else child.kill();
+    }
   }
+  ownedProcesses.clear();
 }
 
 export async function stopElectron(proc: ChildProcess): Promise<void> {
@@ -105,6 +104,10 @@ export async function appPage(browser: import('playwright').Browser): Promise<im
 
 export async function waitForApp(page: import('playwright').Page): Promise<void> {
   await page.getByRole('button', { name: 'New item' }).waitFor({ state: 'visible', timeout: 30000 });
+  const root = await page.evaluate(() => window.panvas?.storage.getRoot());
+  if (!root?.path || path.resolve(root.path) !== path.resolve(PANVAS_BASE)) {
+    throw new Error('Refusing to operate on an Electron window outside this test workspace.');
+  }
 }
 
 // Tree rows appear only under an expanded workspace; creation flows can leave
@@ -112,12 +115,12 @@ export async function waitForApp(page: import('playwright').Page): Promise<void>
 export function makeEnsureTreeRowVisible(workspaceName: string) {
   return async function ensureTreeRowVisible(page: import('playwright').Page, name: RegExp): Promise<void> {
     const sidebar = page.getByRole('complementary');
-    const row = sidebar.getByRole('button', { name }).first();
+    const row = sidebar.getByRole('treeitem', { name }).first();
     try {
       await row.waitFor({ state: 'visible', timeout: 12000 });
       return;
     } catch { /* fall through: expand the workspace */ }
-    const ws = sidebar.getByRole('button', { name: new RegExp(workspaceName.slice(0, 20)) }).first();
+    const ws = sidebar.getByRole('button', { name: `Expand ${workspaceName}`, exact: true });
     await domClick(ws);
     await page.waitForTimeout(800);
     await row.waitFor({ state: 'visible', timeout: 12000 });
@@ -142,7 +145,7 @@ export async function createWorkspaceNotebookSection(
   // entities: a missed click would otherwise create them in whatever
   // workspace was active before — possibly the user's real data.
   const wsId = JSON.parse(await readFileFn(path.join(PANVAS_BASE, workspaceName, '.panvas', 'workspace.json'))).id;
-  const wsRow = sidebar.locator('div[role="button"]').filter({ hasText: workspaceName }).first();
+  const wsRow = sidebar.getByRole('treeitem', { name: workspaceName, exact: true });
   await domClick(wsRow);
   try {
     await page.waitForFunction(id => localStorage.getItem('panvas.activeWorkspaceId') === id, wsId, { timeout: 6000 });
@@ -164,7 +167,7 @@ export async function createWorkspaceNotebookSection(
   if (!notebook) throw new Error('Integrity notebook was not persisted in the isolated workspace.');
   const notebookRow = sidebar.locator(`[data-tree-id="${notebook.id}"]`);
   await domClick(notebookRow);
-  const notebookToggle = sidebar.locator(`button[aria-label$="${notebook.name}"]`);
+  const notebookToggle = sidebar.locator(`button[data-tree-toggle][aria-label$="${notebook.name}"]`);
   if ((await notebookToggle.count()) > 0 && (await notebookToggle.getAttribute('aria-label'))?.startsWith('Expand')) {
     await domClick(notebookToggle);
   }
@@ -180,7 +183,7 @@ export async function createWorkspaceNotebookSection(
   const afterSection = JSON.parse(await readFileFn(path.join(PANVAS_BASE, workspaceName, '.panvas', 'workspace.json')));
   const section = afterSection.notebookSections.find((item: any) => item.notebookId === notebook.id && item.name === 'Integrity Section');
   if (!section) throw new Error('Integrity section was not persisted in the isolated workspace.');
-  const notebookToggleAfter = sidebar.locator(`button[aria-label$="${notebook.name}"]`);
+  const notebookToggleAfter = sidebar.locator(`button[data-tree-toggle][aria-label$="${notebook.name}"]`);
   if ((await notebookToggleAfter.count()) > 0 && (await notebookToggleAfter.getAttribute('aria-label'))?.startsWith('Expand')) {
     await domClick(notebookToggleAfter);
     await page.waitForTimeout(500);
@@ -198,6 +201,8 @@ export async function cleanupTestWorkspaces(prefixes: string[]): Promise<void> {
   const entries = await readdir(PANVAS_BASE).catch(() => [] as string[]);
   for (const entry of entries) {
     if (!prefixes.some(p => entry.startsWith(p))) continue;
+    const ownedDirectory = path.resolve(PANVAS_BASE, entry);
+    if (!ownedDirectory.startsWith(path.resolve(disposableRoot) + path.sep)) throw new Error('Test cleanup escaped its disposable root.');
     const wsJsonPath = path.join(PANVAS_BASE, entry, '.panvas', 'workspace.json');
     if (fs.existsSync(wsJsonPath)) {
       const wsJson = JSON.parse(fs.readFileSync(wsJsonPath, 'utf8'));
@@ -208,6 +213,6 @@ export async function cleanupTestWorkspaces(prefixes: string[]): Promise<void> {
         }
       }
     }
-    await rm(path.join(PANVAS_BASE, entry), { recursive: true, force: true });
+    await rm(ownedDirectory, { recursive: true, force: true });
   }
 }

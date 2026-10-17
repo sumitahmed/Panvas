@@ -34,6 +34,22 @@ const pageInput = (id: string, overrides: Partial<typeof baseProperties> = {}, d
   id, title: id, properties: { ...baseProperties, ...overrides }, drawing: { ...drawing, properties: { ...baseProperties, ...overrides } },
 });
 
+test('returning to freeform exports visible positioned text and preserves the hidden canonical body', async () => {
+  const drawing = createEmptyDrawingData();
+  drawing.objects = [
+    { id: 'body', type: 'text', x: 0, y: 0, width: 0, createdAt: 0, metadata: { documentRole: 'body', richTextSchemaVersion: 3 }, content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Retained document body' }] }] } },
+    { id: 'positioned', type: 'text', x: 50, y: 80, width: 300, createdAt: 0, content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Visible freeform text' }] }] } },
+  ];
+  const before = structuredClone(drawing);
+  const input = pageInput('freeform', { layoutMode: 'freeform' }, drawing);
+  // Metadata can lead the last drawing snapshot while a property save settles.
+  input.drawing.properties.layoutMode = 'document';
+  const result = await exportNotebookPdf({ pages: [input] });
+  assert.equal(result.success, true);
+  assert.equal(result.exportedObjects, 1);
+  assert.deepEqual(drawing, before);
+});
+
 test('finite paper geometry uses physical PDF points and orientation, not logical pixels', () => {
   const portrait = resolveNotebookPageGeometry({ ...baseProperties, pageSize: 'A4' })!;
   const landscape = resolveNotebookPageGeometry({ ...baseProperties, pageSize: 'Letter', orientation: 'landscape' })!;

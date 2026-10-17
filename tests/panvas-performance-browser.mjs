@@ -10,11 +10,11 @@ const electronMode = process.argv.includes('--electron');
 const mobileOnly = process.argv.includes('--mobile-only');
 const staticOnly = process.argv.includes('--static-only');
 const nativeScrollOnly = process.argv.includes('--native-scroll-only');
-const output = path.resolve('artifacts/performance');
+const output = path.resolve(process.argv.find(arg => arg.startsWith('--out='))?.slice(6) ?? 'artifacts/performance');
 await mkdir(output, { recursive: true });
 const directory = await mkdtemp(path.join(tmpdir(), 'panvas-performance-'));
 const bump = name => `window.__documentWork?.bump('${name}');`;
-const server = await createServer({ mode: 'web', cacheDir: path.join(directory, 'vite'), server: { port: 0, open: false, hmr: false }, plugins: [{
+const server = await createServer({ mode: 'web', cacheDir: path.join(directory, 'vite'), optimizeDeps: { entries: ['tests/fixtures/document-input.html'] }, server: { port: 0, open: false, hmr: false }, plugins: [{
   name: 'performance-work-counts', enforce: 'pre',
   resolveId(id) { if (id === 'virtual:static-preview-probe') return '\0virtual:static-preview-probe'; },
   load(id) { if (id === '\0virtual:static-preview-probe') return "export {createRoot} from 'react-dom/client'; export {default as React} from 'react';"; },

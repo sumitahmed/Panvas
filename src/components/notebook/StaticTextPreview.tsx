@@ -1,10 +1,10 @@
-import React, { useMemo, useRef } from 'react';
+import React, { useMemo, useRef, useEffect } from 'react';
 import { useFullDarkView } from '@/hooks/useFullDarkView';
 import { fullDarkSurfaceColor } from '@/lib/fullDarkView';
 import { useDocumentTextPresentation } from './useDocumentTextPresentation';
-import { generateHTML } from '@tiptap/core';
 import type { TextObject } from './engine/drawingTypes';
-import { notebookTipTapExtensions } from './tiptapExtensions';
+import { renderNotebookStaticHtml } from './notebookStaticHtml';
+import { hydrateAssetImages } from './notebookAssetImage';
 import { isHandwritingTextObject, textObjectStyle } from './textTypography';
 import { stickyPaperStyle, getStickyNoteColor, getStickyNoteOpacity, getStickyNoteShape, getShapeBorderRadius, hexToRgba, isStickyNote } from './stickyNotes';
 import { gate0Profiler } from '@/dev/gate0Profiler';
@@ -51,12 +51,13 @@ export const StaticTextPreview: React.FC<{ object: TextObject; scale: number; zI
     try {
       const doc = sanitizeTipTapDoc(object.content);
       if (!doc) return '';
-      return generateHTML(doc, notebookTipTapExtensions);
+      return renderNotebookStaticHtml(doc);
     } catch (err) {
       console.warn('[StaticTextPreview] Failed to generate HTML from text content:', err);
       return '';
     }
   }, [object.content]);
+  useEffect(() => textRef.current ? hydrateAssetImages(textRef.current) : undefined, [html]);
 
   const isSticky = isStickyNote(object);
   const handwritingText = isHandwritingTextObject(object) && !isSticky;

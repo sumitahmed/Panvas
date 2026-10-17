@@ -47,7 +47,7 @@ function AppRouteMemory() {
 
 // Developer-only handwriting-fallback benchmark lab; lazy so the model-facing
 // harness code never touches the startup bundle.
-const HandwritingBenchmarkLab = React.lazy(() => import('@/dev/HandwritingBenchmarkLab'));
+const HandwritingBenchmarkLab = import.meta.env.DEV ? React.lazy(() => import('@/dev/HandwritingBenchmarkLab')) : null;
 
 // These account forms are retained for existing deep links and session flows,
 // but are not part of the local-first workspace startup bundle.
@@ -214,13 +214,13 @@ export function App() {
             </AppShell>
           </AuthGuard>
         </Route>
-        <Route path="/app/dev/handwriting-benchmark">
+        {HandwritingBenchmarkLab && <Route path="/app/dev/handwriting-benchmark">
           <AuthGuard>
             <React.Suspense fallback={null}>
               <HandwritingBenchmarkLab />
             </React.Suspense>
           </AuthGuard>
-        </Route>
+        </Route>}
         <Route path="/app/library">
           <AuthGuard>
             <AppShell>

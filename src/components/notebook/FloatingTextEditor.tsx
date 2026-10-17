@@ -1,13 +1,17 @@
 import { StaticTextPreview } from './StaticTextPreview';
 import { stickyPaperStyle } from './stickyNotes';
 import { isHandwritingTextObject, textObjectStyle } from './textTypography';
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { EditorContent, useEditor, type Editor } from '@tiptap/react';
+import { Extension } from '@tiptap/core';
+import { Plugin } from '@tiptap/pm/state';
+import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
 import Placeholder from '@tiptap/extension-placeholder';
 import { GripHorizontal, Palette, RotateCw, Shapes, X } from 'lucide-react';
 import { SlashMenuExtension } from './SlashMenuExtension';
 import slashSuggestion from './slashSuggestion';
-import { notebookTipTapExtensions } from './tiptapExtensions';
+import { notebookTipTapExtensions, getNotebookSchema } from './tiptapExtensions';
+import { unsupportedNotebookContent, unsupportedContentFallback, usesDocumentationNodes, notebookContentSchemaVersion, NOTEBOOK_RICH_TEXT_SCHEMA_VERSION } from './notebookContentCompatibility';
 import type { TextObject } from './engine/drawingTypes';
 import type { NotebookEngine } from './engine/NotebookEngine';
 import type { PdfPageRotation } from '@/types/notebook';
@@ -28,8 +32,10 @@ import { gate0Profiler } from '@/dev/gate0Profiler';
 import { useFullDarkView } from '@/hooks/useFullDarkView';
 import { fullDarkSurfaceColor } from '@/lib/fullDarkView';
 import { useDocumentTextPresentation } from './useDocumentTextPresentation';
+import { notebookDocumentViewContent } from './notebookDocumentView';
 import { OverlayManager } from '@/components/ui/OverlayManager';
 import { STICKY_NOTE_RESIZE_MIN, stickyShapeBounds } from './stickyNotes';
+import { documentLayoutHistoryExtension } from './documentLayoutTransition';
 
 const STICKY_PALETTE_COLORS = STICKY_NOTE_COLORS.filter((color, index, colors) =>
   colors.findIndex(item => item.value === color.value) === index);
@@ -56,6 +62,27 @@ function textHistoryVisualSignature(object: TextObject, fallbackHeight: number):
     object.x, object.y, object.width, object.height || fallbackHeight, object.rotation ?? 0,
     getStickyNoteColor(object), getStickyNoteOpacity(object), getStickyNoteShape(object),
   ].join('|');
+}
+
+// Only a blank paragraph box is disposable. Structural content conveys intent
+// even when it has no text (a divider, empty table, checklist or code block).
+function hasMeaningfulContent(node: ProseMirrorNode): boolean {
+  if (node.isText) return Boolean(node.text?.trim());
+  if (!['doc', 'paragraph', 'hardBreak'].includes(node.type.name)) return true;
+  let meaningful = false;
+  node.forEach(child => { meaningful ||= hasMeaningfulContent(child); });
+  return meaningful;
+}
+
+// An older schema may omit stored nodes from its live document. Blur must not
+// discard their original payload merely because the editor renders blank.
+function hasMeaningfulStoredContent(value: unknown): boolean {
+  if (typeof value === 'string') return Boolean(value.trim());
+  if (!value || typeof value !== 'object') return false;
+  const node = value as { type?: unknown; text?: unknown; content?: unknown };
+  if (node.type === 'text') return typeof node.text === 'string' && Boolean(node.text.trim());
+  if (typeof node.type === 'string' && !['doc', 'paragraph', 'hardBreak'].includes(node.type)) return true;
+  return Array.isArray(node.content) && node.content.some(hasMeaningfulStoredContent);
 }
 
 const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
@@ -87,6 +114,8 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
   const stickyControlsRef = useRef<HTMLDivElement>(null);
   const gestureCleanup = useRef<(() => void) | null>(null);
   useEffect(() => () => gestureCleanup.current?.(), []);
+  const emptyBlurGeneration = useRef(0);
+  useEffect(() => () => { emptyBlurGeneration.current += 1; }, []);
 
   const [pos, setPos] = useState<{ x: number; y: number }>({ x: object.x, y: object.y });
   const [size, setSize] = useState<{ width: number; height: number }>({
@@ -106,9 +135,24 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
     });
   }, [object.width, object.height, stickyNote, textMinHeight]);
 
+  const authoredContent = useRef<unknown>(null);
+  const prepared = useMemo(() => authoredContent.current === object.content
+    ? { unsupported: [], content: object.content }
+    : { unsupported: unsupportedNotebookContent(object.content, getNotebookSchema()), content: notebookDocumentViewContent(object.content) }, [object.content]);
+  const unsupported = prepared.unsupported;
+  const protectedContent = unsupported.length > 0 || Number(object.metadata?.richTextSchemaVersion ?? 1) > NOTEBOOK_RICH_TEXT_SCHEMA_VERSION;
+  const protectedContentRef = useRef(protectedContent);
+  protectedContentRef.current = protectedContent;
   const editor = useEditor({
     extensions: [
+      documentLayoutHistoryExtension(engine),
       ...notebookTipTapExtensions,
+      Extension.create({
+        name: 'notebookContentProtection',
+        addProseMirrorPlugins() {
+          return [new Plugin({ filterTransaction: transaction => !protectedContentRef.current || !transaction.docChanged })];
+        },
+      }),
       Placeholder.configure({
         placeholder: stickyNote ? 'Take a note...' : 'Type something...',
         emptyEditorClass: 'is-editor-empty',
@@ -116,16 +160,23 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
       }),
       SlashMenuExtension.configure({ suggestion: slashSuggestion }),
     ],
-    content: stickyNote && isLegacyStickyPlaceholderContent(object.content)
+    content: protectedContent ? unsupportedContentFallback(object.content, unsupported.length ? unsupported : ['newer schema']) : stickyNote && isLegacyStickyPlaceholderContent(object.content)
       ? { type: 'doc', content: [{ type: 'paragraph', content: [] }] }
-      : object.content,
+      : prepared.content,
+    editable: !protectedContent,
+    shouldRerenderOnTransaction: false,
     onUpdate: ({ editor }) => {
+      if (protectedContent) return;
       const json = editor.getJSON();
+      authoredContent.current = json;
       object.content = json;
-      engine.texts.updateTextContent(object.id, editor.getJSON());
+      const requiredVersion = notebookContentSchemaVersion(json);
+      if (requiredVersion === 3 || usesDocumentationNodes(json)) object.metadata = { ...object.metadata, richTextSchemaVersion: requiredVersion };
+      engine.texts.updateTextContent(object.id, json);
       engine.input.notifyChange();
     },
     onFocus: ({ editor: currentEditor }) => {
+      emptyBlurGeneration.current += 1;
       engine.texts.setActiveTextId(object.id);
       onFocus(currentEditor);
     },
@@ -135,19 +186,37 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
     },
     onBlur: ({ editor: currentEditor }) => {
       onBlur();
-      // Remove empty text boxes automatically to prevent ghost placeholders (only non-sticky notes)
-      if (!stickyNote && currentEditor.getText().trim() === '') {
-        setTimeout(() => {
+      const generation = ++emptyBlurGeneration.current;
+      const pageId = engine.getDrawingOwnership().pageId;
+      if (!protectedContent && !stickyNote && !hasMeaningfulContent(currentEditor.state.doc) && !hasMeaningfulStoredContent(object.content)) {
+        // Tiptap schedules focus on the next frame. Let it settle before cleanup.
+        requestAnimationFrame(() => setTimeout(() => {
+          if (generation !== emptyBlurGeneration.current || currentEditor.isDestroyed || currentEditor.isFocused
+            || engine.getDrawingOwnership().pageId !== pageId || !engine.texts.isEditable(object)
+            || engine.texts.getTexts().find(text => text.id === object.id) !== object
+            || hasMeaningfulContent(currentEditor.state.doc) || hasMeaningfulStoredContent(object.content)) return;
+          const index = engine.texts.getTexts().indexOf(object);
+          const snapshot = structuredClone(object);
           engine.history.push({
             description: 'Remove empty text box',
             execute: () => {
+              const selected = engine.selection.getSelectedElements();
               engine.texts.removeText(object.id);
-              engine.selection.clearSelection();
+              if (selected.some(element => element.id === object.id)) {
+                const remaining = selected.filter(element => element.id !== object.id);
+                engine.selection.clearSelection();
+                remaining.forEach(element => engine.selection.select(element.id, element.type, true));
+              }
               engine.input.notifyChange();
             },
-            undo: () => {},
+            undo: () => {
+              const texts = [...engine.texts.getTexts()];
+              texts.splice(index, 0, structuredClone(snapshot));
+              engine.texts.setTexts(texts);
+              engine.input.notifyChange();
+            },
           });
-        }, 0);
+        }, 0));
       }
     },
   });
@@ -211,11 +280,11 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
   useEffect(() => {
     // Tool/ownership changes alter interaction, not document content. TipTap's
     // default update notification would otherwise save every newly mounted page.
-    editor?.setEditable(isTextTool && engine.texts.isEditable(object), false);
+    editor?.setEditable(!protectedContent && isTextTool && engine.texts.isEditable(object), false);
     if (!isTextTool && editor && editor.isFocused) {
       editor.commands.blur();
     }
-  }, [isTextTool, editor, engine, object]);
+  }, [isTextTool, editor, engine, object, protectedContent]);
 
   // A newly-created editor is mounted after InputManager's pointer event has completed, so a
   // one-shot document event dispatched during creation can be missed. Selection plus Text
@@ -639,6 +708,11 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
           : {}),
       }}
       onPointerDown={(e) => {
+        // Let ProseMirror own mouse/pen selection. The viewport's pointer-down
+        // handler otherwise focuses itself before native text selection starts.
+        if (isTextTool && editor.isEditable && e.pointerType !== 'touch' && e.target instanceof Node && editor.view.dom.contains(e.target)) {
+          e.stopPropagation();
+        }
         if (!pdfPlacement && !isTextTool && !isHandTool) {
           const rect = surfaceRef.current!.getBoundingClientRect();
           const point = { x: object.x + (e.clientX - rect.left) * size.width / rect.width, y: object.y + (e.clientY - rect.top) * size.height / rect.height };

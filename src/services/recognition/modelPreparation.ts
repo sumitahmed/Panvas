@@ -82,7 +82,7 @@ export function shouldPrepareLocalModel(input: {
  */
 export function prepareLocalHandwritingModel(options: { reason?: string } = {}): Promise<boolean> {
   if (inflight) return inflight;
-  if (!shouldPrepareLocalModel({
+  if (!LOCAL_NEURAL_FALLBACK_ENABLED || !shouldPrepareLocalModel({
     fallbackEnabled: LOCAL_NEURAL_FALLBACK_ENABLED,
     hasNativeHandwritingApi: isNativeHandwritingApiAvailable(),
     hasWindow: typeof window !== 'undefined',

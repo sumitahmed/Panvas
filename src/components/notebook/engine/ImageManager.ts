@@ -110,7 +110,6 @@ export class ImageManager {
   private async preloadImage(fileId: string) {
     if (this.imageCache.has(fileId)) {
       gate0Profiler.event('image-cache-hit', undefined, { fileId });
-      if (this.redrawCallback) this.redrawCallback();
       return;
     }
 
@@ -165,6 +164,7 @@ export class ImageManager {
 
   renderImages(ctx: CanvasRenderingContext2D, layerId?: string): void {
     for (const imgObj of this.images) {
+      if (!this.viewport.intersectsRenderWindow(imgObj)) continue;
       if (layerId && imgObj.layerId !== layerId) continue;
       const imgLayerId = imgObj.layerId ?? DEFAULT_PAGE_LAYER_ID;
       if (layerId && imgLayerId !== layerId) continue;

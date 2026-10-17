@@ -4,6 +4,11 @@
 
 import React, { useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { OverlayManager } from '@/components/ui/OverlayManager';
+import type { Editor } from '@tiptap/core';
+import { DocumentationControls } from './DocumentationControls';
+import type { NotebookEngine } from './engine/NotebookEngine';
+import { canUseDocumentLayoutHistory, runDocumentLayoutHistory } from './documentLayoutTransition';
 import { 
   Undo2, 
   Redo2, 
@@ -29,45 +34,33 @@ export interface ContextMenuState {
   canUndo: boolean;
   canRedo: boolean;
   canConvertHandwriting: boolean;
+  editor?: Editor | null;
+  blockId?: string;
 }
 
 export interface NotebookContextMenuProps {
+  engine?: NotebookEngine;
   state: ContextMenuState;
   onClose: () => void;
   onCommand: (command: 'undo' | 'redo' | 'cut' | 'copy' | 'paste' | 'duplicate' | 'delete' | 'selectAll' | 'bringToFront' | 'bringForward' | 'sendBackward' | 'sendToBack' | 'convertHandwriting') => void;
 }
 
 export const NotebookContextMenu: React.FC<NotebookContextMenuProps> = ({
+  engine,
   state,
   onClose,
   onCommand,
 }) => {
   const menuRef = useRef<HTMLDivElement>(null);
+  const anchorRef = useRef<HTMLSpanElement>(null);
 
-  // Close when clicking outside, window blur, or window resize
+  // OverlayManager handles outside clicks and Escape; window changes dismiss.
   useEffect(() => {
     if (!state.isOpen) return;
-
-    const handleClickOutside = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        onClose();
-      }
-    };
-
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        onClose();
-      }
-    };
-
-    window.addEventListener('mousedown', handleClickOutside);
-    window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('resize', onClose);
     window.addEventListener('blur', onClose);
 
     return () => {
-      window.removeEventListener('mousedown', handleClickOutside);
-      window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('resize', onClose);
       window.removeEventListener('blur', onClose);
     };
@@ -75,11 +68,9 @@ export const NotebookContextMenu: React.FC<NotebookContextMenuProps> = ({
 
   if (!state.isOpen) return null;
 
-  // Calculate clamped coordinates so menu never overflows screen bounds
-  const menuWidth = 190;
-  const menuHeight = 470;
-  const clampedX = Math.max(10, Math.min(state.x, window.innerWidth - menuWidth - 10));
-  const clampedY = Math.max(10, Math.min(state.y, window.innerHeight - menuHeight - 10));
+  // OverlayManager measures and collides the actual panel at the pointer.
+  const editor = state.editor && !state.editor.isDestroyed ? state.editor : null;
+  const menuWidth = editor ? 310 : 190;
 
   const handleAction = (cmd: 'undo' | 'redo' | 'cut' | 'copy' | 'paste' | 'duplicate' | 'delete' | 'selectAll' | 'bringToFront' | 'bringForward' | 'sendBackward' | 'sendToBack' | 'convertHandwriting') => {
     onCommand(cmd);
@@ -90,6 +81,8 @@ export const NotebookContextMenu: React.FC<NotebookContextMenuProps> = ({
   const modKey = isMac ? '⌘' : 'Ctrl+';
 
   return (
+    <><span ref={anchorRef} aria-hidden="true" className="pointer-events-none fixed" style={{ left: state.x, top: state.y }} />
+    <OverlayManager isOpen anchorRef={anchorRef} placement="bottom-start" offset={{ x: 0, y: 0 }} exclusiveGroup="documentation" onClose={onClose} onEscape={() => { if (editor && !editor.isDestroyed) editor.view.focus(); }}>
     <AnimatePresence>
       <motion.div
         ref={menuRef}
@@ -97,10 +90,18 @@ export const NotebookContextMenu: React.FC<NotebookContextMenuProps> = ({
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.95 }}
         transition={{ duration: 0.1, ease: 'easeOut' }}
-        className="panvas-overlay fixed min-w-[190px] rounded-lg border border-panvas-border-default bg-panvas-bg-elevated p-1 shadow-2xl backdrop-blur-md select-none text-xs"
-        style={{ left: `${clampedX}px`, top: `${clampedY}px` }}
+        className="panvas-overlay min-w-0 rounded-lg border border-panvas-border-default bg-panvas-bg-elevated p-1 shadow-2xl backdrop-blur-md select-none text-xs"
+        style={{ width: menuWidth, maxHeight: 'min(400px,var(--panvas-overlay-max-height,calc(100dvh - 24px)))', overflowY: 'auto' }}
+        aria-label={editor ? 'Document block menu' : 'Canvas context menu'}
         onContextMenu={(e) => e.preventDefault()}
       >
+        {editor ? <>
+          <div className="flex gap-1 px-2 py-1">
+            {(['undo', 'redo'] as const).map(direction => <button key={direction} type="button" className="rounded px-2 py-1 capitalize hover:bg-panvas-bg-hover" onMouseDown={event => event.preventDefault()} disabled={!editor.can()[direction]() && !(engine && canUseDocumentLayoutHistory(engine, direction, editor))} onClick={() => { if (!editor.chain().focus()[direction]().run() && engine) runDocumentLayoutHistory(engine, direction, editor); onClose(); }}>{direction}</button>)}
+            {(['cut', 'copy', 'paste'] as const).map(command => <button key={command} type="button" className="rounded px-2 py-1 capitalize hover:bg-panvas-bg-hover" onMouseDown={event => event.preventDefault()} onClick={() => { editor.commands.focus(); handleAction(command); }}>{command}</button>)}
+          </div>
+          <DocumentationControls editor={editor} blockId={state.blockId} onDismiss={onClose} />
+        </> : <>
         {/* Undo / Redo */}
         <button
           type="button"
@@ -265,7 +266,8 @@ export const NotebookContextMenu: React.FC<NotebookContextMenuProps> = ({
             <span className="text-[10px] font-mono opacity-70">Del</span>
           </button>
         )}
+        </>}
       </motion.div>
-    </AnimatePresence>
+    </AnimatePresence></OverlayManager></>
   );
 };

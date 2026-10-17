@@ -55,10 +55,14 @@ export class PageAudioPersistenceCoordinator {
       for (const object of queue.voiceObjects ?? []) {
         if (!objects.some(item => item.id === object.id) && noteIds.has(String(object.metadata?.audioNoteId))) objects.push(structuredClone(object));
       }
-      const next = { ...data, objects, audioNotes: audioNotes.map(note => ({ ...note })) };
+      // Preserve an immutable snapshot and its already computed JSON when no
+      // audio merge changed it. Queued audio/voice edits still take the merge path.
+      const next = Array.isArray(data.objects) && Array.isArray(data.audioNotes)
+        && !audioNotes.length && !queue.voiceObjects?.length && objects.length === data.objects.length
+        ? data : { ...data, objects, audioNotes: audioNotes.map(note => ({ ...note })) };
       await this.repository.saveDrawingData(owner.workspaceId, owner.notebookId, owner.pageId, next, searchContext);
       queue.audioNotes = next.audioNotes;
-      queue.voiceObjects = next.objects.filter(isVoiceNoteObject).map(object => structuredClone(object));
+      queue.voiceObjects = (next.objects ?? []).filter(isVoiceNoteObject).map(object => structuredClone(object));
       return next;
     });
   }

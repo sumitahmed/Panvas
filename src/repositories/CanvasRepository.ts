@@ -38,6 +38,21 @@ export class CanvasRepository {
   }
 
   async duplicate(userId: string | null, id: string): Promise<CanvasFile | null> {
+    if (typeof window !== 'undefined' && window.panvas) {
+      // Desktop metadata/scenes live on disk. The browser-only duplicate path
+      // cannot find a desktop canvas in IndexedDB after a clean restart.
+      const original = (await this.getAll(userId)).find(canvas => canvas.id === id && !canvas.deletedAt);
+      if (!original) return null;
+      const scene = await this.loadData(userId, id, original.workspaceId);
+      const copy = await this.create(userId, original.workspaceId, original.folderId, original.notebookId ?? null,
+        original.sectionId ?? null, `${original.name} (Copy)`);
+      for (const block of scene?.customBlocks ?? []) {
+        const { id: _id, createdAt: _created, updatedAt: _updated, userId: _user, ...data } = block;
+        await canvasDB.addCustomBlock(userId, { ...data, canvasFileId: copy.id });
+      }
+      await this.saveData(userId, { ...scene, canvasFileId: copy.id }, original.workspaceId);
+      return copy;
+    }
     const canvas = await workspaceDB.duplicateCanvasFile(userId, id);
     if (canvas) {
       // Sync the duplicated file and data

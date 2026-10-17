@@ -13,7 +13,13 @@ export interface PagePropertySet {
   template: PageTemplateId;
   ruleLineColor: string;
   orientation: 'portrait' | 'landscape';
-  pageSize: 'A3' | 'A4' | 'A5' | 'Letter' | 'Custom';
+  pageSize: 'A3' | 'A4' | 'A5' | 'Letter' | 'Custom' | 'Infinite';
+  /** Absent on legacy pages: positioned freeform content. */
+  layoutMode?: 'freeform' | 'document';
+  /** Page-owned, finite layout hint. Content is authoritative on reopening. */
+  layoutExtent?: number;
+  /** Existing-page Infinite conversion retains its source width. New pages use A4. */
+  infiniteWidth?: number;
   margins: 'No Margin' | 'Normal' | 'Narrow' | 'Wide';
   /** User-entered values for editable labels supplied by structured paper templates. */
   templateFields?: Record<string, string>;

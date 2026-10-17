@@ -7,16 +7,20 @@ const root = process.cwd();
 const release = path.join(root, 'release');
 const stage = await mkdtemp(path.join(os.tmpdir(), 'panvas-release-'));
 const directoryOnly = process.argv.includes('--dir');
+const portable = process.argv.includes('--portable');
 
 try {
   const cli = path.join(root, 'node_modules', 'electron-builder', 'out', 'cli', 'cli.js');
-  const args = [cli, '--win', '--x64', `--config.directories.output=${stage}`];
+  const args = [cli, '--win', ...(portable && !directoryOnly ? ['nsis', 'portable'] : []), '--x64', `--config.directories.output=${stage}`];
+  if (portable) args.push('--config.portable.artifactName=${productName}-${version}-Portable.${ext}');
   if (directoryOnly) args.push('--dir');
   const result = spawnSync(process.execPath, args, { cwd: root, stdio: 'inherit' });
   if (result.status !== 0) process.exitCode = result.status ?? 1;
   else {
     await mkdir(release, { recursive: true });
-    if (directoryOnly) {
+    // The staged package is complete: merging an old unpacked directory can
+    // otherwise retain obsolete DLLs/resources from a previous Electron build.
+    {
       await rm(path.join(release, 'win-unpacked'), { recursive: true, force: true });
       await rm(path.join(release, 'win-unpacked.tmp'), { recursive: true, force: true });
     }

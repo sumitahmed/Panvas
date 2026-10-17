@@ -26,6 +26,9 @@ This index identifies the canonical documentation for the current Panvas release
 - [CLOUD_SYNC_DEVICE_RESET.md](CLOUD_SYNC_DEVICE_RESET.md) - local reset and recovery procedure when sync is explicitly enabled.
 - [RELEASE_NOTES_v0.1.0.md](RELEASE_NOTES_v0.1.0.md) - concise release notes for the first public release.
 - [RELEASE_READINESS.md](RELEASE_READINESS.md) - maintainer release gate.
+- [RELEASE_NOTES_CANDIDATE.md](RELEASE_NOTES_CANDIDATE.md) - unpublished local candidate scope and review gates.
+- [DOCKER.md](DOCKER.md) - container development, web serving and state/HTTPS boundaries.
+- [TROUBLESHOOTING.md](TROUBLESHOOTING.md) - runtime, storage, cloud and distribution diagnostics.
 - [IMPORT_EXPORT_SUPPORT.md](IMPORT_EXPORT_SUPPORT.md) - current import/export surface.
 
 ## Security and project operations

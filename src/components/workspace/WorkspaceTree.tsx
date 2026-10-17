@@ -1,14 +1,13 @@
 import React from 'react';
-import { ChevronRight, FileText, Folder, FolderOpen, LayoutGrid, MoreHorizontal, Plus, Star } from 'lucide-react';
-import { AnimatePresence, motion } from 'framer-motion';
+import { ChevronRight, FileText, Folder, FolderOpen, Layers, LayoutGrid, MoreHorizontal, Plus, Star } from 'lucide-react';
 import { useLocation } from 'wouter';
 import { useWorkspaceStore } from '@/stores/workspaceStore';
 import { useUIStore } from '@/stores/uiStore';
 import type { Notebook, NotebookPage, NotebookSection } from '@/types/notebook';
 import type { CanvasFile, Folder as WorkspaceFolder } from '@/types/workspace';
 import { createNotebookExportTarget, createPageExportTarget, createSectionExportTarget } from '@/services/pdf/notebookExportTargets';
-import { NotebookCoverThumbnail } from '@/components/library/NotebookCoverThumbnail';
 import { validateEntityName } from '@/lib/entityName';
+import { NotebookCoverThumbnail } from '@/components/library/NotebookCoverThumbnail';
 
 export type DropPosition = 'before' | 'inside' | 'after';
 
@@ -58,7 +57,7 @@ export function WorkspaceTree({ workspaceId }: { workspaceId: string }) {
       onDragOver={(e) => { e.preventDefault(); setIsDragOverRoot(true); }}
       onDragLeave={() => setIsDragOverRoot(false)}
       onDrop={handleRootDrop}
-      className={`space-y-0.5 min-h-[40px] rounded-md transition-colors ${isDragOverRoot ? 'bg-panvas-bg-hover/60 border border-dashed border-panvas-border-strong' : ''}`}
+      className={`min-h-[28px] rounded ${isDragOverRoot ? 'bg-panvas-bg-hover/60 outline outline-1 outline-dashed outline-panvas-border-strong' : ''}`}
     >
       {rootFolders.map(folder => <FolderNode key={folder.id} folder={folder} depth={0} />)}
       {rootNotebooks.map(notebook => <NotebookNode key={notebook.id} notebook={notebook} depth={0} />)}
@@ -105,6 +104,8 @@ function FolderNode({ folder, depth }: { folder: WorkspaceFolder; depth: number 
     <div>
       <TreeRow
         itemId={folder.id}
+        groupId={`tree-children-${folder.id}`}
+        name={folder.name}
         depth={depth}
         expanded={isExpanded}
         badge={childFolders.length + childNotebooks.length + childCanvases.length || undefined}
@@ -118,7 +119,7 @@ function FolderNode({ folder, depth }: { folder: WorkspaceFolder; depth: number 
         icon={isExpanded ? <FolderOpen size={15} className="text-panvas-text-secondary" /> : <Folder size={15} className="text-panvas-text-tertiary" />}
         label={isRenaming ? <input autoFocus value={value} onChange={event => setValue(event.target.value)} onBlur={save} onKeyDown={event => { if (event.key === 'Enter') save(); if (event.key === 'Escape') setRenamingId(null); }} onClick={event => event.stopPropagation()} className="w-full bg-transparent outline-none" /> : folder.name}
       />
-      <Collapsible open={isExpanded || (inlineCreate?.parentType === 'folder' && inlineCreate.parentId === folder.id)}>
+      <Collapsible id={`tree-children-${folder.id}`} depth={depth} open={isExpanded || (inlineCreate?.parentType === 'folder' && inlineCreate.parentId === folder.id)}>
         {childFolders.map(item => <FolderNode key={item.id} folder={item} depth={depth + 1} />)}
         {childNotebooks.map(item => <NotebookNode key={item.id} notebook={item} depth={depth + 1} />)}
         {childCanvases.map(item => <CanvasNode key={item.id} canvas={item} depth={depth + 1} />)}
@@ -141,9 +142,13 @@ function NotebookNode({ notebook, depth }: { notebook: Notebook; depth: number }
   const sections = notebookSections.filter(section => section.notebookId === notebook.id);
   const childCanvases = canvasFiles.filter(canvas => canvas.notebookId === notebook.id && !canvas.sectionId);
 
-  const handleNotebookClick = () => {
-    setActiveNotebook(notebook.id);
-    if (!notebook.isExpanded) {
+  const handleNotebookClick = async () => {
+    // Last-opened writes and tree expansion share native workspace metadata.
+    // Finish activation before publishing the expansion update.
+    await setActiveNotebook(notebook.id);
+    const current = useWorkspaceStore.getState();
+    if (current.activeNotebookId !== notebook.id || current.activeWorkspaceId !== notebook.workspaceId) return;
+    if (!current.notebooks.find(item => item.id === notebook.id)?.isExpanded) {
       toggleNotebookExpanded(notebook.id);
     }
     navigate('/app');
@@ -169,12 +174,15 @@ function NotebookNode({ notebook, depth }: { notebook: Notebook; depth: number }
     <div>
       <TreeRow
         itemId={notebook.id}
+        groupId={`tree-children-${notebook.id}`}
+        name={notebook.name}
         depth={depth}
         active={isActive}
+        ancestor
         expanded={notebook.isExpanded}
         badge={sections.length || undefined}
         onClick={handleNotebookClick}
-        onToggle={() => { setActiveNotebook(notebook.id); toggleNotebookExpanded(notebook.id); }}
+        onToggle={async () => { await setActiveNotebook(notebook.id); const current = useWorkspaceStore.getState(); if (current.activeNotebookId === notebook.id && current.activeWorkspaceId === notebook.workspaceId) await toggleNotebookExpanded(notebook.id); }}
         onContextMenu={(event) => openContextMenu(
           event.clientX,
           event.clientY,
@@ -190,7 +198,7 @@ function NotebookNode({ notebook, depth }: { notebook: Notebook; depth: number }
         label={isRenaming ? <input autoFocus value={value} onChange={event => setValue(event.target.value)} onBlur={save} onKeyDown={event => { if (event.key === 'Enter') save(); if (event.key === 'Escape') setRenamingId(null); }} onClick={event => event.stopPropagation()} className="w-full bg-transparent outline-none" /> : notebook.name}
         trailing={notebook.isPinned ? <Star size={12} className="text-panvas-accent-amber fill-panvas-accent-amber" /> : undefined}
       />
-      <Collapsible open={notebook.isExpanded || (inlineCreate?.parentType === 'notebook' && inlineCreate.parentId === notebook.id)}>
+      <Collapsible id={`tree-children-${notebook.id}`} depth={depth} open={notebook.isExpanded || (inlineCreate?.parentType === 'notebook' && inlineCreate.parentId === notebook.id)}>
         {sections.map(section => <SectionNode key={section.id} section={section} pages={notebookPages.filter(page => page.sectionId === section.id)} depth={depth + 1} />)}
         {childCanvases.map(canvas => <CanvasNode key={canvas.id} canvas={canvas} depth={depth + 1} />)}
         {inlineCreate?.type === 'canvas' && inlineCreate.parentType === 'notebook' && inlineCreate.parentId === notebook.id && <InlineCreateRow type="canvas" depth={depth + 1} />}
@@ -213,9 +221,11 @@ function SectionNode({ section, pages, depth }: { section: NotebookSection; page
   const workspaceId = notebooks.find(n => n.id === section.notebookId)?.workspaceId || '';
   const childCanvases = canvasFiles.filter(canvas => canvas.sectionId === section.id);
 
-  const handleSectionClick = () => {
-    setActiveNotebookSection(section.id);
-    if (!section.isExpanded) {
+  const handleSectionClick = async () => {
+    await setActiveNotebookSection(section.id);
+    const current = useWorkspaceStore.getState();
+    if (current.activeNotebookSectionId !== section.id || current.activeWorkspaceId !== workspaceId) return;
+    if (!current.notebookSections.find(item => item.id === section.id)?.isExpanded) {
       toggleNotebookSectionExpanded(section.id);
     }
     navigate('/app');
@@ -244,12 +254,15 @@ function SectionNode({ section, pages, depth }: { section: NotebookSection; page
     <div>
       <TreeRow
         itemId={section.id}
+        groupId={`tree-children-${section.id}`}
+        name={section.name}
         depth={depth}
         active={isActive}
+        ancestor
         expanded={section.isExpanded}
         badge={pages.length || undefined}
         onClick={handleSectionClick}
-        onToggle={() => { setActiveNotebookSection(section.id); toggleNotebookSectionExpanded(section.id); }}
+        onToggle={async () => { await setActiveNotebookSection(section.id); const current = useWorkspaceStore.getState(); if (current.activeNotebookSectionId === section.id && current.activeWorkspaceId === workspaceId) await toggleNotebookSectionExpanded(section.id); }}
         onContextMenu={(event) => {
           const notebook = notebooks.find(item => item.id === section.notebookId);
           openContextMenu(
@@ -264,10 +277,10 @@ function SectionNode({ section, pages, depth }: { section: NotebookSection; page
         onDragStart={(event) => event.dataTransfer.setData('application/json', JSON.stringify({ type: 'section', id: section.id, notebookId: section.notebookId }))}
         onDropItem={handleDropItem}
         acceptsDropInside
-        icon={<ChevronRight size={13} className="text-panvas-text-tertiary" />}
+        icon={<Layers size={16} className="text-panvas-text-tertiary" />}
         label={isRenaming ? <input autoFocus value={value} onChange={event => setValue(event.target.value)} onBlur={save} onKeyDown={event => { if (event.key === 'Enter') save(); if (event.key === 'Escape') setRenamingId(null); }} onClick={event => event.stopPropagation()} className="w-full bg-transparent outline-none" /> : section.name}
       />
-      <Collapsible open={section.isExpanded || inlineCreate?.parentId === section.id}>
+      <Collapsible id={`tree-children-${section.id}`} depth={depth} open={section.isExpanded || inlineCreate?.parentId === section.id}>
         {pages.map(page => <PageNode key={page.id} page={page} depth={depth + 1} />)}
         {childCanvases.map(canvas => <CanvasNode key={canvas.id} canvas={canvas} depth={depth + 1} />)}
         {inlineCreate?.parentId === section.id && inlineCreate.parentType !== 'folder' && inlineCreate.parentType !== 'notebook' && <InlineCreateRow type={inlineCreate.type} depth={depth + 1} sectionId={section.id} />}
@@ -277,21 +290,21 @@ function SectionNode({ section, pages, depth }: { section: NotebookSection; page
   );
 }
 
-function PageNode({ page, depth }: { page: NotebookPage; depth: number }) {
+const PageNode = React.memo(function PageNode({ page, depth }: { page: NotebookPage; depth: number }) {
   const [, navigate] = useLocation();
-  const { notebooks, notebookSections, notebookPages, activePageId, setActivePage, renameNotebookPage, moveNotebookPage, reorderItems } = useWorkspaceStore();
-  const { openContextMenu, renamingId, setRenamingId } = useUIStore();
+  const isActive = useWorkspaceStore(state => state.activePageId === page.id);
+  const isRenaming = useUIStore(state => state.renamingId === page.id);
+  const { setActivePage, renameNotebookPage, moveNotebookPage, reorderItems } = useWorkspaceStore.getState();
+  const { openContextMenu, setRenamingId } = useUIStore.getState();
   const [value, setValue] = React.useState(page.title);
-  const isRenaming = renamingId === page.id;
   const save = async () => { if (value.trim() && value !== page.title) await renameNotebookPage(page.id, value.trim()); setRenamingId(null); };
-
-  const section = notebookSections.find(s => s.id === page.sectionId);
-  const notebook = section ? notebooks.find(n => n.id === section.notebookId) : undefined;
-  const workspaceId = notebook?.workspaceId || '';
 
   const handleDropItem = async (data: any, position: DropPosition) => {
     if (position === 'inside') return;
     if (data.type !== 'page') return;
+    const { notebooks, notebookSections, notebookPages } = useWorkspaceStore.getState();
+    const section = notebookSections.find(item => item.id === page.sectionId);
+    const workspaceId = notebooks.find(item => item.id === section?.notebookId)?.workspaceId ?? '';
     const siblings = notebookPages.filter(p => p.sectionId === page.sectionId);
     const reorderedIds = getReorderedIds(siblings, data.id, page.id, position);
     const draggedItem = notebookPages.find(p => p.id === data.id);
@@ -304,19 +317,19 @@ function PageNode({ page, depth }: { page: NotebookPage; depth: number }) {
   return (
     <TreeRow
       itemId={page.id}
+        name={page.title}
       depth={depth}
-      active={activePageId === page.id}
+      active={isActive}
       onClick={() => {
         setActivePage(page.id);
         navigate('/app');
       }}
-      onContextMenu={(event) => openContextMenu(
-        event.clientX,
-        event.clientY,
-        page.id,
-        'page',
-        section && notebook ? createPageExportTarget(page, section, notebook) : null,
-      )}
+      onContextMenu={(event) => {
+        const { notebooks, notebookSections } = useWorkspaceStore.getState();
+        const section = notebookSections.find(item => item.id === page.sectionId);
+        const notebook = notebooks.find(item => item.id === section?.notebookId);
+        openContextMenu(event.clientX, event.clientY, page.id, 'page', section && notebook ? createPageExportTarget(page, section, notebook) : null);
+      }}
       draggable
       onDragStart={(event) => event.dataTransfer.setData('application/json', JSON.stringify({ type: 'page', id: page.id, sectionId: page.sectionId }))}
       onDropItem={handleDropItem}
@@ -324,19 +337,21 @@ function PageNode({ page, depth }: { page: NotebookPage; depth: number }) {
       label={isRenaming ? <input autoFocus value={value} onChange={event => setValue(event.target.value)} onBlur={save} onKeyDown={event => { if (event.key === 'Enter') save(); if (event.key === 'Escape') setRenamingId(null); }} onClick={event => event.stopPropagation()} className="w-full bg-transparent outline-none" /> : page.title}
     />
   );
-}
+});
 
-function CanvasNode({ canvas, depth }: { canvas: CanvasFile; depth: number }) {
+const CanvasNode = React.memo(function CanvasNode({ canvas, depth }: { canvas: CanvasFile; depth: number }) {
   const [, navigate] = useLocation();
-  const { canvasFiles, activeCanvasId, setActiveCanvas, renameCanvas, moveCanvas, reorderItems } = useWorkspaceStore();
-  const { openContextMenu, renamingId, setRenamingId } = useUIStore();
+  const isActive = useWorkspaceStore(state => state.activeCanvasId === canvas.id);
+  const isRenaming = useUIStore(state => state.renamingId === canvas.id);
+  const { setActiveCanvas, renameCanvas, moveCanvas, reorderItems } = useWorkspaceStore.getState();
+  const { openContextMenu, setRenamingId } = useUIStore.getState();
   const [value, setValue] = React.useState(canvas.name);
-  const isRenaming = renamingId === canvas.id;
   const save = async () => { if (value.trim() && value !== canvas.name) await renameCanvas(canvas.id, value.trim()); setRenamingId(null); };
 
   const handleDropItem = async (data: any, position: DropPosition) => {
     if (position === 'inside') return;
     if (data.type !== 'canvas') return;
+    const { canvasFiles } = useWorkspaceStore.getState();
     const siblings = canvasFiles.filter(c => c.workspaceId === canvas.workspaceId && c.folderId === canvas.folderId && c.notebookId === canvas.notebookId && c.sectionId === canvas.sectionId);
     const reorderedIds = getReorderedIds(siblings, data.id, canvas.id, position);
     const draggedItem = canvasFiles.find(c => c.id === data.id);
@@ -349,8 +364,9 @@ function CanvasNode({ canvas, depth }: { canvas: CanvasFile; depth: number }) {
   return (
     <TreeRow
       itemId={canvas.id}
+        name={canvas.name}
       depth={depth}
-      active={activeCanvasId === canvas.id}
+      active={isActive}
       onClick={() => {
         setActiveCanvas(canvas.id);
         navigate('/app');
@@ -359,12 +375,12 @@ function CanvasNode({ canvas, depth }: { canvas: CanvasFile; depth: number }) {
       draggable
       onDragStart={(event) => event.dataTransfer.setData('application/json', JSON.stringify({ type: 'canvas', id: canvas.id }))}
       onDropItem={handleDropItem}
-      icon={<FileText size={16} className="text-panvas-text-tertiary" />}
+      icon={<LayoutGrid size={16} className="text-panvas-text-tertiary" />}
       label={isRenaming ? <input autoFocus value={value} onChange={event => setValue(event.target.value)} onBlur={save} onKeyDown={event => { if (event.key === 'Enter') save(); if (event.key === 'Escape') setRenamingId(null); }} onClick={event => event.stopPropagation()} className="w-full bg-transparent outline-none" /> : canvas.name}
       trailing={canvas.isPinned ? <Star size={12} className="text-panvas-accent-amber fill-panvas-accent-amber" /> : undefined}
     />
   );
-}
+});
 
 function InlineCreateRow({ type, depth, sectionId }: { type: 'page' | 'canvas'; depth: number; sectionId?: string }) {
   const [, navigate] = useLocation();
@@ -400,7 +416,7 @@ function InlineCreateRow({ type, depth, sectionId }: { type: 'page' | 'canvas'; 
     }
   };
 
-  return <div className="flex h-7 items-center gap-1.5 rounded-md border-l-2 border-panvas-accent-blue bg-panvas-bg-hover px-2" style={{ paddingLeft: `${depth * 16 + 26}px` }}>
+  return <div className="flex h-7 items-center gap-1.5 rounded bg-panvas-bg-hover pr-2" style={{ paddingLeft: `${(depth + 1) * 16 + 28}px` }}>
     {type === 'page'
       ? <FileText size={15} className="shrink-0 text-panvas-text-tertiary" aria-hidden="true" />
       : <LayoutGrid size={15} className="shrink-0 text-panvas-text-tertiary" aria-hidden="true" />}
@@ -411,7 +427,7 @@ function InlineCreateRow({ type, depth, sectionId }: { type: 'page' | 'canvas'; 
   </div>;
 }
 
-function TreeRow({ itemId, depth, label, icon, expanded, active = false, onClick, onToggle, onContextMenu, trailing, badge, draggable, onDragStart, onDropItem, acceptsDropInside = false }: { itemId: string; depth: number; label: React.ReactNode; icon: React.ReactNode; expanded?: boolean; active?: boolean; onClick?: () => void; onToggle?: () => void; onContextMenu?: (event: React.MouseEvent) => void; trailing?: React.ReactNode; badge?: number; draggable?: boolean; onDragStart?: (event: React.DragEvent) => void; onDropItem?: (data: any | null, position: DropPosition, files?: FileList) => void; acceptsDropInside?: boolean }) {
+function TreeRow({ itemId, groupId, name, depth, label, icon, expanded, active = false, ancestor = false, onClick, onToggle, onContextMenu, trailing, badge, draggable, onDragStart, onDropItem, acceptsDropInside = false }: { itemId: string; groupId?: string; name: string; depth: number; label: React.ReactNode; icon: React.ReactNode; expanded?: boolean; active?: boolean; ancestor?: boolean; onClick?: () => void; onToggle?: () => void; onContextMenu?: (event: React.MouseEvent) => void; trailing?: React.ReactNode; badge?: number; draggable?: boolean; onDragStart?: (event: React.DragEvent) => void; onDropItem?: (data: any | null, position: DropPosition, files?: FileList) => void; acceptsDropInside?: boolean }) {
   const activate = () => onClick?.();
   const [dragPosition, setDragPosition] = React.useState<DropPosition | null>(null);
   const ref = React.useRef<HTMLDivElement>(null);
@@ -453,42 +469,52 @@ function TreeRow({ itemId, depth, label, icon, expanded, active = false, onClick
     <div
       ref={ref}
       data-tree-id={itemId}
-      role="button"
-      tabIndex={0}
+      role="treeitem"
+      aria-level={depth + 2}
+      aria-expanded={onToggle ? Boolean(expanded) : undefined}
+      aria-owns={expanded ? groupId : undefined}
+      aria-selected={active && !ancestor}
+      aria-current={active && !ancestor ? 'page' : undefined}
+      aria-label={name}
+      data-state={active ? ancestor ? 'ancestor' : 'selected' : undefined}
+      tabIndex={active && !ancestor ? 0 : -1}
       onClick={activate}
-      onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activate(); } }}
+      onKeyDown={event => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); activate(); } }}
       onContextMenu={onContextMenu}
       draggable={draggable}
       onDragStart={onDragStart}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
-      className={`group relative flex h-7 items-center gap-1.5 rounded-md border-l-2 px-2 text-xs transition-colors duration-150 ${active ? 'border-panvas-text-primary bg-panvas-bg-hover text-panvas-text-primary' : 'border-transparent text-panvas-text-secondary hover:bg-panvas-bg-hover'} ${dragClass}`}
-      style={{ paddingLeft: `${depth * 16 + 10}px` }}
+      className={`panvas-tree-row relative ${dragClass}`}
+      style={{ paddingLeft: `${(depth + 1) * 16 + 6}px` }}
     >
       {onToggle ? (
         <button
           type="button"
-          aria-label={`${expanded ? 'Collapse' : 'Expand'} ${label}`}
-          title={`${expanded ? 'Collapse' : 'Expand'} ${label}`}
+          data-tree-toggle
+          tabIndex={-1}
+          aria-label={`${expanded ? 'Collapse' : 'Expand'} ${name}`}
+          title={`${expanded ? 'Collapse' : 'Expand'} ${name}`}
           onClick={event => { event.stopPropagation(); onToggle(); }}
-          className="flex h-4 w-4 items-center justify-center rounded text-panvas-text-tertiary hover:text-panvas-text-primary"
+          className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-panvas-text-tertiary hover:text-panvas-text-primary focus-ring"
         >
-          <ChevronRight size={13} className={`transition-transform duration-150 ${expanded ? 'rotate-90' : ''}`} />
+          <ChevronRight size={13} className={expanded ? 'rotate-90' : ''} />
         </button>
       ) : (
-        <span className="w-4" />
+        <span className="w-4 shrink-0" />
       )}
-      <span className="flex-shrink-0">{icon}</span>
-      <span className="min-w-0 flex-1 truncate text-left">{label}</span>
-      {badge !== undefined && <span className="text-2xs text-panvas-text-tertiary group-hover:hidden">{badge}</span>}
+      <span className="flex w-4 shrink-0 items-center justify-center" aria-hidden="true">{icon}</span>
+      <span className="min-w-0 flex-1 truncate text-left" title={name}>{label}</span>
+      {badge !== undefined && <span className="text-[10px] tabular-nums text-panvas-text-tertiary">{badge}</span>}
       {trailing}
       <button
         type="button"
+        tabIndex={-1}
         onClick={event => { event.stopPropagation(); onContextMenu?.(event); }}
-        className="btn-icon hidden p-1 group-hover:flex"
-        aria-label={`More actions for ${label}`}
-        title={`More actions for ${label}`}
+        className="panvas-tree-actions flex h-5 w-5 shrink-0 items-center justify-center text-panvas-text-tertiary hover:bg-panvas-bg-active focus-ring"
+        aria-label={`More actions for ${name}`}
+        title={`More actions for ${name}`}
       >
         <MoreHorizontal size={13} />
       </button>
@@ -496,10 +522,10 @@ function TreeRow({ itemId, depth, label, icon, expanded, active = false, onClick
   );
 }
 
-function Collapsible({ open, children }: { open: boolean; children: React.ReactNode }) {
-  return <AnimatePresence>{open && <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.18, ease: 'easeInOut' }} className="overflow-hidden">{children}</motion.div>}</AnimatePresence>;
+function Collapsible({ id, open, depth, children }: { id: string; open: boolean; depth: number; children: React.ReactNode }) {
+  return open ? <div id={id} role="group" className="panvas-tree-branch" style={{ '--tree-guide-left': `${(depth + 1) * 16 + 14}px` } as React.CSSProperties}>{children}</div> : null;
 }
 
 function TreeEmptyState({ depth, label }: { depth: number; label: string }) {
-  return <div className="h-7 px-2 text-xs italic leading-7 text-panvas-text-tertiary" style={{ paddingLeft: `${depth * 16 + 30}px` }}>{label}</div>;
+  return <div className="h-7 pr-2 text-[11px] leading-7 text-panvas-text-tertiary" style={{ paddingLeft: `${(depth + 1) * 16 + 28}px` }}>{label}</div>;
 }
