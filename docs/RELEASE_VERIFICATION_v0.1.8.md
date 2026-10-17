@@ -38,4 +38,9 @@ The code-control test now closes the responsive Page Properties sheet through it
 - Complex PDF fixtures can report fidelity warnings; export tests do not imply perfect fidelity for every CSS/font construct. Physical stylus, hours-long use, live authorized Drive/Supabase accounts and other OS/browser targets remain separate acceptance scopes.
 - The normal profile, notebooks, workspace roots, IndexedDB and remote account data were not cleared or migrated. No dependency version was changed for this release finalization.
 
-Public download and deployment verification is recorded separately after the upload; local passes alone are not proof that public assets exist.
+## Published release
+
+- Annotated tag `v0.1.8` points to `b8dcf710b3326e008dd7f8ee7557c179567f43e4`. All three [GitHub CI jobs](https://github.com/sumitahmed/Panvas/actions/runs/39015815863) passed: source/browser, Windows packaging/UI and Docker.
+- The stable [GitHub release](https://github.com/sumitahmed/Panvas/releases/tag/v0.1.8) is public. Anonymous full downloads match the tested installer (284,097,159 bytes, `d424c81ccb1f7f2bac2dfe8807f8fd3fba7268f98f970d0c77689d00c3e49b8c`) and portable EXE (283,781,671 bytes, `a7c466fd67ca1cb0a839bd6b6af6e24329ecc94d0f1c4f492b766b25e21ffde5`), including the published checksum manifest.
+- All eight previous releases retain their existing asset IDs, names, sizes and digests.
+- The first production deployment of 0.1.8 retained every identified pre-deployment browser record and visibly reopened the legacy rich-text note in the same origin/profile. Website download metadata is updated only after the public native downloads pass verification. The release tag and native binaries remain unchanged during this website update.

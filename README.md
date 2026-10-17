@@ -7,7 +7,7 @@
 > **Local-first visual workspace for notes, handwriting, PDFs, and spatial thinking.**
 
 <p align="center">
-  <a href="https://github.com/sumitahmed/Panvas/releases/download/v0.1.7/Panvas-0.1.7-Setup.exe">
+  <a href="https://github.com/sumitahmed/Panvas/releases/download/v0.1.8/Panvas-0.1.8-Setup.exe">
     <img src="https://img.shields.io/badge/Download-Windows_x64-243c4a?style=flat&logo=windows" alt="Download for Windows" />
   </a>
   <a href="https://panvas.vercel.app/app">
@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v0.1.7-blue.svg" alt="Version 0.1.7" />
+  <img src="https://img.shields.io/badge/version-v0.1.8-blue.svg" alt="Version 0.1.8" />
   <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" />
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Web-lightgrey.svg" alt="Platforms" />
   <img src="https://img.shields.io/badge/storage-Local--First-orange.svg" alt="Local First" />
@@ -66,13 +66,13 @@ Panvas bridges structured notebooks and infinite canvases into a single, distrac
 ## Download
 
 ### Windows (Desktop)
-- **Panvas v0.1.7 (64-bit)**: Download [`Panvas-0.1.7-Setup.exe`](https://github.com/sumitahmed/Panvas/releases/download/v0.1.7/Panvas-0.1.7-Setup.exe) from the [GitHub Releases](https://github.com/sumitahmed/Panvas/releases) portal.
+- **Panvas v0.1.8 (64-bit)**: Download the [Windows installer](https://github.com/sumitahmed/Panvas/releases/download/v0.1.8/Panvas-0.1.8-Setup.exe) or [portable EXE](https://github.com/sumitahmed/Panvas/releases/download/v0.1.8/Panvas-0.1.8-Portable.exe) from the [v0.1.8 release](https://github.com/sumitahmed/Panvas/releases/tag/v0.1.8).
 - **SHA-256 Checksum Verification**: Verify the downloaded installer against the official checksum published in `SHA256SUMS.txt`:
   ```powershell
-  Get-FileHash Panvas-0.1.7-Setup.exe -Algorithm SHA256
-  # SHA-256: d19a337ebef494f2e6415801f9bed2cd7f4839f9acd7d067f2739ea51472862e
+  Get-FileHash Panvas-0.1.8-Setup.exe -Algorithm SHA256
+  # SHA-256: d424c81ccb1f7f2bac2dfe8807f8fd3fba7268f98f970d0c77689d00c3e49b8c
   ```
-  *Note: The v0.1.7 installer is unsigned while the code signing pipeline is established. If Windows SmartScreen prompts on launch, click "More info" → "Run anyway".*
+  *The v0.1.8 installer and portable EXE are unsigned and may trigger SmartScreen. Check the [published SHA-256 manifest](https://github.com/sumitahmed/Panvas/releases/download/v0.1.8/SHA256SUMS.txt) before running either file.*
 
 ### Web
 - **Browser App**: Launch [panvas.vercel.app/app](https://panvas.vercel.app/app) to use Panvas directly in Chromium, Firefox, or Safari (stored in origin-scoped IndexedDB).
@@ -139,11 +139,11 @@ docker compose --env-file .env.example -f compose.dev.yaml up --build
 
 Workspace data is stored in **your browser**, scoped to the origin, and survives container restarts. Changing hostname/port creates another browser storage origin. Back up before changing origins or clearing site data. Remote access needs HTTPS for clipboard, recording, OAuth and offline-shell APIs. See [Docker operations](docs/DOCKER.md) for configuration, health checks, updates and development tests.
 
-## Local release candidate
+## Release verification
 
-The working tree is preparing **0.1.8-rc.1**, an unpublished manual-review candidate. Public download buttons above still identify the published **0.1.7** installer and its checksum. No RC download URL is advertised.
+**v0.1.8** is the stable release. Its installer and portable EXE were downloaded anonymously after publication and their SHA-256 hashes matched the tested local artifacts. The previous releases remain available.
 
-Build/review instructions: [release readiness](docs/RELEASE_READINESS.md), [candidate notes](docs/RELEASE_NOTES_CANDIDATE.md), [troubleshooting](docs/TROUBLESHOOTING.md). Commits, tags, uploads, hosting changes and public release require the owner's explicit approval after manual testing.
+See the [release notes](docs/RELEASE_NOTES_v0.1.8.md), [verification scope and limitations](docs/RELEASE_VERIFICATION_v0.1.8.md), [release workflow](docs/RELEASE_READINESS.md), and [troubleshooting](docs/TROUBLESHOOTING.md).
 
 ---
 
