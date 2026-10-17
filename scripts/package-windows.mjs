@@ -11,7 +11,9 @@ const portable = process.argv.includes('--portable');
 
 try {
   const cli = path.join(root, 'node_modules', 'electron-builder', 'out', 'cli', 'cli.js');
-  const args = [cli, '--win', ...(portable && !directoryOnly ? ['nsis', 'portable'] : []), '--x64', `--config.directories.output=${stage}`];
+  // Publishing is an explicit, separate release step. electron-builder otherwise
+  // infers a publisher in CI and can request credentials or upload on its own.
+  const args = [cli, '--publish', 'never', '--win', ...(portable && !directoryOnly ? ['nsis', 'portable'] : []), '--x64', `--config.directories.output=${stage}`];
   if (portable) args.push('--config.portable.artifactName=${productName}-${version}-Portable.${ext}');
   if (directoryOnly) args.push('--dir');
   const result = spawnSync(process.execPath, args, { cwd: root, stdio: 'inherit' });

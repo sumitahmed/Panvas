@@ -142,6 +142,7 @@ test('disposable two-instance runtime verification: instance B quits when instan
     ...process.env,
     PANVAS_GATE0_PROFILE: '1',
     PANVAS_GATE0_USER_DATA: disposableTemp,
+    PANVAS_GATE0_WORKSPACE_ROOT: path.join(disposableTemp, 'workspaces'),
     PANVAS_GATE0_DEBUG_PORT: '9876',
   };
   delete baseEnv.ELECTRON_RUN_AS_NODE;
@@ -156,6 +157,15 @@ test('disposable two-instance runtime verification: instance B quits when instan
     stdio: 'ignore',
   });
 
+  let procB: ReturnType<typeof spawn> | undefined;
+  const stop = async (child: ReturnType<typeof spawn> | undefined) => {
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Owned Electron process did not exit.')), 15000);
+      child.once('exit', () => { clearTimeout(timeout); resolve(); });
+      child.kill();
+    });
+  };
   try {
     // Wait for instance A to initialize and acquire single instance lock
     await new Promise((resolve) => setTimeout(resolve, 2500));
@@ -167,7 +177,7 @@ test('disposable two-instance runtime verification: instance B quits when instan
       PANVAS_GATE0_DEBUG_PORT: '9877',
     };
 
-    const procB = spawn(electronExe, instanceAArgs, {
+    procB = spawn(electronExe, instanceAArgs, {
       cwd: process.cwd(),
       env: envB,
       stdio: 'ignore',
@@ -178,8 +188,10 @@ test('disposable two-instance runtime verification: instance B quits when instan
       procB.on('exit', (code, signal) => resolve({ code, signal }));
     });
 
-    const bTimeout = new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 10000));
+    let exitTimeout: ReturnType<typeof setTimeout>;
+    const bTimeout = new Promise<'timeout'>((resolve) => { exitTimeout = setTimeout(() => resolve('timeout'), 10000); });
     const result = await Promise.race([bExitPromise, bTimeout]);
+    clearTimeout(exitTimeout!);
 
     assert.notEqual(result, 'timeout', 'Instance B should have exited cleanly within timeout');
     if (result !== 'timeout') {
@@ -189,7 +201,8 @@ test('disposable two-instance runtime verification: instance B quits when instan
     // Instance A must still be running and uncompromised
     assert.equal(procA.exitCode, null, 'Instance A must remain alive after Instance B exit');
   } finally {
-    procA.kill();
+    await stop(procB);
+    await stop(procA);
     try {
       await rm(disposableTemp, { recursive: true, force: true });
     } catch {

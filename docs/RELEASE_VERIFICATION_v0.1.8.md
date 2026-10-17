@@ -22,6 +22,8 @@ The owner accepted 0.1.8-rc.1 and authorized the stable release. The implementat
 
 One full backup harness attempt timed out waiting for native fixture startup while other builds were running. A subsequent full matrix passed without a product change or weaker data assertions. Pre-deployment browser data is a synthetic legacy IndexedDB fixture rendered by the existing production application in a disposable profile; it is retained for the post-deployment check.
 
+The first hosted CI run exposed electron-builder's inferred CI publisher and a Windows Node test-process assertion in the single-instance harness. Packaging now explicitly uses `--publish never`; the dedicated release step owns uploads. The test now isolates its workspace as well as its profile, clears its losing timeout and waits for owned processes to exit before cleanup. Its seven assertions pass under the exact checksum-verified Node 24.21.0 Windows runtime used by CI. The application implementation and data formats were unchanged by these CI corrections.
+
 ## Security and practical limits
 
 - Fresh production npm audit: zero findings. Full audit: 16 development-tooling findings (5 high, 11 moderate), rooted in `braces`, `postcss-selector-parser` and `sprintf-js`. They affect build/development input processing; no forced major-version migration or audit suppression was applied. See the [advisory review](research/production-readiness-security-2026-10-17.md).
