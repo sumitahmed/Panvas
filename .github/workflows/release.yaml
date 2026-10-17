@@ -44,6 +44,8 @@ jobs:
           git describe --tags --exact-match
           if ($LASTEXITCODE) { throw 'Source must be tagged.' }
       - run: npm ci
+      - name: Install the locked Electron runtime before native tests
+        run: npx install-electron --no
       - name: Require configured desktop OAuth before publishing a sync-enabled build
         if: inputs.publish
         shell: pwsh

@@ -20,6 +20,8 @@ jobs:
           node-version: 24.21.0
           cache: npm
       - run: npm ci
+      - name: Install the locked Electron runtime before native tests
+        run: npx install-electron --no
       - run: git diff --check
       - run: npm run build
       - run: npm test

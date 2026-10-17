@@ -3,12 +3,13 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 
 // Actual native two-instance lifecycle, outside node:test's async context.
 const disposableTemp = await mkdtemp(path.join(os.tmpdir(), 'panvas-single-instance-test-'));
-const electronExe = process.platform === 'win32'
-  ? path.join(process.cwd(), 'node_modules', 'electron', 'dist', 'electron.exe')
-  : 'npx';
+// Electron downloads its runtime lazily. Resolve through its public module
+// instead of assuming npm ci already created dist/electron.exe.
+const electronExe = createRequire(import.meta.url)('electron');
 
 const baseEnv = {
   ...process.env,
@@ -21,13 +22,15 @@ delete baseEnv.ELECTRON_RUN_AS_NODE;
 delete baseEnv.NODE_TEST_CONTEXT;
 delete baseEnv.NODE_TEST_WORKER_ID;
 
-const instanceAArgs = process.platform === 'win32' ? ['.'] : ['electron', '.'];
+const instanceAArgs = ['.'];
 
 const procA = spawn(electronExe, instanceAArgs, {
   cwd: process.cwd(),
   env: baseEnv,
   stdio: 'ignore',
 });
+let spawnError;
+procA.on('error', error => { spawnError = error; });
 
 let procB;
 const stop = async child => {
@@ -41,6 +44,7 @@ const stop = async child => {
 try {
   // Wait for instance A to initialize and acquire single instance lock
   await new Promise((resolve) => setTimeout(resolve, 2500));
+  assert.ifError(spawnError);
   assert.equal(procA.exitCode, null, 'Instance A should still be running');
 
   // Launch instance B pointing to the exact same disposable user data directory

@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { chromium } from 'playwright';
+import { createRequire } from 'node:module';
 
 const disposableRoot = fs.mkdtempSync(path.join(tmpdir(), 'panvas-native-regression-'));
 const ownedProcesses = new Set<ChildProcess>();
@@ -42,12 +43,8 @@ export function launchElectron(port: number, windowSize?: string): ChildProcess 
   env.PANVAS_GATE0_USER_DATA = path.join(disposableRoot, 'profile');
   env.PANVAS_GATE0_WORKSPACE_ROOT = PANVAS_BASE;
   if (windowSize) env.PANVAS_TEST_WINDOW = windowSize;
-  const command = process.platform === 'win32'
-    ? path.join(process.cwd(), 'node_modules', 'electron', 'dist', 'electron.exe')
-    : 'npx';
-  const args = process.platform === 'win32'
-    ? ['.', `--remote-debugging-port=${port}`]
-    : ['electron', '.', `--remote-debugging-port=${port}`];
+  const command = createRequire(import.meta.url)('electron') as string;
+  const args = ['.', `--remote-debugging-port=${port}`];
   const child = spawn(command, args, {
     cwd: process.cwd(),
     shell: false,
