@@ -26,6 +26,10 @@ export class ShapeManager {
     return this.shapes;
   }
 
+  getShape(id: string): Shape | undefined {
+    return this.shapes.find(shape => shape.id === id);
+  }
+
   setShapes(shapes: Shape[]): void {
     this.shapes = shapes;
   }
@@ -61,8 +65,9 @@ export class ShapeManager {
   }
 
   /** Render all shapes onto the given context. */
-  renderShapes(ctx: CanvasRenderingContext2D, layerId?: string): void {
+  renderShapes(ctx: CanvasRenderingContext2D, layerId?: string, excludeIds?: Set<string>): void {
     for (const shape of this.shapes) {
+      if (excludeIds && excludeIds.has(shape.id)) continue;
       if (!this.viewport.intersectsRenderWindow(shape)) continue;
       const shapeLayerId = shape.layerId ?? DEFAULT_PAGE_LAYER_ID;
       if (layerId && shapeLayerId !== layerId) continue;

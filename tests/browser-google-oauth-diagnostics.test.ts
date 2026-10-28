@@ -119,3 +119,4 @@ test('sanitizeCloudDiagnostic redacts OAuth secrets while keeping diagnostics sa
   assert.doesNotMatch(diagWithSecret.errorMessage || '', /ya29\./);
   assert.doesNotMatch(diagWithSecret.errorMessage || '', /GOCSPX-/);
 });
+

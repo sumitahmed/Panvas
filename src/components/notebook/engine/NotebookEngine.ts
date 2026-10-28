@@ -295,13 +295,13 @@ export class NotebookEngine {
         layerId: object.layerId && validLayerIds.has(object.layerId) ? object.layerId : fallbackLayerId,
       });
       if (ownedData.version === 1) {
-        this.drawing.setStrokes((ownedData.strokes || []).map(normalizeLayer), pathSource);
+        this.drawing.setStrokes((ownedData.strokes || []).map(normalizeLayer), pathSource, false);
         this.shapes.setShapes((ownedData.shapes || []).map(normalizeLayer));
         this.texts.setTexts([]);
         this.images.clearImages();
       } else {
         const objects = (ownedData.objects || []).map(normalizeLayer);
-        this.drawing.setStrokes(objects.filter(o => o.type === 'stroke') as Stroke[], pathSource);
+        this.drawing.setStrokes(objects.filter(o => o.type === 'stroke') as Stroke[], pathSource, false);
         this.shapes.setShapes(objects.filter(o => o.type === 'shape') as Shape[]);
         this.texts.setTexts(objects.filter(o => o.type === 'text') as any[]);
         this.images.setImages(objects.filter(o => o.type === 'image') as any[]);

@@ -48,6 +48,10 @@ export class ImageManager {
     return this.images;
   }
 
+  getImage(id: string): ImageObject | undefined {
+    return this.images.find(image => image.id === id);
+  }
+
   setImages(images: ImageObject[]): void {
     this.images = images;
     const retained = new Set(images.map(image => image.fileId));
@@ -162,39 +166,44 @@ export class ImageManager {
     }
   }
 
-  renderImages(ctx: CanvasRenderingContext2D, layerId?: string): void {
+  renderImages(ctx: CanvasRenderingContext2D, layerId?: string, excludeIds?: Set<string>): void {
     for (const imgObj of this.images) {
+      if (excludeIds && excludeIds.has(imgObj.id)) continue;
       if (!this.viewport.intersectsRenderWindow(imgObj)) continue;
       if (layerId && imgObj.layerId !== layerId) continue;
       const imgLayerId = imgObj.layerId ?? DEFAULT_PAGE_LAYER_ID;
       if (layerId && imgLayerId !== layerId) continue;
-      const imgElem = this.imageCache.get(imgObj.fileId);
-      if (!imgElem) continue;
-
-      ctx.save();
-      // Ensure high quality bicubic/lanczos filtering across any zoom and display dimensions
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
-      const appearance = getImageRenderAppearance(imgObj);
-      ctx.globalAlpha *= appearance.opacity;
-
-      // Move to center of image to apply rotation
-      ctx.translate(imgObj.x + imgObj.width / 2, imgObj.y + imgObj.height / 2);
-      ctx.rotate(appearance.rotationRadians);
-      
-      // Draw image centered at the translated coordinate using original full-resolution source
-      const crop = getImageCrop(imgObj);
-      ctx.drawImage(
-        imgElem,
-        crop.x * imgElem.naturalWidth, crop.y * imgElem.naturalHeight, crop.width * imgElem.naturalWidth, crop.height * imgElem.naturalHeight,
-        -imgObj.width / 2,
-        -imgObj.height / 2,
-        imgObj.width,
-        imgObj.height
-      );
-      
-      ctx.restore();
+      this.renderImage(ctx, imgObj);
     }
+  }
+
+  renderImage(ctx: CanvasRenderingContext2D, imgObj: ImageObject): void {
+    const imgElem = this.imageCache.get(imgObj.fileId);
+    if (!imgElem) return;
+
+    ctx.save();
+    // Ensure high quality bicubic/lanczos filtering across any zoom and display dimensions
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    const appearance = getImageRenderAppearance(imgObj);
+    ctx.globalAlpha *= appearance.opacity;
+
+    // Move to center of image to apply rotation
+    ctx.translate(imgObj.x + imgObj.width / 2, imgObj.y + imgObj.height / 2);
+    ctx.rotate(appearance.rotationRadians);
+    
+    // Draw image centered at the translated coordinate using original full-resolution source
+    const crop = getImageCrop(imgObj);
+    ctx.drawImage(
+      imgElem,
+      crop.x * imgElem.naturalWidth, crop.y * imgElem.naturalHeight, crop.width * imgElem.naturalWidth, crop.height * imgElem.naturalHeight,
+      -imgObj.width / 2,
+      -imgObj.height / 2,
+      imgObj.width,
+      imgObj.height
+    );
+    
+    ctx.restore();
   }
 
   isEditable(image: ImageObject): boolean {

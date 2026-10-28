@@ -27,6 +27,7 @@ import { fullDarkInkColor } from '../../../lib/fullDarkView.ts';
 
 export class DrawingEngine {
   private strokes: Stroke[] = [];
+  private strokeMap = new Map<string, Stroke>();
   private ctx: CanvasRenderingContext2D | null = null;
   private viewport: ViewportManager;
   private shapeManager: ShapeManager;
@@ -54,6 +55,151 @@ export class DrawingEngine {
   private frameQueuedAt = 0;
   private lastFrameAt = 0;
   private fullDarkView = false;
+  private selectionBackingCanvas: HTMLCanvasElement | null = null;
+  private isSelectionDragging = false;
+  private selectionExcludeIds = new Set<string>();
+
+  beginSelectionDrag(selectedElements: { id: string; type: string }[]): void {
+    if (!this.canvas || !this.ctx || typeof document === 'undefined') return;
+    this.isSelectionDragging = true;
+    this.selectionExcludeIds = new Set(selectedElements.map(e => e.id));
+    for (const el of selectedElements) {
+      if (el.type === 'stroke') {
+        const stroke = this.getStrokeById(el.id);
+        if (stroke) {
+          const path = this.inkPaths.get(stroke) ?? this.retainedInkPaths.get(stroke.id);
+          if (path) this.retainedInkPaths.set(stroke.id, path);
+        }
+      }
+    }
+    if (!this.selectionBackingCanvas) {
+      this.selectionBackingCanvas = document.createElement('canvas');
+    }
+    if (this.selectionBackingCanvas.width !== this.canvas.width || this.selectionBackingCanvas.height !== this.canvas.height) {
+      this.selectionBackingCanvas.width = this.canvas.width;
+      this.selectionBackingCanvas.height = this.canvas.height;
+    }
+    const snapCtx = this.selectionBackingCanvas.getContext('2d');
+    if (snapCtx) {
+      snapCtx.resetTransform();
+      snapCtx.clearRect(0, 0, this.selectionBackingCanvas.width, this.selectionBackingCanvas.height);
+
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const el of selectedElements) {
+        if (el.type === 'stroke') {
+          const s = this.getStrokeById(el.id);
+          if (s) {
+            const b = this.getCachedEraseBounds(s);
+            if (b.left < minX) minX = b.left;
+            if (b.right > maxX) maxX = b.right;
+            if (b.top < minY) minY = b.top;
+            if (b.bottom > maxY) maxY = b.bottom;
+          }
+        } else if (el.type === 'shape') {
+          const s = this.shapeManager.getShapes().find(shp => shp.id === el.id);
+          if (s) {
+            if (s.x < minX) minX = s.x;
+            if (s.x + s.width > maxX) maxX = s.x + s.width;
+            if (s.y < minY) minY = s.y;
+            if (s.y + s.height > maxY) maxY = s.y + s.height;
+          }
+        } else if (el.type === 'image') {
+          const img = this.imageManager.getImage(el.id);
+          if (img) {
+            if (img.x < minX) minX = img.x;
+            if (img.x + img.width > maxX) maxX = img.x + img.width;
+            if (img.y < minY) minY = img.y;
+            if (img.y + img.height > maxY) maxY = img.y + img.height;
+          }
+        }
+      }
+
+      if (!Number.isFinite(minX) || !Number.isFinite(minY)) {
+        this.renderSceneToContext(snapCtx, this.selectionExcludeIds);
+        return;
+      }
+
+      const padding = 24;
+      const damage: EraseBounds = {
+        left: minX - padding,
+        top: minY - padding,
+        right: maxX + padding,
+        bottom: maxY + padding,
+      };
+
+      // Blit entire committed canvas in a single GPU operation (~0.2ms)
+      snapCtx.drawImage(this.canvas, 0, 0);
+
+      // Clear only the damage rectangle containing the selected elements
+      snapCtx.save();
+      this.viewport.applyTransform(snapCtx);
+      const transform = snapCtx.getTransform();
+      const corners = [
+        [damage.left, damage.top],
+        [damage.right, damage.top],
+        [damage.right, damage.bottom],
+        [damage.left, damage.bottom],
+      ].map(([x, y]) => ({
+        x: transform.a * x + transform.c * y + transform.e,
+        y: transform.b * x + transform.d * y + transform.f,
+      }));
+      const left = Math.floor(Math.min(...corners.map(p => p.x)));
+      const top = Math.floor(Math.min(...corners.map(p => p.y)));
+      const right = Math.ceil(Math.max(...corners.map(p => p.x)));
+      const bottom = Math.ceil(Math.max(...corners.map(p => p.y)));
+
+      snapCtx.resetTransform();
+      snapCtx.beginPath();
+      snapCtx.rect(left, top, right - left, bottom - top);
+      snapCtx.clip();
+      snapCtx.clearRect(left, top, right - left, bottom - top);
+      snapCtx.setTransform(transform);
+
+      // Re-render ONLY unselected elements that intersect the damaged area
+      for (const layer of this.layerManager.getLayers()) {
+        if (!layer.visible) continue;
+        this.imageManager.renderImages(snapCtx, layer.id, this.selectionExcludeIds);
+        for (const stroke of this.strokes) {
+          const strokeLayerId = stroke.layerId ?? DEFAULT_PAGE_LAYER_ID;
+          if (strokeLayerId !== layer.id) continue;
+          if (this.selectionExcludeIds.has(stroke.id)) continue;
+          if (!boundsOverlap(damage, this.getCachedEraseBounds(stroke))) continue;
+          this.renderStroke(snapCtx, stroke);
+        }
+        this.shapeManager.renderShapes(snapCtx, layer.id, this.selectionExcludeIds);
+      }
+      snapCtx.restore();
+    }
+  }
+
+  isSelectionDragActive(): boolean {
+    return this.isSelectionDragging;
+  }
+
+  endSelectionDrag(): void {
+    this.isSelectionDragging = false;
+    this.selectionExcludeIds.clear();
+  }
+
+  private renderSceneToContext(targetCtx: CanvasRenderingContext2D, excludeIds?: Set<string>): void {
+    targetCtx.save();
+    this.viewport.applyTransform(targetCtx);
+    targetCtx.imageSmoothingEnabled = true;
+    targetCtx.imageSmoothingQuality = 'high';
+    const windowBounds = this.viewport.getRenderWindowBounds();
+    for (const layer of this.layerManager.getLayers()) {
+      if (!layer.visible) continue;
+      this.imageManager.renderImages(targetCtx, layer.id, excludeIds);
+      for (const stroke of this.strokes) {
+        if (excludeIds && excludeIds.has(stroke.id)) continue;
+        if (windowBounds && !boundsOverlap(windowBounds, this.getCachedEraseBounds(stroke))) continue;
+        const strokeLayerId = stroke.layerId ?? DEFAULT_PAGE_LAYER_ID;
+        if (strokeLayerId === layer.id) this.renderStroke(targetCtx, stroke);
+      }
+      this.shapeManager.renderShapes(targetCtx, layer.id, excludeIds);
+    }
+    targetCtx.restore();
+  }
 
   setFullDarkView(enabled: boolean): void {
     if (enabled === this.fullDarkView) return;
@@ -164,6 +310,14 @@ export class DrawingEngine {
     return this.strokes;
   }
 
+  getStrokeById(id: string): Stroke | undefined {
+    return this.strokeMap.get(id);
+  }
+
+  getStrokeBounds(stroke: Stroke): EraseBounds {
+    return this.getCachedEraseBounds(stroke);
+  }
+
   /** Set strokes (from deserialization). Redraws. */
   setStrokes(strokes: Stroke[], pathSource?: DrawingEngine, repaint = true): void {
     // Snapshot cloning deliberately detaches mutable scene data. Retain only
@@ -173,6 +327,8 @@ export class DrawingEngine {
     const ids = new Set(strokes.map(stroke => stroke.id));
     for (const id of this.retainedInkPaths.keys()) if (!ids.has(id)) this.retainedInkPaths.delete(id);
     this.strokes = strokes;
+    this.strokeMap.clear();
+    for (const stroke of strokes) this.strokeMap.set(stroke.id, stroke);
     if (repaint) this.redraw();
   }
 
@@ -190,6 +346,7 @@ export class DrawingEngine {
     const startedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
     stroke.layerId ??= this.layerManager.getActiveLayerId();
     this.strokes.push(stroke);
+    this.strokeMap.set(stroke.id, stroke);
     if (startedAt) gate0Profiler.event('add-stroke', performance.now() - startedAt, { points: stroke.points.length });
   }
 
@@ -212,6 +369,7 @@ export class DrawingEngine {
     const index = this.strokes.findIndex(s => s.id === id);
     if (index === -1) return undefined;
     const [removed] = this.strokes.splice(index, 1);
+    this.strokeMap.delete(id);
     this.retainedInkPaths.delete(id);
     return removed;
   }
@@ -221,6 +379,7 @@ export class DrawingEngine {
     const removed: Stroke[] = [];
     this.strokes = this.strokes.filter(s => {
       if (ids.has(s.id)) {
+        this.strokeMap.delete(s.id);
         this.retainedInkPaths.delete(s.id);
         removed.push(s);
         return false;
@@ -234,6 +393,7 @@ export class DrawingEngine {
   clearStrokes(): Stroke[] {
     const removed = this.strokes;
     this.strokes = [];
+    this.strokeMap.clear();
     this.retainedInkPaths.clear();
     return removed;
   }
@@ -253,8 +413,40 @@ export class DrawingEngine {
   }
 
   /** Full redraw of all strokes. */
-  redraw(dirty?: EraseBounds, boundsForStroke?: (stroke: Stroke) => EraseBounds): void {
+  redraw(dirty?: EraseBounds, boundsForStroke?: (stroke: Stroke) => EraseBounds, excludeIds?: Set<string>): void {
     if (!this.ctx || !this.canvas) return;
+
+    if (this.isSelectionDragging && this.selectionBackingCanvas && !dirty) {
+      this.ctx.clearRect(0, 0, this.canvasCssWidth, this.canvasCssHeight);
+      this.ctx.drawImage(this.selectionBackingCanvas, 0, 0);
+      this.ctx.save();
+      this.viewport.applyTransform(this.ctx);
+      const t = this.selectionEngine?.getCurrentDragTransform();
+      for (const id of this.selectionExcludeIds) {
+        const stroke = this.getStrokeById(id);
+        if (stroke) {
+          this.renderTransformingStroke(this.ctx, stroke, t);
+          continue;
+        }
+        const shape = this.shapeManager.getShape(id);
+        if (shape) {
+          this.shapeManager.renderShape(this.ctx, shape);
+          continue;
+        }
+        const image = this.imageManager.getImage(id);
+        if (image) {
+          this.imageManager.renderImage(this.ctx, image);
+          continue;
+        }
+      }
+      this.ctx.restore();
+      if (this.selectionEngine) {
+        this.selectionEngine.renderSelection(this.ctx);
+      }
+      this.renderTransientOverlays();
+      return;
+    }
+
     const profileStartedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
     const historicalPoints = profileStartedAt
       ? this.strokes.reduce((sum, stroke) => sum + stroke.points.length, 0)
@@ -295,6 +487,9 @@ export class DrawingEngine {
     this.ctx.imageSmoothingEnabled = true;
     this.ctx.imageSmoothingQuality = 'high';
 
+    const windowBounds = this.viewport.getRenderWindowBounds();
+    const getBounds = boundsForStroke ?? (s => this.getCachedEraseBounds(s));
+
     // INVARIANT: Layer render order determines Z-index. Bottom layer (0) renders first.
     // Within each layer, entities render in deterministic order: Images -> Strokes -> Shapes.
     for (const layer of this.layerManager.getLayers()) {
@@ -303,15 +498,15 @@ export class DrawingEngine {
       if (!layer.visible) continue;
       const ctx = layerCtx ?? this.ctx;
       if (layerCtx) { ctx.save(); this.viewport.applyTransform(ctx); }
-      this.imageManager.renderImages(ctx, layer.id);
+      this.imageManager.renderImages(ctx, layer.id, excludeIds);
       for (const stroke of this.strokes) {
-        const windowBounds = this.viewport.getRenderWindowBounds();
+        if (excludeIds && excludeIds.has(stroke.id)) continue;
         if (windowBounds && !boundsOverlap(windowBounds, this.getCachedEraseBounds(stroke))) continue;
-        if (cullBounds && boundsForStroke && !boundsOverlap(cullBounds, boundsForStroke(stroke))) continue;
+        if (cullBounds && !boundsOverlap(cullBounds, getBounds(stroke))) continue;
         const strokeLayerId = stroke.layerId ?? DEFAULT_PAGE_LAYER_ID;
         if (strokeLayerId === layer.id) this.renderStroke(ctx, stroke);
       }
-      this.shapeManager.renderShapes(ctx, layer.id);
+      this.shapeManager.renderShapes(ctx, layer.id, excludeIds);
       if (layerCtx) ctx.restore();
     }
 
@@ -472,6 +667,36 @@ export class DrawingEngine {
       ctx.setTransform(transform);
     }
     ctx.fill(path.path);
+  }
+
+  private renderTransformingStroke(ctx: CanvasRenderingContext2D, stroke: Stroke, t?: any): void {
+    const cached = this.retainedInkPaths.get(stroke.id) ?? this.inkPaths.get(stroke);
+    const color = this.fullDarkView ? fullDarkInkColor(stroke.color) : stroke.color;
+    if (!cached) {
+      this.renderStroke(ctx, stroke);
+      return;
+    }
+    ctx.save();
+    traceInkClip(ctx, stroke);
+    ctx.globalAlpha = stroke.opacity;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = color;
+    if (t) {
+      if (t.mode === 'move') {
+        ctx.translate(t.dx, t.dy);
+      } else if (t.mode === 'rotate' && t.center && t.cos !== undefined && t.sin !== undefined) {
+        const deltaRad = Math.atan2(t.sin, t.cos);
+        ctx.translate(t.center.x, t.center.y);
+        ctx.rotate(deltaRad);
+        ctx.translate(-t.center.x, -t.center.y);
+      } else if (t.mode === 'scale' && t.scaleX !== undefined && t.scaleY !== undefined && t.transX !== undefined && t.transY !== undefined) {
+        ctx.translate(t.transX, t.transY);
+        ctx.scale(t.scaleX, t.scaleY);
+        ctx.translate(-t.transX, -t.transY);
+      }
+    }
+    this.fillInkPath(ctx, cached);
+    ctx.restore();
   }
   private renderDot(
     ctx: CanvasRenderingContext2D,
@@ -1078,8 +1303,18 @@ export class DrawingEngine {
     for (const stroke of this.strokes) {
       gate0Profiler.increment(active, 'strokesScanned');
       if (!this.layerManager.isEditable(stroke.layerId)) continue;
-      if (stroke.inkClip && !regionIntersects(strokeRegion(stroke), eraserCapsule({ x, y }, { x, y }, Math.max(radius, 0.01)))) continue;
       const effectiveRadius = radius + getStrokeRenderHalfWidth(stroke);
+      // Fast AABB rejection using cached stroke bounds
+      const bounds = this.getCachedEraseBounds(stroke);
+      if (
+        x + effectiveRadius < bounds.left ||
+        x - effectiveRadius > bounds.right ||
+        y + effectiveRadius < bounds.top ||
+        y - effectiveRadius > bounds.bottom
+      ) {
+        continue;
+      }
+      if (stroke.inkClip && !regionIntersects(strokeRegion(stroke), eraserCapsule({ x, y }, { x, y }, Math.max(radius, 0.01)))) continue;
       const effRadiusSq = effectiveRadius * effectiveRadius;
       const pts = stroke.points;
       gate0Profiler.increment(active, 'strokePointsInspected', pts?.length ?? 0);

@@ -128,6 +128,7 @@ export class SelectionEngine {
   }
 
   clearSelection(): void {
+    this.drawingEngine.endSelectionDrag?.();
     this.selectedIds.clear();
     this.selectedElements = [];
     this.textManager.setActiveTextId?.(undefined);
@@ -582,14 +583,26 @@ export class SelectionEngine {
 
   getHandleAt(x: number, y: number): { id: string, handle: Exclude<ResizeHandle, null> } | null {
     if (this.usesStickyDomControls()) return null;
-    const handleSize = 12 / this.viewport.getState().scale;
+    if (this.selectedElements.length === 0) return null;
+    const scale = this.viewport.getState().scale;
+    const handleSize = 12 / scale;
     const h2 = handleSize / 2;
+    const padding = 36 / scale;
 
     // Check backwards (top-most elements first)
     for (let i = this.selectedElements.length - 1; i >= 0; i--) {
       const el = this.selectedElements[i];
       const box = this.getBoundingBox(el);
       if (!box) continue;
+
+      if (
+        x < box.x - padding ||
+        x > box.x + box.width + padding ||
+        y < box.y - padding ||
+        y > box.y + box.height + padding
+      ) {
+        continue;
+      }
 
       const midX = box.x + box.width / 2;
       const midY = box.y + box.height / 2;
@@ -695,17 +708,46 @@ export class SelectionEngine {
       const localY = cy + dx * Math.sin(angle) + dy * Math.cos(angle);
       return localX >= item.x && localX <= item.x + item.width && localY >= item.y && localY <= item.y + h;
     };
-    for (const layer of [...this.layerManager.getLayers()].reverse()) {
+
+    const layers = this.layerManager.getLayers();
+    for (let l = layers.length - 1; l >= 0; l--) {
+      const layer = layers[l];
       if (!layer.visible || layer.locked) continue;
       const onLayer = (item: { layerId?: string }) => (item.layerId ?? 'layer-default') === layer.id;
-      const text = [...this.textManager.getTexts()].reverse().find(item => item.metadata?.documentRole !== 'body' && onLayer(item) && contains(item));
-      if (text) return { type: 'text', id: text.id };
-      const shape = [...this.shapeManager.getShapes()].reverse().find(item => onLayer(item) && (shapeHits.has(item.id) || (item.shapeType !== 'line' && item.shapeType !== 'arrow' && contains(item))));
-      if (shape) return { type: 'shape', id: shape.id };
-      const stroke = [...this.drawingEngine.getStrokes()].reverse().find(item => onLayer(item) && strokeHits.has(item.id));
-      if (stroke) return { type: 'stroke', id: stroke.id };
-      const image = [...this.imageManager.getImages()].reverse().find(item => onLayer(item) && contains(item));
-      if (image) return { type: 'image', id: image.id };
+
+      const texts = this.textManager.getTexts();
+      for (let i = texts.length - 1; i >= 0; i--) {
+        const item = texts[i];
+        if (item.metadata?.documentRole !== 'body' && onLayer(item) && contains(item)) {
+          return { type: 'text', id: item.id };
+        }
+      }
+
+      const shapes = this.shapeManager.getShapes();
+      for (let i = shapes.length - 1; i >= 0; i--) {
+        const item = shapes[i];
+        if (onLayer(item) && (shapeHits.has(item.id) || (item.shapeType !== 'line' && item.shapeType !== 'arrow' && contains(item)))) {
+          return { type: 'shape', id: item.id };
+        }
+      }
+
+      if (strokeHits.size > 0) {
+        const strokes = this.drawingEngine.getStrokes();
+        for (let i = strokes.length - 1; i >= 0; i--) {
+          const item = strokes[i];
+          if (onLayer(item) && strokeHits.has(item.id)) {
+            return { type: 'stroke', id: item.id };
+          }
+        }
+      }
+
+      const images = this.imageManager.getImages();
+      for (let i = images.length - 1; i >= 0; i--) {
+        const item = images[i];
+        if (onLayer(item) && contains(item)) {
+          return { type: 'image', id: item.id };
+        }
+      }
     }
     return null;
   }
@@ -834,20 +876,43 @@ export class SelectionEngine {
 
   /** Replace the current selection with editable objects whose centers are enclosed. */
   selectWithinLoop(points: StrokePoint[]): number {
+    if (points.length < 3) return 0;
+    let loopMinX = Infinity, loopMaxX = -Infinity, loopMinY = Infinity, loopMaxY = -Infinity;
+    for (const p of points) {
+      if (p.x < loopMinX) loopMinX = p.x;
+      if (p.x > loopMaxX) loopMaxX = p.x;
+      if (p.y < loopMinY) loopMinY = p.y;
+      if (p.y > loopMaxY) loopMaxY = p.y;
+    }
+
     const enclosed: SelectedElement[] = [];
-    const consider = (element: SelectedElement, layerId?: string) => {
+    const consider = (element: SelectedElement, box: BoundingBox | null, layerId?: string) => {
       if (!this.layerManager.isEditable(layerId)) return;
-      const box = this.getBoundingBox(element);
       if (!box) return;
+      if (box.x + box.width < loopMinX || box.x > loopMaxX || box.y + box.height < loopMinY || box.y > loopMaxY) return;
       const centerX = box.x + box.width / 2;
       const centerY = box.y + box.height / 2;
       if (isPointInsideLoop(centerX, centerY, points)) enclosed.push(element);
     };
 
-    this.drawingEngine.getStrokes().forEach(stroke => consider({ type: 'stroke', id: stroke.id }, stroke.layerId));
-    this.shapeManager.getShapes().forEach(shape => consider({ type: 'shape', id: shape.id }, shape.layerId));
-    this.textManager.getTexts().filter(text => text.metadata?.documentRole !== 'body').forEach(text => consider({ type: 'text', id: text.id }, text.layerId));
-    this.imageManager.getImages().forEach(image => consider({ type: 'image', id: image.id }, image.layerId));
+    for (const stroke of this.drawingEngine.getStrokes()) {
+      const b = typeof this.drawingEngine.getStrokeBounds === 'function'
+        ? this.drawingEngine.getStrokeBounds(stroke)
+        : null;
+      const box = b ? { x: b.left, y: b.top, width: b.right - b.left, height: b.bottom - b.top } : this.getBoundingBox({ type: 'stroke', id: stroke.id });
+      consider({ type: 'stroke', id: stroke.id }, box, stroke.layerId);
+    }
+    for (const shape of this.shapeManager.getShapes()) {
+      consider({ type: 'shape', id: shape.id }, { x: shape.x, y: shape.y, width: shape.width, height: shape.height }, shape.layerId);
+    }
+    for (const text of this.textManager.getTexts()) {
+      if (text.metadata?.documentRole !== 'body') {
+        consider({ type: 'text', id: text.id }, { x: text.x, y: text.y, width: text.width, height: text.height || 100 }, text.layerId);
+      }
+    }
+    for (const image of this.imageManager.getImages()) {
+      consider({ type: 'image', id: image.id }, { x: image.x, y: image.y, width: image.width, height: image.height }, image.layerId);
+    }
 
     if (enclosed.length === 0) return 0;
     this.selectedElements = enclosed;
@@ -1034,7 +1099,7 @@ export class SelectionEngine {
           this.originalPositions.set(el.id, { x: img.x, y: img.y, width: img.width, height: img.height, rotation: img.rotation });
         }
       } else {
-        const stroke = this.drawingEngine.getStrokes().find(s => s.id === el.id);
+        const stroke = this.getStroke(el.id);
         if (stroke) {
           // Deep copy points
           this.originalPositions.set(el.id, stroke.points.map(p => ({ ...p })));
@@ -1042,6 +1107,22 @@ export class SelectionEngine {
         }
       }
     }
+    this.drawingEngine.beginSelectionDrag?.(this.selectedElements);
+  }
+
+  getCurrentDragTransform(): {
+    mode: string;
+    dx: number;
+    dy: number;
+    scaleX?: number;
+    scaleY?: number;
+    transX?: number;
+    transY?: number;
+    cos?: number;
+    sin?: number;
+    center?: { x: number; y: number };
+  } | null {
+    return this.currentDragTransform;
   }
 
   dragTo(x: number, y: number): void {
@@ -1079,7 +1160,7 @@ export class SelectionEngine {
           if (!origPos) continue;
 
           if (el.type === 'stroke') {
-            const stroke = this.drawingEngine.getStrokes().find(s => s.id === el.id);
+            const stroke = this.getStroke(el.id);
             if (stroke && Array.isArray(origPos)) {
               for (let i = 0; i < stroke.points.length; i++) {
                 const ox = origPos[i].x - center.x;
@@ -1168,7 +1249,7 @@ export class SelectionEngine {
         if (!origPos) continue;
 
         if (el.type === 'stroke') {
-          const stroke = this.drawingEngine.getStrokes().find(s => s.id === el.id);
+          const stroke = this.getStroke(el.id);
           if (stroke && Array.isArray(origPos)) {
             for (let i = 0; i < stroke.points.length; i++) {
               stroke.points[i].x = transX + (origPos[i].x - transX) * scaleX;
@@ -1203,6 +1284,7 @@ export class SelectionEngine {
     this.isDragging = false;
     this.currentDragTransform = null;
     this.originalElementBoxes.clear();
+    this.drawingEngine.endSelectionDrag?.();
 
     const dx = x - this.dragStartX;
     const dy = y - this.dragStartY;
@@ -1232,7 +1314,7 @@ export class SelectionEngine {
           finalMap.set(el.id, { x: image.x, y: image.y, width: image.width, height: image.height, rotation: image.rotation });
         }
       } else {
-        const stroke = this.drawingEngine.getStrokes().find(s => s.id === el.id);
+        const stroke = this.getStroke(el.id);
         if (stroke) {
           finalMap.set(el.id, stroke.points.map(p => ({ ...p })));
           finalInkClips.set(el.id, stroke.inkClip ? structuredClone(stroke.inkClip) : undefined);
@@ -1274,7 +1356,7 @@ export class SelectionEngine {
               image.rotation = finalState.rotation;
             }
           } else {
-            const stroke = this.drawingEngine.getStrokes().find(s => s.id === el.id);
+            const stroke = this.getStroke(el.id);
             if (stroke) {
               for (let i = 0; i < stroke.points.length; i++) {
                 stroke.points[i].x = finalState[i].x;
@@ -1318,7 +1400,7 @@ export class SelectionEngine {
               image.rotation = orig.rotation;
             }
           } else {
-            const stroke = this.drawingEngine.getStrokes().find(s => s.id === el.id);
+            const stroke = this.getStroke(el.id);
             if (stroke) {
               for (let i = 0; i < stroke.points.length; i++) {
                 stroke.points[i].x = orig[i].x;
@@ -1475,9 +1557,16 @@ export class SelectionEngine {
     ].some(([previous, current]) => previous.some((item, index) => item.id !== current[index]?.id));
   }
 
+  private getStroke(id: string): Stroke | undefined {
+    if (typeof this.drawingEngine.getStrokeById === 'function') {
+      return this.drawingEngine.getStrokeById(id);
+    }
+    return this.drawingEngine.getStrokes?.()?.find(s => s.id === id);
+  }
+
   private getObject(element: SelectedElement): MixedPlacementObject | undefined {
     if (element.type === 'stroke') {
-      return this.drawingEngine.getStrokes().find(item => item.id === element.id);
+      return this.getStroke(element.id);
     }
     if (element.type === 'shape') {
       return this.shapeManager.getShapes().find(item => item.id === element.id);
@@ -1574,7 +1663,7 @@ export class SelectionEngine {
         }
       }
 
-      const stroke = this.drawingEngine.getStrokes().find(s => s.id === el.id);
+      const stroke = this.getStroke(el.id);
       if (!stroke || stroke.points.length === 0) return null;
 
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;

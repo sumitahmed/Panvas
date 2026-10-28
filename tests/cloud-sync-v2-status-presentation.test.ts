@@ -97,3 +97,4 @@ test('Google Drive V2 sync presentation reflects active V2 state when legacy clo
   assert.equal(authExpired.settingsLabel, 'Reconnect');
   assert.equal(authExpired.connectivityLabel, 'Reconnect');
 });
+

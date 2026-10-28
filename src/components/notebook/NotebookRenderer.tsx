@@ -1444,7 +1444,9 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       if (interaction) interaction.style.visibility = 'hidden';
     }
     if (outgoingPageId && notebookEngine.getDrawingOwnership().pageId === outgoingPageId) {
-      sectionDataCacheRef.current[outgoingPageId] = notebookEngine.getDrawingData();
+      if (notebookEngine.getDrawingOwnership().revision !== loadedSceneRevisionRef.current) {
+        sectionDataCacheRef.current[outgoingPageId] = notebookEngine.getDrawingData();
+      }
     }
     if (outgoingPageId) residentDrawingEnginesRef.current.get(outgoingPageId)?.retainStrokePaths(notebookEngine.drawing);
     notebookEngine.unmount();

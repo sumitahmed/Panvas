@@ -35,7 +35,7 @@ const remoteTables = [...supabaseSchema.matchAll(/CREATE TABLE IF NOT EXISTS pub
 
 assert.match(env, /^VITE_ENABLE_CLOUD_SYNC=false$/m, 'cloud sync defaults to disabled');
 assert.match(scheduler, /if \(!CLOUD_SYNC_ENABLED\) return;/, 'scheduler is feature-gated');
-assert.match(app, /if \(!CLOUD_SYNC_ENABLED(?:\s*\|\||\))/, 'application bootstrap is feature-gated');
+assert.match(app, /if \(+!CLOUD_SYNC_ENABLED(?:\s*\|\||\s*&&|\))/, 'application bootstrap is feature-gated');
 assert.ok(missingFamilies.length > 0, 'legacy coverage remains incomplete while feature is disabled');
 assert.match(engine, /LEGACY_SYNC_QUARANTINED = true/, 'legacy engine is explicitly quarantined');
 assert.doesNotMatch(engine, /await db\.(workspaces|folders|canvasFiles)\.delete\(item\.entityId\)/, 'remote authorization errors never purge local entities');

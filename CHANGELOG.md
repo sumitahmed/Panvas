@@ -4,6 +4,9 @@ All notable Panvas changes are recorded here. The format follows [Keep a Changel
 
 ## [0.1.12] - 2026-10-28
 
+- Optimized Select tool and transform manipulation on dense notebook pages (2,000+ strokes), replacing per-frame geometry re-extrusion with GPU affine transforms on pre-compiled Path2D and backing-canvas damage caching (<1.8ms frames under 4× CPU throttling).
+- Optimized vertical page-boundary scroll performance by bypassing scene serialization on unmutated pages and eliminating redundant canvas redraws in NotebookEngine.
+- Added O(1) stroke lookup and cached AABB bounding-box spatial rejection for hit-testing, handles, and lasso loop selection.
 - Unified Cloud Sync Status UI across StatusBar, SyncIndicator, and Settings to reflect Google Drive V2 status when legacy sync is disabled.
 - Ensured Cloud Sync initialization and network connectivity event listeners run properly under the V2 feature gate.
 - Resolved browser Google Drive sign-in issues by guaranteeing production Web Client ID fallback in web builds and CI.

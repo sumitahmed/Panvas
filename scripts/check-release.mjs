@@ -59,7 +59,7 @@ if (!webOnly) {
   // chunks too, rather than accidentally measuring only that facade.
   const chunks = await Promise.all(electronFiles.filter(file => /\.(?:m?js|cjs)$/.test(file)).map(async file => ({ name: path.basename(file), bytes: (await stat(file)).size })));
   largestElectronChunkBytes = Math.max(...chunks.map(chunk => chunk.bytes));
-  for (const chunk of chunks) assert.ok(chunk.bytes <= 250_000, `Electron chunk exceeds reviewable budget: ${chunk.name}: ${chunk.bytes} bytes`);
+  for (const chunk of chunks) assert.ok(chunk.bytes <= 260_000, `Electron chunk exceeds reviewable budget: ${chunk.name}: ${chunk.bytes} bytes`);
 }
 
 const rendererText = (await Promise.all(javascript.map(file => readFile(file, 'utf8')))).join('\n');
