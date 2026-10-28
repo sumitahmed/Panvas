@@ -3,6 +3,7 @@ import { CloudOperationError } from './errors.ts';
 
 const GIS_SRC = 'https://accounts.google.com/gsi/client';
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file email profile openid';
+const DEFAULT_WEB_CLIENT_ID = '486992017517-uog6ucb24pkidgp5tcg1icuif4a3sprc.apps.googleusercontent.com';
 
 interface BrowserToken { accessToken: string; expiresAt: number; connection: ProviderConnectionInfo }
 let current: BrowserToken | null = null;
@@ -19,6 +20,9 @@ function webClientId(): string {
     if (id) return id;
   } catch {
     // Node test environments without import.meta.env
+  }
+  if (typeof window !== 'undefined' && !window.panvas) {
+    return DEFAULT_WEB_CLIENT_ID;
   }
   return '';
 }
@@ -73,14 +77,49 @@ export function requestBrowserGoogleAccessToken(
         client_id: clientId,
         scope: DRIVE_SCOPE,
         callback: (response: any) => {
-          if (response?.access_token) resolve(response);
-          else reject(new CloudOperationError('connection', { stage: 'gis_token', reason: response?.error ? 'token_rejected' : 'token_missing', retryable: true }));
+          if (response?.access_token) {
+            resolve(response);
+          } else {
+            const rawReason = response?.error || 'token_missing';
+            const reason = typeof rawReason === 'string' ? rawReason : 'token_rejected';
+            const errorMessage = typeof response?.error_description === 'string'
+              ? response.error_description
+              : typeof response?.error_subtype === 'string'
+                ? response.error_subtype
+                : undefined;
+            reject(new CloudOperationError('connection', {
+              stage: 'gis_token',
+              reason,
+              errorMessage,
+              retryable: reason !== 'access_denied',
+            }));
+          }
         },
-        error_callback: () => reject(new CloudOperationError('connection', { stage: 'gis_popup', reason: 'popup_failed', retryable: true })),
+        error_callback: (err: any) => {
+          const rawReason = err?.type || err?.error || err?.message || 'popup_failed';
+          const reason = typeof rawReason === 'string' ? rawReason : 'popup_failed';
+          const errorMessage = typeof err?.message === 'string' && err.message !== rawReason
+            ? err.message
+            : undefined;
+          reject(new CloudOperationError('connection', {
+            stage: 'gis_popup',
+            reason,
+            errorMessage,
+            retryable: true,
+          }));
+        },
       });
       tokenClient.requestAccessToken(options?.prompt ? { prompt: options.prompt } : undefined);
-    } catch {
-      reject(new CloudOperationError('connection', { stage: 'gis_token', reason: 'token_request_failed', retryable: true }));
+    } catch (err: any) {
+      const rawReason = err?.message || err?.name || 'token_request_failed';
+      const reason = typeof rawReason === 'string' ? rawReason : 'token_request_failed';
+      const errorClass = typeof err?.name === 'string' ? err.name : undefined;
+      reject(new CloudOperationError('connection', {
+        stage: 'gis_token',
+        reason,
+        errorClass,
+        retryable: true,
+      }));
     }
   });
 }
@@ -90,7 +129,18 @@ export async function connectBrowserGoogle(options?: { prompt?: string }): Promi
   if (!clientId) throw new CloudOperationError('configuration', { stage: 'configuration', reason: 'missing_web_client_id', retryable: false });
   await preloadGis();
   const tokenResponse = await requestBrowserGoogleAccessToken(clientId, undefined, { prompt: options?.prompt ?? 'consent select_account' });
-  const account = await fetchAccount(tokenResponse.access_token);
+  let account;
+  try {
+    account = await fetchAccount(tokenResponse.access_token);
+  } catch (err) {
+    if (err instanceof CloudOperationError) throw err;
+    throw new CloudOperationError('connection', {
+      stage: 'account_identity',
+      reason: 'userinfo_fetch_failed',
+      errorMessage: err instanceof Error ? err.message : undefined,
+      retryable: true,
+    });
+  }
   const previous = getBrowserGoogleConnection();
   const isSame = previous?.accountIdentifier === account.id;
   const connection: ProviderConnectionInfo = {

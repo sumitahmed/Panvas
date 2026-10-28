@@ -6,7 +6,7 @@
 import React from 'react';
 import { useCloudSyncStore } from '@/stores/cloudSyncStore';
 import { Cloud, CloudOff, RefreshCw, AlertCircle } from 'lucide-react';
-import { CLOUD_SYNC_ENABLED } from '@/config/features';
+import { CLOUD_SYNC_ENABLED, CLOUD_SYNC_V2_ENABLED } from '@/config/features';
 import { getCloudSyncPresentation } from '@/services/cloudsync/presentation';
 
 export function SyncIndicator({ onOpenCloudSync }: { onOpenCloudSync?: () => void } = {}) {
@@ -15,7 +15,7 @@ export function SyncIndicator({ onOpenCloudSync }: { onOpenCloudSync?: () => voi
   const gdStatus = statusByProvider.googledrive;
   const recoveryOnly = gdStatus === 'synced-review' && workspaceRecoveryIssues.length > 0 && reviewItems.length === 0;
 
-  const presentation = getCloudSyncPresentation({ enabled: CLOUD_SYNC_ENABLED, status: gdStatus, connection: gdConnection, lastError, recoveryOnly });
+  const presentation = getCloudSyncPresentation({ enabled: CLOUD_SYNC_V2_ENABLED || CLOUD_SYNC_ENABLED, status: gdStatus, connection: gdConnection, lastError, recoveryOnly });
 
   let icon: React.ReactNode = <Cloud size={13} className="text-panvas-accent-green" aria-hidden="true" />;
   const label = presentation.indicatorLabel;

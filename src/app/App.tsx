@@ -32,7 +32,7 @@ import { VerifyEmailPage } from '@/components/auth/VerifyEmailPage';
 import { SettingsLayout } from '@/components/settings/SettingsLayout';
 import { LibraryWorkspace } from '@/components/library/LibraryWorkspace';
 import { KnowledgeWorkspace } from '@/components/knowledge/KnowledgeWorkspace';
-import { CLOUD_SYNC_ENABLED } from '@/config/features';
+import { CLOUD_SYNC_ENABLED, CLOUD_SYNC_V2_ENABLED } from '@/config/features';
 import { useCloudSyncStore } from '@/stores/cloudSyncStore';
 import { rememberAppRoute } from '@/services/library/libraryRouteState';
 import { PANVAS_LOGO_SRC } from '@/lib/brand';
@@ -146,7 +146,7 @@ export function App() {
   }, [loadWorkspaces, loadRecentFiles, loadTrash, initAuth]);
 
   useEffect(() => {
-    if (!CLOUD_SYNC_ENABLED || !isReady) return;
+    if ((!CLOUD_SYNC_ENABLED && !CLOUD_SYNC_V2_ENABLED) || !isReady) return;
     const cloudSync = useCloudSyncStore.getState();
     void cloudSync.initialize();
     const updateConnectivity = () => useCloudSyncStore.getState().setConnectivity(navigator.onLine);

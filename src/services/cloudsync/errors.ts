@@ -19,7 +19,23 @@ const PUBLIC_MESSAGES: Record<CloudErrorCode, string> = {
 };
 
 function safeAtom(value: unknown, fallback: string): string {
-  const normalized = String(value ?? '').trim().replace(/[^a-zA-Z0-9_.:-]+/g, '_').slice(0, 80);
+  const redacted = String(value ?? '')
+    .replace(/ya29\.[a-zA-Z0-9_.-]+/g, 'REDACTED')
+    .replace(/bearer\s+[a-zA-Z0-9_.-]+/gi, 'Bearer_REDACTED')
+    .replace(/GOCSPX-[a-zA-Z0-9_.-]+/g, 'REDACTED');
+  const normalized = redacted.trim().replace(/[^a-zA-Z0-9_.:-]+/g, '_').slice(0, 80);
+  return normalized || fallback;
+}
+
+export function safeCloudMessage(value: unknown, fallback = 'unknown'): string {
+  const normalized = String(value ?? '').trim()
+    .replace(/ya29\.[a-zA-Z0-9_.-]+/g, '[REDACTED]')
+    .replace(/bearer\s+[a-zA-Z0-9_.-]+/gi, 'Bearer [REDACTED]')
+    .replace(/GOCSPX-[a-zA-Z0-9_.-]+/g, '[REDACTED]')
+    .replace(/[^\w\s.,;:!?'"()/-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .slice(0, 120)
+    .trim();
   return normalized || fallback;
 }
 

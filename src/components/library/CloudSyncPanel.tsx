@@ -341,7 +341,7 @@ export function CloudSyncPanel() {
               {progress.total > 1 && <div className="h-1 overflow-hidden rounded bg-panvas-bg-secondary"><div className="h-full bg-panvas-accent-blue transition-[width]" style={{ width: `${Math.min(100, progress.completed / progress.total * 100)}%` }} /></div>}
             </div>
           )}
-          {gdConnected && lastError && workspaceRecoveryIssues.length === 0 && !hasConcurrentConflict && gdStatus !== 'account-migration-required' && gdStatus !== 'synced-review' && !(gdStatus === 'conflict' && reviewItems.length > 0) && <p className="mx-5 mb-5 text-xs leading-5 text-panvas-accent-rose">{lastError}</p>}
+          {lastError && workspaceRecoveryIssues.length === 0 && !hasConcurrentConflict && gdStatus !== 'account-migration-required' && gdStatus !== 'synced-review' && !(gdStatus === 'conflict' && reviewItems.length > 0) && <p className="mx-5 mb-5 text-xs leading-5 text-panvas-accent-rose">{lastError}</p>}
           {hasRecoveryOnly && (
             <p className="mx-5 mb-5 text-2xs leading-5 text-panvas-text-tertiary">
               Older sync data was preserved for recovery and does not affect your current workspaces.

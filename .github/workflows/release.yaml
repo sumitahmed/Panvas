@@ -20,7 +20,7 @@ jobs:
     env:
       VITE_ENABLE_CLOUD_SYNC: ${{ vars.VITE_ENABLE_CLOUD_SYNC || 'false' }}
       VITE_PANVAS_SYNC_V2: ${{ vars.VITE_PANVAS_SYNC_V2 || 'true' }}
-      VITE_PANVAS_GOOGLE_WEB_CLIENT_ID: ${{ vars.VITE_PANVAS_GOOGLE_WEB_CLIENT_ID }}
+      VITE_PANVAS_GOOGLE_WEB_CLIENT_ID: ${{ vars.VITE_PANVAS_GOOGLE_WEB_CLIENT_ID || '486992017517-uog6ucb24pkidgp5tcg1icuif4a3sprc.apps.googleusercontent.com' }}
       VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
       VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
       PANVAS_GOOGLE_CLIENT_ID: ${{ secrets.PANVAS_GOOGLE_CLIENT_ID }}

@@ -3,7 +3,7 @@ import { useLocation } from 'wouter';
 import { Cloud, ArrowUpRight } from 'lucide-react';
 import { useCloudSyncStore } from '@/stores/cloudSyncStore';
 import { useUIStore } from '@/stores/uiStore';
-import { CLOUD_SYNC_ENABLED } from '@/config/features';
+import { CLOUD_SYNC_ENABLED, CLOUD_SYNC_V2_ENABLED } from '@/config/features';
 import { navigateToLibraryView } from '@/services/library/libraryRouteState';
 import type { CloudSyncPresentation } from '@/services/cloudsync/presentation';
 
@@ -13,7 +13,7 @@ export function useSettingsCloudState() {
   const lastError = useCloudSyncStore(state => state.lastError);
   const lastSyncedAt = useCloudSyncStore(state => state.lastSyncedByProvider.googledrive);
   const recoveryOnly = useCloudSyncStore(state => state.workspaceRecoveryIssues.length > 0 && state.reviewItems.length === 0);
-  return { enabled: CLOUD_SYNC_ENABLED, status, connection, lastError, lastSyncedAt, recoveryOnly };
+  return { enabled: CLOUD_SYNC_V2_ENABLED || CLOUD_SYNC_ENABLED, status, connection, lastError, lastSyncedAt, recoveryOnly };
 }
 
 export function settingsConnectionLabel(cloud: ReturnType<typeof useSettingsCloudState>, presentation: CloudSyncPresentation) {

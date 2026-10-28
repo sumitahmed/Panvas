@@ -8,7 +8,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Loader2, Cloud, ShieldAlert, X } from 'lucide-react';
 import { useAuthStore } from '@/stores/authStore';
 import { useCloudSyncStore } from '@/stores/cloudSyncStore';
-import { CLOUD_SYNC_ENABLED } from '@/config/features';
+import { CLOUD_SYNC_ENABLED, CLOUD_SYNC_V2_ENABLED } from '@/config/features';
 import { navigateToLibraryView } from '@/services/library/libraryRouteState';
 
 interface AuthGuardProps {
@@ -65,7 +65,7 @@ export function AuthGuard({ children }: AuthGuardProps) {
 
       {/* Soft prompt overlay for unauthenticated users in the workspace */}
       <AnimatePresence>
-        {showSoftPrompt && CLOUD_SYNC_ENABLED && !googleDriveConnection && (
+        {showSoftPrompt && (CLOUD_SYNC_V2_ENABLED || CLOUD_SYNC_ENABLED) && !googleDriveConnection && (
           <motion.div
             initial={{ opacity: 0, y: 50, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -87,9 +87,9 @@ export function AuthGuard({ children }: AuthGuardProps) {
               <div>
                 <h3 className="text-sm font-semibold text-[#E8E8E8]">Local Mode Active</h3>
                 <p className="text-xs text-[#737373] mt-1 leading-relaxed">
-                  Your data is stored on this device. Cloud sync is {CLOUD_SYNC_ENABLED ? 'available when you connect Google Drive' : 'disabled in this build'}.
+                  Your data is stored on this device. Cloud sync is {(CLOUD_SYNC_V2_ENABLED || CLOUD_SYNC_ENABLED) ? 'available when you connect Google Drive' : 'disabled in this build'}.
                 </p>
-                {CLOUD_SYNC_ENABLED && <div className="mt-3 flex gap-2">
+                {(CLOUD_SYNC_V2_ENABLED || CLOUD_SYNC_ENABLED) && <div className="mt-3 flex gap-2">
                   <button
                     onClick={openCloudSync}
                     className="px-3 py-1.5 rounded-md bg-[#E8E8E8] text-[#0D0D0D] text-xs font-semibold hover:bg-white transition-colors flex items-center gap-1.5"

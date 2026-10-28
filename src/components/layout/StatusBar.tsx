@@ -7,7 +7,7 @@ import { useCanvasStore } from '@/stores/canvasStore';
 import { useWorkspaceStore } from '@/stores/workspaceStore';
 import { SyncIndicator } from '../ui/SyncIndicator';
 import { useCloudSyncStore } from '@/stores/cloudSyncStore';
-import { CLOUD_SYNC_ENABLED } from '@/config/features';
+import { CLOUD_SYNC_ENABLED, CLOUD_SYNC_V2_ENABLED } from '@/config/features';
 import { getCloudSyncPresentation } from '@/services/cloudsync/presentation';
 import { getBrowserStorageDurabilityState, subscribeBrowserStorageDurability } from '@/services/storage/browserStorageDurability';
 import { version as appVersion } from '../../../package.json';
@@ -20,7 +20,7 @@ export function StatusBar() {
   const cloudError = useCloudSyncStore(state => state.lastError);
   const cloudReviewCount = useCloudSyncStore(state => state.reviewItems.length);
   const cloudRecoveryCount = useCloudSyncStore(state => state.workspaceRecoveryIssues.length);
-  const cloudPresentation = getCloudSyncPresentation({ enabled: CLOUD_SYNC_ENABLED, status: cloudStatus, connection: cloudConnection, lastError: cloudError, recoveryOnly: cloudStatus === 'synced-review' && cloudRecoveryCount > 0 && cloudReviewCount === 0 });
+  const cloudPresentation = getCloudSyncPresentation({ enabled: CLOUD_SYNC_V2_ENABLED || CLOUD_SYNC_ENABLED, status: cloudStatus, connection: cloudConnection, lastError: cloudError, recoveryOnly: cloudStatus === 'synced-review' && cloudRecoveryCount > 0 && cloudReviewCount === 0 });
   const browserStorage = useSyncExternalStore(subscribeBrowserStorageDurability, getBrowserStorageDurabilityState, getBrowserStorageDurabilityState);
   const isBrowserMode = typeof window !== 'undefined' && !window.panvas;
   const showStorageNotice = isBrowserMode && ['denied', 'unsupported', 'error'].includes(browserStorage.persistence);

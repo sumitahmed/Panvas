@@ -2,6 +2,14 @@
 
 All notable Panvas changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.1.12] - 2026-10-28
+
+- Unified Cloud Sync Status UI across StatusBar, SyncIndicator, and Settings to reflect Google Drive V2 status when legacy sync is disabled.
+- Ensured Cloud Sync initialization and network connectivity event listeners run properly under the V2 feature gate.
+- Resolved browser Google Drive sign-in issues by guaranteeing production Web Client ID fallback in web builds and CI.
+- Safely captured and propagated Google Identity Services (GIS) token and popup diagnostics while redacting sensitive tokens.
+- Persistent error presentation in Cloud Sync panel without leaking internal diagnostics or secrets.
+
 ## [0.1.11] - 2026-10-28
 
 - Fixed text formatting and styling on Date and Mood template placeholder fields, supporting bold, italic, font styling, color, and undo/redo.
