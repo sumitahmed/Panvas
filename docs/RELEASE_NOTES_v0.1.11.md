@@ -12,3 +12,4 @@
 
 - Windows installer and portable executables are unsigned open-source binaries and may trigger Windows SmartScreen. Verify the published SHA-256 manifest before running them.
 - Existing storage and application data are preserved across upgrades.
+
