@@ -1441,7 +1441,7 @@ test('laser accepts a burst without synchronous paints and presents decay once p
   scheduler.runFrame(16);
   assert.equal(paints, 1);
   assert.equal(laser.getActiveTrail().length, 100);
-  scheduler.runFrame(1100);
+  scheduler.runFrame(3100);
   assert.equal(paints, 2, 'the last frame removes the expired trail');
   assert.equal(scheduler.getPendingCount(), 0);
 });

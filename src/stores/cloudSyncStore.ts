@@ -28,6 +28,7 @@ import type { SyncV2ConflictChoice, SyncV2ConflictResolution, SyncV2ProfileState
 import { inspectAndMigrateLegacyPanvasRoot } from '@/services/cloudsync/v2/legacyMigration';
 import { migrateFromDexieToFs } from '@/lib/migration';
 import { completeDeviceResetHydration, resetBrowserLocalData } from '@/services/cloudsync/deviceReset';
+import { isDrawingRecentlyActive } from '@/services/cloudsync/drawingActivity';
 
 export type SyncProviderId = CloudSyncProvider['id'];
 
@@ -1225,7 +1226,29 @@ useAuthStore.subscribe((state, previous) => {
   }));
 });
 
-export function scheduleAutoCloudSync(): void {
+export const AUTO_CLOUD_SYNC_DELAY_MS = 8_000;
+export const AUTO_CLOUD_SYNC_DRAWING_RETRY_MS = 1_000;
+export const AUTO_CLOUD_SYNC_DRAWING_IDLE_MS = 3_000;
+
+function scheduleAutoCloudSyncAfter(delayMs: number): void {
   if (autoSyncTimer) clearTimeout(autoSyncTimer);
-  autoSyncTimer = setTimeout(() => { const state = useCloudSyncStore.getState(); if (state.autoSync && state.connectionByProvider.googledrive) void state.triggerSync(); }, 8_000);
+  autoSyncTimer = setTimeout(() => {
+    autoSyncTimer = null;
+    const state = useCloudSyncStore.getState();
+    if (!state.autoSync || !state.connectionByProvider.googledrive) return;
+    // A V2 scan canonicalizes every page payload on the renderer's main thread.
+    // Starting it while ink is active turns a background backup into a visible
+    // stroke stall, so keep the pending sync until drawing has been idle for a
+    // short window. Local saves, retries and explicit sync requests are not
+    // affected by this gate.
+    if (isDrawingRecentlyActive(AUTO_CLOUD_SYNC_DRAWING_IDLE_MS)) {
+      scheduleAutoCloudSyncAfter(AUTO_CLOUD_SYNC_DRAWING_RETRY_MS);
+      return;
+    }
+    void state.triggerSync();
+  }, delayMs);
+}
+
+export function scheduleAutoCloudSync(): void {
+  scheduleAutoCloudSyncAfter(AUTO_CLOUD_SYNC_DELAY_MS);
 }

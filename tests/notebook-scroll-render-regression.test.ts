@@ -125,10 +125,31 @@ test('scroll focus detaches interaction but engine destruction remains owner-onl
   assert.match(pageView, /notebookEngine\.unmount\(\)/);
   assert.match(renderer, /key=\{pos\.id\}/);
   assert.match(renderer, /const incomingData = sectionDataCacheRef\.current\[targetPageId\];/);
-  assert.match(renderer, /if \(!incomingData\)[\s\S]*setActivePage\(targetPageId\);[\s\S]*return;/);
+  assert.match(renderer, /if \(!incomingData\)[\s\S]*setActivePage\(targetPageId, recordOpen\);[\s\S]*return;/);
   assert.doesNotMatch(renderer, /sectionDataCacheRef\.current\[targetPageId\] \|\| \{/);
   assert.match(renderer, /notebookEngine\.unmount\(\);[\s\S]*notebookEngine\.setDrawingData\(incomingData, targetPageId, incomingDrawing\);/);
   assert.match(engine, /mount\([\s\S]*if \(!this\.unsubscribeDrawingRevision\)[\s\S]*if \(!this\.unsubscribeHistoryRevision\)/);
+});
+
+test('passive scroll activation publishes once and skips last-opened persistence', async () => {
+  const [renderer, css] = await Promise.all([
+    readFile('src/components/notebook/NotebookRenderer.tsx', 'utf8'),
+    readFile('src/styles/index.css', 'utf8'),
+  ]);
+
+  // Scroll observation publishes the passive activation itself, then asks the
+  // focus handoff not to repeat the same store write or last-opened IPC calls.
+  assert.ok(renderer.includes('setActivePage(dominantPage.id, false)'));
+  assert.ok(renderer.includes('handleActivatePageRef.current(dominantPage.id, false)'));
+  assert.ok(renderer.includes('if (useWorkspaceStore.getState().activePageId !== targetPageId) setActivePage(targetPageId, recordOpen);'));
+  assert.ok(!renderer.includes('setActivePage(dominantPage.id);'));
+
+  // The scaled multi-page wrapper must not carry a filter; page roots keep
+  // their own paper shadow and remain the only shadow source.
+  assert.ok(!css.includes('.panvas-notebook-workspace .notebook-viewport > div > div'));
+  assert.ok(!css.includes('filter: drop-shadow(0 10px 18px rgb(34 31 23 / 0.08))'));
+  assert.ok(css.includes('.panvas-notebook-viewport div[id^="page-"][data-page-id]'));
+  assert.ok(css.includes('box-shadow: var(--shadow-paper);'));
 });
 
 test('shared interaction handoff preserves page-owned visual and ownership guards', async () => {

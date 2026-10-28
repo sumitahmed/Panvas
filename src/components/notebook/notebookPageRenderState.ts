@@ -5,6 +5,12 @@ import { gate0Profiler } from '../../dev/gate0Profiler.ts';
 export type NotebookPageDataCache = Readonly<Record<string, DrawingData>>;
 export type PagePropertyChangeSource = 'load' | 'user' | 'appearance';
 
+// Monotonic across every capture in this renderer. Revisions are page-local,
+// so they cannot order two snapshots that share a revision (for example an
+// appearance-only property change). The capture sequence gives persistence a
+// stable, cross-page ordering without touching persisted data.
+let nextPageOwnedDrawingSequence = 0;
+
 export interface PageOwnedDrawing {
   documentId: string;
   sheetId: string;
@@ -12,6 +18,7 @@ export interface PageOwnedDrawing {
   sceneOwnerSheetId: string;
   saveTargetSheetId: string;
   drawingRevision: number;
+  sequence: number;
   data: DrawingData;
 }
 
@@ -35,6 +42,7 @@ export function capturePageOwnedDrawing(
     sceneOwnerSheetId,
     saveTargetSheetId: sheetId,
     drawingRevision,
+    sequence: ++nextPageOwnedDrawingSequence,
     data: cloned,
   };
 }
@@ -59,6 +67,7 @@ export function captureFreshPageOwnedDrawing(
     sceneOwnerSheetId,
     saveTargetSheetId: sheetId,
     drawingRevision,
+    sequence: ++nextPageOwnedDrawingSequence,
     data,
   };
 }
@@ -112,3 +121,19 @@ export function mayApplyPageLoadToEngine(
 ): boolean {
   return requestedPageId === currentFocusedPageId && requestGeneration === latestGeneration;
 }
+
+/**
+ * Far-offscreen threshold identifies distant pages accurately to reduce DOM footprint.
+ */
+export function isPageFarOffscreen(
+  pageY: number,
+  scale: number,
+  scrollTop: number,
+  containerHeight: number,
+  isResident: boolean,
+  thresholdMultiplier = 3,
+): boolean {
+  if (isResident || containerHeight <= 0) return false;
+  return Math.abs((pageY * scale) - scrollTop) > thresholdMultiplier * containerHeight;
+}
+

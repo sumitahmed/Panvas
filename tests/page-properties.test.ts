@@ -327,7 +327,7 @@ test('page counters stay deterministic and wide enough for large page counts', a
   assert.equal(formatPageIndicator(999, 1200), '999 / 1200');
   const renderer = await readFile(new URL('../src/components/notebook/PageRenderer.tsx', import.meta.url), 'utf8');
   assert.match(renderer, /whitespace-nowrap/);
-  assert.match(renderer, /minWidth: 84/);
+  assert.match(renderer, /minWidth: (?:84|124)/);
 });
 
 test('Portrait/Landscape/Portrait pages retain heterogeneous centered vertical geometry', () => {

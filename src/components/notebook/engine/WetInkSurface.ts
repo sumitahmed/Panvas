@@ -6,6 +6,8 @@ import { PenGeometry, unionInkBounds, type InkBounds } from './penGeometry.ts';
  * committed page is never copied or cleared during movement. */
 export class WetInkSurface {
   readonly canvas: HTMLCanvasElement;
+  readonly target: CanvasRenderingContext2D;
+  private transform: DOMMatrix;
   private prefix: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
   private prefixCtx: CanvasRenderingContext2D;
@@ -13,7 +15,11 @@ export class WetInkSurface {
   private stable = 0;
   private oldTail: InkBounds | null = null;
   private bounds: InkBounds | null = null;
-  constructor(readonly target: CanvasRenderingContext2D, private transform: DOMMatrix) {
+  private readonly zIndex: string;
+  private lastOpacity = '';
+  constructor(target: CanvasRenderingContext2D, transform: DOMMatrix) {
+    this.target = target;
+    this.transform = transform;
     this.canvas = document.createElement('canvas');
     this.prefix = document.createElement('canvas');
     for (const canvas of [this.canvas, this.prefix]) {
@@ -24,15 +30,17 @@ export class WetInkSurface {
     this.prefixCtx = this.prefix.getContext('2d')!;
     this.canvas.dataset.panvasWetInk = 'true';
     this.canvas.setAttribute('aria-hidden', 'true');
+    // z-index is fixed for a given live canvas. Reading it here avoids a
+    // forced style recalculation on every pen-down when a spare is resumed.
+    this.zIndex = getComputedStyle(target.canvas).zIndex;
     Object.assign(this.canvas.style, { position: 'absolute', left: target.canvas.style.left || '0px',
       top: target.canvas.style.top || '0px', width: target.canvas.style.width,
       height: target.canvas.style.height, pointerEvents: 'none',
-      zIndex: getComputedStyle(target.canvas).zIndex });
+      zIndex: this.zIndex });
     target.canvas.insertAdjacentElement('afterend', this.canvas);
   }
   /** Retain a clean buffer briefly between adjacent handwriting strokes. */
   pause(): void {
-    this.canvas.remove();
     if (this.bounds) {
       const b = this.pixels(this.bounds);
       for (const context of [this.ctx, this.prefixCtx]) {
@@ -40,14 +48,20 @@ export class WetInkSurface {
         if (b.right > b.left && b.bottom > b.top) context.clearRect(b.left, b.top, b.right - b.left, b.bottom - b.top);
       }
     }
+    // Keep the transparent spare connected during the short burst window.
+    // Removing and reinserting it on the next pen-down invalidates style and
+    // compositing for the whole page; opacity zero keeps the cleared surface
+    // invisible even if a stale pixel ever fell outside the tracked bounds.
+    this.canvas.style.opacity = '0';
+    this.lastOpacity = '0';
     this.geometry = new PenGeometry();
     this.stable = 0;
     this.oldTail = this.bounds = null;
   }
   resume(transform: DOMMatrix): void {
     this.transform = transform;
-    Object.assign(this.canvas.style, { left: this.target.canvas.style.left || '0px', top: this.target.canvas.style.top || '0px', width: this.target.canvas.style.width, height: this.target.canvas.style.height, zIndex: getComputedStyle(this.target.canvas).zIndex });
-    this.target.canvas.insertAdjacentElement('afterend', this.canvas);
+    Object.assign(this.canvas.style, { left: this.target.canvas.style.left || '0px', top: this.target.canvas.style.top || '0px', width: this.target.canvas.style.width, height: this.target.canvas.style.height });
+    if (!this.canvas.isConnected) this.target.canvas.insertAdjacentElement('afterend', this.canvas);
   }
   matches(target: CanvasRenderingContext2D): boolean {
     return target === this.target && this.canvas.width === target.canvas.width
@@ -107,7 +121,11 @@ export class WetInkSurface {
       this.ctx.fill();
       this.ctx.restore();
     }
-    this.canvas.style.opacity = String(stroke.opacity);
+    const opacity = String(stroke.opacity);
+    if (this.lastOpacity !== opacity) {
+      this.canvas.style.opacity = opacity;
+      this.lastOpacity = opacity;
+    }
     return { primitives, dirtyPixels: Math.max(0, width) * Math.max(0, height), rebuilt };
   }
   commit(stroke: Stroke): void {

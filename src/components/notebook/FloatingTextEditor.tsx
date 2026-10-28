@@ -173,7 +173,7 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
       const requiredVersion = notebookContentSchemaVersion(json);
       if (requiredVersion === 3 || usesDocumentationNodes(json)) object.metadata = { ...object.metadata, richTextSchemaVersion: requiredVersion };
       engine.texts.updateTextContent(object.id, json);
-      engine.input.notifyChange();
+      engine.input.notifyChange('document-text');
     },
     onFocus: ({ editor: currentEditor }) => {
       emptyBlurGeneration.current += 1;

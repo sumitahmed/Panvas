@@ -4,12 +4,14 @@ export interface LaserTrailPoint {
   x: number;
   y: number;
   timestamp: number;
+  strokeId: number;
 }
 
 export interface LaserManagerOptions {
   color?: string;
   radius?: number;
   decayMs?: number;
+  connectSeparateStrokes?: boolean;
   now?: () => number;
   requestFrame?: (callback: FrameRequestCallback) => number;
   cancelFrame?: (handle: number) => void;
@@ -17,8 +19,8 @@ export interface LaserManagerOptions {
 
 const DEFAULT_COLOR = '#ef4444';
 const DEFAULT_RADIUS = 6;
-const DEFAULT_DECAY_MS = 1_000;
-const MAX_TRAIL_POINTS = 512;
+const DEFAULT_DECAY_MS = 3_000;
+const MAX_TRAIL_POINTS = 2048;
 
 function defaultNow(): number {
   return typeof performance !== 'undefined' ? performance.now() : Date.now();
@@ -47,8 +49,10 @@ function rgba(hex: string, alpha: number): string {
 export class LaserManager {
   readonly color: string;
   readonly radius: number;
-  readonly decayMs: number;
+  decayMs: number;
+  connectSeparateStrokes: boolean;
 
+  private currentStrokeId = 0;
   private activeTrail: LaserTrailPoint[] = [];
   private animationFrame: number | null = null;
   private redrawCallback?: () => void;
@@ -59,10 +63,34 @@ export class LaserManager {
   constructor(options: LaserManagerOptions = {}) {
     this.color = options.color ?? DEFAULT_COLOR;
     this.radius = Math.max(1, options.radius ?? DEFAULT_RADIUS);
-    this.decayMs = Math.max(100, options.decayMs ?? DEFAULT_DECAY_MS);
+    this.decayMs = Math.max(500, Math.min(10000, options.decayMs ?? DEFAULT_DECAY_MS));
+    this.connectSeparateStrokes = options.connectSeparateStrokes ?? true;
     this.now = options.now ?? defaultNow;
     this.requestFrame = options.requestFrame ?? defaultRequestFrame;
     this.cancelFrame = options.cancelFrame ?? defaultCancelFrame;
+  }
+
+  setDecayMs(durationMs: number): void {
+    const clamped = Math.max(500, Math.min(10000, Number.isFinite(durationMs) ? durationMs : DEFAULT_DECAY_MS));
+    if (this.decayMs === clamped) return;
+    this.decayMs = clamped;
+    if (this.activeTrail.length > 0) {
+      this.prune(this.now());
+      this.redrawCallback?.();
+    }
+  }
+
+  setConnectSeparateStrokes(enabled: boolean): void {
+    const next = Boolean(enabled);
+    if (this.connectSeparateStrokes === next) return;
+    this.connectSeparateStrokes = next;
+    if (this.activeTrail.length > 0) {
+      this.redrawCallback?.();
+    }
+  }
+
+  startStroke(): void {
+    this.currentStrokeId += 1;
   }
 
   setRedrawCallback(callback: (() => void) | undefined): void {
@@ -71,7 +99,12 @@ export class LaserManager {
 
   addPoint(point: StrokePoint, timestamp = this.now()): void {
     this.prune(timestamp);
-    this.activeTrail.push({ x: point.x, y: point.y, timestamp });
+    this.activeTrail.push({
+      x: point.x,
+      y: point.y,
+      timestamp,
+      strokeId: this.currentStrokeId,
+    });
     if (this.activeTrail.length > MAX_TRAIL_POINTS) {
       this.activeTrail.splice(0, this.activeTrail.length - MAX_TRAIL_POINTS);
     }
@@ -119,8 +152,11 @@ export class LaserManager {
     for (let index = 1; index < this.activeTrail.length; index += 1) {
       const from = this.activeTrail[index - 1];
       const to = this.activeTrail[index];
-      const fromOpacity = this.getPointOpacity(from, now);
-      const toOpacity = this.getPointOpacity(to, now);
+      if (!this.connectSeparateStrokes && from.strokeId !== to.strokeId) {
+        continue;
+      }
+      const fromOpacity = Math.sin(this.getPointOpacity(from, now) * (Math.PI / 2));
+      const toOpacity = Math.sin(this.getPointOpacity(to, now) * (Math.PI / 2));
       const gradient = ctx.createLinearGradient(from.x, from.y, to.x, to.y);
       gradient.addColorStop(0, rgba(this.color, fromOpacity * 0.72));
       gradient.addColorStop(1, rgba(this.color, toOpacity * 0.95));
@@ -134,7 +170,7 @@ export class LaserManager {
     }
 
     const head = this.activeTrail[this.activeTrail.length - 1];
-    const headOpacity = this.getPointOpacity(head, now);
+    const headOpacity = Math.sin(this.getPointOpacity(head, now) * (Math.PI / 2));
     const outerRadius = this.radius * 2.2 / safeScale;
     const innerRadius = this.radius / safeScale;
     const glow = ctx.createRadialGradient(head.x, head.y, 0, head.x, head.y, outerRadius);

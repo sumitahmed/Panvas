@@ -10,7 +10,7 @@ import type { Stroke, StrokePoint, DrawingToolId, StrokePattern } from './drawin
 import { DEFAULT_PAGE_LAYER_ID } from './drawingTypes.ts';
 import { ViewportManager } from './ViewportManager.ts';
 import { ShapeManager } from './ShapeManager.ts';
-import { ImageManager } from './ImageManager.ts';
+import type { ImageManager } from './ImageManager.ts';
 import { SelectionEngine } from './SelectionEngine.ts';
 import { getPencilRenderPoint, getStrokeRenderHalfWidth } from './strokeGeometry.ts';
 import { traceInkClip, strokeRegion, eraserCapsule, regionIntersects } from './inkRegion.ts';
@@ -118,6 +118,7 @@ export class DrawingEngine {
 
   /** Detach from canvas element. */
   detachCanvas(): void {
+    this.laserManager.clear();
     this.releaseLaserSurface();
     // Clear the currently owned surface before releasing it. Page activation
     // can replace the engine scene before React commits the next page shell;
@@ -237,6 +238,20 @@ export class DrawingEngine {
     return removed;
   }
 
+  private strokeBoundsCache = new WeakMap<Stroke, { firstX: number; firstY: number; length: number; bounds: EraseBounds }>();
+  private getCachedEraseBounds(stroke: Stroke): EraseBounds {
+    const first = stroke.points[0];
+    const cached = this.strokeBoundsCache.get(stroke);
+    if (cached && first && cached.firstX === first.x && cached.firstY === first.y && cached.length === stroke.points.length) {
+      return cached.bounds;
+    }
+    const bounds = eraseBounds(stroke);
+    if (first) {
+      this.strokeBoundsCache.set(stroke, { firstX: first.x, firstY: first.y, length: stroke.points.length, bounds });
+    }
+    return bounds;
+  }
+
   /** Full redraw of all strokes. */
   redraw(dirty?: EraseBounds, boundsForStroke?: (stroke: Stroke) => EraseBounds): void {
     if (!this.ctx || !this.canvas) return;
@@ -291,7 +306,7 @@ export class DrawingEngine {
       this.imageManager.renderImages(ctx, layer.id);
       for (const stroke of this.strokes) {
         const windowBounds = this.viewport.getRenderWindowBounds();
-        if (windowBounds && !boundsOverlap(windowBounds, eraseBounds(stroke))) continue;
+        if (windowBounds && !boundsOverlap(windowBounds, this.getCachedEraseBounds(stroke))) continue;
         if (cullBounds && boundsForStroke && !boundsOverlap(cullBounds, boundsForStroke(stroke))) continue;
         const strokeLayerId = stroke.layerId ?? DEFAULT_PAGE_LAYER_ID;
         if (strokeLayerId === layer.id) this.renderStroke(ctx, stroke);
@@ -415,6 +430,18 @@ export class DrawingEngine {
         && cached.samples[i*4+2] === p.pressure && cached.samples[i*4+3] === p.t)) {
       this.inkPaths.set(stroke, cached);
       return cached;
+    }
+    if (cached?.key === key && cached.samples.length === stroke.points.length * 4) {
+      const dx = stroke.points[0].x - cached.samples[0];
+      const dy = stroke.points[0].y - cached.samples[1];
+      if (stroke.points.every((p, i) =>
+        Math.abs(p.x - (cached.samples[i * 4] + dx)) < 1e-4 &&
+        Math.abs(p.y - (cached.samples[i * 4 + 1] + dy)) < 1e-4 &&
+        p.pressure === cached.samples[i * 4 + 2] &&
+        p.t === cached.samples[i * 4 + 3]
+      )) {
+        return { path: cached.path, x: cached.x + dx, y: cached.y + dy };
+      }
     }
     // Path2D retains large coordinates with insufficient precision for narrow
     // pen caps, especially when intersecting a damage clip. Keep distant paths

@@ -62,11 +62,14 @@ export class NotebookRepository {
     }
     return notebookDB.createSection(userId, notebookId, name); 
   }
-  async createPage(userId: string | null, workspaceId: string, notebookId: string, sectionId: string, title: string, type: 'default' | 'pdf' = 'default', pdfDataId?: string): Promise<NotebookPage> {
+  async createPage(userId: string | null, workspaceId: string, notebookId: string, sectionId: string, title: string, type: 'default' | 'pdf' = 'default', pdfDataId?: string, titleProvenance?: 'default' | 'custom'): Promise<NotebookPage> {
     if (typeof window !== 'undefined' && window.panvas) {
+      if (titleProvenance !== undefined) {
+        return window.panvas.notebookPage.create(workspaceId, notebookId, sectionId, title, type, pdfDataId, titleProvenance);
+      }
       return window.panvas.notebookPage.create(workspaceId, notebookId, sectionId, title, type, pdfDataId);
     }
-    return notebookDB.createPage(userId, notebookId, sectionId, title, type, pdfDataId);
+    return notebookDB.createPage(userId, notebookId, sectionId, title, type, pdfDataId, titleProvenance);
   }
   
   // Soft-deleted entities are restored by clearing deletedAt. Content and
@@ -333,12 +336,12 @@ export class NotebookRepository {
     return notebookDB.renameSection(id, name); 
   }
   
-  async renamePage(workspaceId: string, id: string, title: string): Promise<void> { 
+  async renamePage(workspaceId: string, id: string, title: string, titleProvenance?: 'default' | 'custom'): Promise<void> { 
     if (typeof window !== 'undefined' && window.panvas) {
-      await window.panvas.notebookPage.update(workspaceId, id, { title });
+      await window.panvas.notebookPage.update(workspaceId, id, titleProvenance ? { title, titleProvenance } : { title });
       return;
     }
-    return notebookDB.renamePage(id, title); 
+    return notebookDB.renamePage(id, title, titleProvenance); 
   }
   
   async delete(workspaceId: string, id: string): Promise<void> { 

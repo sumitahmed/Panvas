@@ -43,6 +43,7 @@ import { gate0Profiler } from '@/dev/gate0Profiler';
 import { useFullDarkView } from '@/hooks/useFullDarkView';
 import { FULL_DARK_PDF_FILTER, isBrightDocumentCanvas } from '@/lib/fullDarkView';
 import { useUIStore } from '@/stores/uiStore';
+import { isDrawingRecentlyActive } from '@/services/cloudsync/drawingActivity';
 
 const ignoreTextEditorBlur = () => {};
 
@@ -172,7 +173,8 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
     instanceIdRef.current = 'inst_' + Math.random().toString(36).substring(2, 8);
   }
 
-  const pageCursor = isFocused ? resolveDocumentToolCursor(toolState) : undefined;
+  const [isTouchDevice, setIsTouchDevice] = useState(false);
+  const pageCursor = (!isTouchDevice && isFocused) ? resolveDocumentToolCursor(toolState) : undefined;
   const pageGeometry = useMemo(() => resolvePageSurfaceGeometry(properties), [properties]);
   const textPageOffset = useMemo(
     () => ({ x: pageGeometry.source.left, y: pageGeometry.source.top - logicalBase }),
@@ -224,7 +226,7 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
     // by focus. Data updates finish synchronously before the next paint.
     engine.drawing.setScaleMultiplier(Math.min(renderScale, MAX_INACTIVE_PAGE_RENDER_ZOOM));
     const staticConfiguration = `${width}:${rasterHeight}:${renderScale}`;
-    if (staticCanvasConfigurationRef.current !== staticConfiguration) {
+    if (staticCanvasConfigurationRef.current !== staticConfiguration || engine.drawing.getCanvasElement() !== canvasRef.current) {
       engine.drawing.setCanvas(canvasRef.current, width, rasterHeight);
       staticCanvasConfigurationRef.current = staticConfiguration;
     }
@@ -316,7 +318,11 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
     const unsubLayers = notebookEngine.layers.subscribe(() => {
       setLayerRevision(rev => rev + 1);
     });
-    const unsubMutation = notebookEngine.onSceneMutation(reason => { if (reason !== 'document-text') setLayerRevision(rev => rev + 1); });
+    const unsubMutation = notebookEngine.onSceneMutation(reason => {
+      if (reason !== 'document-text' && !isDrawingRecentlyActive(300)) {
+        setLayerRevision(rev => rev + 1);
+      }
+    });
     return () => {
       unsubLayers();
       unsubMutation();
@@ -460,6 +466,8 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
         onUpdateProperties={onUpdateProperties}
         logicalBase={logicalBase}
         renderWindow={expandedSurface ? { top: renderWindow.top - logicalBase, height: renderWindow.height } : undefined}
+        engine={notebookEngine}
+        onFocusEditor={setActiveEditor}
       >
         {/* This page-owned visual subtree survives every interaction handoff. */}
         <div data-stable-page-visual={page.id} style={{ visibility: liveSceneReady && page.type !== 'pdf' ? 'hidden' : 'visible' }}>
@@ -498,6 +506,14 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
           data-rendered-page-id={page.id}
           data-scene-owner-page-id={sceneOwnerPageId}
           data-render-ready={sceneReady ? 'true' : 'false'}
+          onPointerDown={e => {
+            if (e.pointerType === 'touch') setIsTouchDevice(true);
+            else setIsTouchDevice(false);
+          }}
+          onPointerMove={e => {
+            if (e.pointerType === 'touch' && !isTouchDevice) setIsTouchDevice(true);
+            else if (e.pointerType !== 'touch' && isTouchDevice) setIsTouchDevice(false);
+          }}
           onDrop={handleDrop}
           onDragOver={handleDragOver}
           onDragEnter={handleDragOver}

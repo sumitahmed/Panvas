@@ -673,6 +673,46 @@
   pointer-events: none;
 }
 
+/* Template Field Editor (Date / Mood / Header fields) */
+.panvas-template-field-editor .tiptap,
+.panvas-template-field-editor .ProseMirror {
+  outline: none !important;
+  border: none !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  height: 100%;
+  width: 100%;
+  font-size: inherit;
+  font-weight: inherit;
+  color: inherit;
+  line-height: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: text;
+}
+
+.panvas-template-field-editor .ProseMirror p {
+  margin: 0 !important;
+  padding: 0 !important;
+  line-height: inherit !important;
+  font-size: inherit !important;
+  font-weight: inherit !important;
+  color: inherit !important;
+  display: inline;
+}
+
+.panvas-template-field-editor .ProseMirror p.is-editor-empty:first-child::before {
+  color: inherit !important;
+  opacity: 0.6;
+  font-weight: inherit;
+  font-size: inherit;
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
+
 /* Pasted prose keeps the normal TipTap document and receives only this
    persisted TextObject presentation wrapper. Code blocks deliberately retain
    their existing codeBlock surface, including inside mixed clipboard content. */
@@ -1204,10 +1244,9 @@
   background: rgb(var(--bg-secondary) / 0.62);
 }
 
-.panvas-notebook-workspace .notebook-viewport > div > div {
-  filter: drop-shadow(0 10px 18px rgb(34 31 23 / 0.08));
-}
-
+/* Page roots already carry --shadow-paper. A drop-shadow on the page wrapper
+   would add a second offscreen filter surface around every page and force
+   extra compositing during scroll, so it is intentionally not applied here. */
 .panvas-handwriting-dialog {
   background: rgb(var(--bg-elevated));
   border-color: rgb(var(--border-default));
@@ -1506,3 +1545,10 @@
 .panvas-document-page-break { height: 0; margin: 0; position: relative; }
 .panvas-document-page-break::before { content: 'Page break'; position: absolute; right: 0; top: -22px; color: #64748b; font: 10px Inter, sans-serif; }
 [data-infinite-document="true"] .panvas-document-page-break::before { content: none; }
+
+
+/* Stylus custom overlay coordination: suppress duplicate native CSS cursor on canvas while overlay is rendering */
+.panvas-stylus-canvas-active,
+.panvas-stylus-canvas-active canvas {
+  cursor: none !important;
+}

@@ -47,22 +47,31 @@ import type { HandwritingToolPreferences } from '@/services/beautification/handw
 import type { ReviewedHandwritingLine } from '@/services/recognition/bulkConversion';
 import { PanelTopOpen, PanelRight, Plus } from 'lucide-react';
 import { pageAudioPersistence } from '@/services/audio/pageAudioPersistenceInstance';
-import { rememberDrawingSnapshotJson } from '@/services/storage/drawingSnapshotJson';
+import { drawingSnapshotJson, rememberDrawingSnapshotJson } from '@/services/storage/drawingSnapshotJson';
 import { changeVoiceNote, type VoiceState } from '@/services/audio/voiceNoteCommands';
 import { formatPageIndicator } from './pageIndicator';
 import {
   captureFreshPageOwnedDrawing,
-  hasValidPageDrawingOwnership,
   mayApplyPageLoadToEngine,
   mayPersistPagePropertyChange,
   isPaperColorOnlyUpdate,
   mergeLoadedPageData,
   resolveNotebookPageRenderData,
+  isPageFarOffscreen,
   type PageOwnedDrawing,
 } from './notebookPageRenderState';
 import { gate0Profiler } from '@/dev/gate0Profiler';
 import { recordHandwritingTraceMarker } from '@/dev/handwritingTrace';
 import { DrawingSaveScheduler } from './drawingSaveScheduler';
+import {
+  DrawingPersistenceQueue,
+  type DrawingPersistenceCallbacks,
+  type DrawingSaveTarget,
+} from './drawingPersistenceQueue';
+import { setDrawingGestureActive, isDrawingRecentlyActive } from '@/services/cloudsync/drawingActivity';
+import { resolveDocumentToolCursor } from './documentToolCursor';
+import { DocumentToolCursorOverlay } from './DocumentToolCursorOverlay';
+import { saveNotebookPosition, getNotebookPosition } from '@/lib/readingPosition';
 
 function captureEngineOwnedDrawing(
   notebookEngine: NotebookEngine,
@@ -208,15 +217,24 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   const drawingSaveSchedulerRef = useRef<DrawingSaveScheduler<PageOwnedDrawing> | null>(null);
   if (!drawingSaveSchedulerRef.current) {
     drawingSaveSchedulerRef.current = new DrawingSaveScheduler<PageOwnedDrawing>(
-      snapshot => persistDrawingRef.current(snapshot),
+      snapshot => {
+        if (snapshot) {
+          updateSectionDataCache(current => current, false);
+        }
+        persistDrawingRef.current(snapshot);
+      },
       { onEvent: event => recordHandwritingTraceMarker(event.type, event) },
     );
   }
-  const latestScheduledDrawingRevisionRef = useRef(new Map<string, number>());
-  const latestScheduledDrawingFingerprintRef = useRef(new Map<string, string>());
-  const latestScheduledDrawingDataRef = useRef(new Map<string, DrawingData>());
-  const [, setTextObjects] = useState<TextObject[]>([]);
   const latestCapturedDrawingRef = useRef(new Map<string, PageOwnedDrawing>());
+  const drawingPersistenceCallbacksRef = useRef<DrawingPersistenceCallbacks | null>(null);
+  const drawingPersistenceRef = useRef<DrawingPersistenceQueue | null>(null);
+  if (!drawingPersistenceRef.current) {
+    drawingPersistenceRef.current = new DrawingPersistenceQueue(
+      () => drawingPersistenceCallbacksRef.current,
+    );
+  }
+  const [, setTextObjects] = useState<TextObject[]>([]);
   const [, setSelectionRevision] = useState(0);
   const [handwritingStrokes, setHandwritingStrokes] = useState<Stroke[]>([]);
   const [isHandwritingDialogOpen, setIsHandwritingDialogOpen] = useState(false);
@@ -236,6 +254,11 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   const [fullscreenToolbarHostWidth, setFullscreenToolbarHostWidth] = useState<number | null>(null);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [debouncedScale, setDebouncedScale] = useState(1.0);
+  const [isTouchDevice, setIsTouchDevice] = useState(false);
+  const containerToolCursor = (!isTouchDevice && (toolState.mode === 'draw' || toolState.mode === 'erase'))
+    ? resolveDocumentToolCursor(toolState)
+    : undefined;
+  const initialRestoredNotebookRef = useRef<string | null>(null);
 
   useEffect(() => {
     const gestures = notebookEngine.input.navigationGestures;
@@ -258,10 +281,12 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   // unmounts/detaches the live canvas, so ALL activation requests must defer.
   const navigationGestures = notebookEngine.input.navigationGestures;
   const pendingFocusPageIdRef = useRef<string | null>(null);
+  const pendingActivationPageIdRef = useRef<string | null>(null);
   const flushNavigationScrollRef = useRef<() => void>(() => {});
   // Clear before child layout cleanup detaches the focused canvas on teardown.
   useLayoutEffect(() => () => {
     pendingFocusPageIdRef.current = null;
+    pendingActivationPageIdRef.current = null;
     flushNavigationScrollRef.current = () => {};
   }, []);
   const pageGeometryTransitionRef = useRef<{ pageId: string; anchor: PageGeometryAnchor } | null>(null);
@@ -271,7 +296,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   // whenever that cache changes. Effects that outlive those rebuilds must always call the
   // latest version — a captured stale copy would flush the wrong outgoing page — so they go
   // through this ref, which is reassigned on every render right after the callback is created.
-  const handleActivatePageRef = useRef<(targetPageId: string) => void>(() => {});
+  const handleActivatePageRef = useRef<(targetPageId: string, recordOpen?: boolean) => void>(() => {});
   useEffect(() => navigationGestures.onIdle(() => {
     // The final pointermove can precede the observer's rAF. Resolve that final
     // position before flushing, avoiding a stale-page handoff followed by another.
@@ -727,7 +752,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     };
   }, [notebookEngine, workspaceViewMode]);
 
-  // Viewport-level panning: Hand tool (left button) and middle mouse button.
+  // Viewport-level panning: Hand tool (left button).
   //
   // These listeners belong on the `.notebook-viewport` scroll container, NOT on a page
   // canvas. Panning is a viewport concern: the gesture must work when it starts on an
@@ -748,7 +773,6 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     // rounds off at fractional display scaling, which is what made the content lag
     // behind the cursor and stutter on scaled displays.
     let activePointerId: number | null = null;
-    let activePanSource: 'hand' | 'middle' | null = null;
     let releaseNavigation: (() => void) | null = null;
     let startClientX = 0;
     let startClientY = 0;
@@ -760,21 +784,20 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       // the gesture twice. Touch over the focused canvas (where `touch-action: none`
       // suppresses native scrolling) is still handled by InputManager.
       if (e.pointerType === 'touch') return false;
-      if (e.button === 1) return true;
       return e.button === 0 && notebookEngine.tools.getState().mode === 'hand';
     };
 
     const onPointerDown = (e: PointerEvent) => {
       if (activePointerId !== null || !isPanGesture(e)) return;
 
-      // Suppresses middle-click autoscroll, and for the Hand tool also suppresses text
-      // selection, drag-start and focus changes for the duration of the drag.
+      // Suppress text selection, drag-start and focus changes for the duration
+      // of the Hand drag. Middle-click is deliberately left untouched so the
+      // scroll container keeps Chromium's native autoscroll, as the PDF viewer does.
       e.preventDefault();
 
       activePointerId = e.pointerId;
-      activePanSource = e.button === 1 ? 'middle' : 'hand';
       container.dataset.panActive = 'true';
-      container.dataset.panSource = activePanSource;
+      container.dataset.panSource = 'hand';
       container.dataset.panPointer = String(e.pointerId);
       releaseNavigation = navigationGestures.begin();
       startClientX = e.clientX;
@@ -795,7 +818,6 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       if (activePointerId === null || (pointerId !== undefined && pointerId !== activePointerId)) return;
       const finishedPointerId = activePointerId;
       activePointerId = null;
-      activePanSource = null;
       container.dataset.panActive = 'false';
       delete container.dataset.panSource;
       delete container.dataset.panPointer;
@@ -830,9 +852,9 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     const onLostPointerCapture = (e: PointerEvent) => finishGesture(e.pointerId, false);
     const onWindowBlur = () => finishGesture();
     const unsubscribeTools = notebookEngine.tools.subscribe((state) => {
-      // Middle-button panning is tool-independent. A left-button Hand gesture, however,
-      // cannot remain authoritative after the user has selected another tool.
-      if (activePanSource === 'hand' && state.mode !== 'hand') finishGesture();
+      // A Hand gesture cannot remain authoritative after the user selects
+      // another tool.
+      if (state.mode !== 'hand') finishGesture();
     });
 
     container.addEventListener('pointerdown', onPointerDown);
@@ -888,96 +910,112 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
 
 
   // Central persistence writer for drawing data. Every notebook save goes
-  // through here so the StatusBar save indicator reflects reality and a
-  // failed write is surfaced instead of silently dropped: the roadmap's
-  // "intentional failure does not falsely report save success" contract.
+  // through the persistence queue so a failed target lookup, a failed write,
+  // and a later retry all share one ordered state machine. The queue marks a
+  // revision scheduled only after the target resolves, and it keeps failed
+  // immutable snapshots for automatic and lifecycle-boundary retries.
   const lastSaveErrorToastAtRef = useRef(0);
-  const persistDrawing = useCallback((snapshot: PageOwnedDrawing | null) => {
-    if (!snapshot || !hasValidPageDrawingOwnership(snapshot)) {
-      return;
-    }
-    const pageId = snapshot.saveTargetSheetId;
-    const data = snapshot.data;
-    const latestScheduledRevision = latestScheduledDrawingRevisionRef.current.get(pageId);
-    const latestScheduledFingerprint = latestScheduledDrawingFingerprintRef.current.get(pageId);
-    // A lower revision is provably stale without traversing the page snapshot.
-    if (latestScheduledRevision !== undefined && snapshot.drawingRevision < latestScheduledRevision) {
-      return;
-    }
-    if (latestScheduledRevision === snapshot.drawingRevision && latestScheduledDrawingDataRef.current.get(pageId) === data) return;
-    recordHandwritingTraceMarker('saveStarted', {
+  drawingPersistenceCallbacksRef.current = {
+    resolveTarget: (snapshot): DrawingSaveTarget | 'stale' | null => {
+      const pageId = snapshot.saveTargetSheetId;
+      const { notebookPages: allPages, notebooks: allNotebooks, workspaces: allWorkspaces } = useWorkspaceStore.getState();
+      const targetPage = allPages.find(p => p.id === pageId) ?? notebookPages.find(p => p.id === pageId);
+      if (!targetPage) return null;
+      if (targetPage.deletedAt) return 'stale';
+      const targetNotebook = allNotebooks.find(n => n.id === targetPage.notebookId) ?? notebooks.find(n => n.id === targetPage.notebookId);
+      if (!targetNotebook) return null;
+      if (targetNotebook.deletedAt) return 'stale';
+      if (targetNotebook.id !== snapshot.documentId) return 'stale';
+      const targetWorkspace = allWorkspaces.find(w => w.id === targetNotebook.workspaceId) ?? workspaces.find(w => w.id === targetNotebook.workspaceId);
+      if (!targetWorkspace) return null;
+      if (targetWorkspace.deletedAt) return 'stale';
+      return { workspaceId: targetWorkspace.id, notebookId: targetNotebook.id };
+    },
+    encode: snapshot => {
+      const pageId = snapshot.saveTargetSheetId;
+      recordHandwritingTraceMarker('stringifyStarted', { pageId, revision: snapshot.drawingRevision });
+      // Immutable snapshots retain their already computed JSON. This is the
+      // same encoding sent through notebook:saveDrawing, so retries do not
+      // re-serialize a multi-megabyte page while the user is drawing.
+      const json = drawingSnapshotJson(snapshot.data);
+      rememberDrawingSnapshotJson(snapshot.data, json);
+      recordHandwritingTraceMarker('stringifyEnded', { pageId, revision: snapshot.drawingRevision });
+      return json;
+    },
+    save: (target, data, snapshot) => pageAudioPersistence.saveDrawing({
+      ...target,
+      pageId: snapshot.saveTargetSheetId,
+    }, data),
+    onSaveStarted: snapshot => recordHandwritingTraceMarker('saveStarted', {
       pageId: snapshot.sheetId,
       revision: snapshot.drawingRevision,
-    });
-    recordHandwritingTraceMarker('stringifyStarted', { pageId, revision: snapshot.drawingRevision });
-    const fingerprint = JSON.stringify(data);
-    rememberDrawingSnapshotJson(data, fingerprint);
-    recordHandwritingTraceMarker('stringifyEnded', { pageId, revision: snapshot.drawingRevision });
-    if (latestScheduledRevision !== undefined && snapshot.drawingRevision === latestScheduledRevision
-      && fingerprint === latestScheduledFingerprint) return;
-    latestScheduledDrawingRevisionRef.current.set(pageId, snapshot.drawingRevision);
-    latestScheduledDrawingFingerprintRef.current.set(pageId, fingerprint);
-    latestScheduledDrawingDataRef.current.set(pageId, data);
-    const { notebookPages: allPages, notebooks: allNotebooks, workspaces: allWorkspaces } = useWorkspaceStore.getState();
-    const targetPage = allPages.find(p => p.id === pageId) ?? notebookPages.find(p => p.id === pageId);
-    if (!targetPage) {
-      return;
-    }
-    const targetNotebook = allNotebooks.find(n => n.id === targetPage.notebookId) ?? notebooks.find(n => n.id === targetPage.notebookId);
-    if (!targetNotebook || targetNotebook.id !== snapshot.documentId) {
-      return;
-    }
-    const targetWorkspace = allWorkspaces.find(w => w.id === targetNotebook.workspaceId) ?? workspaces.find(w => w.id === targetNotebook.workspaceId);
-    if (!targetWorkspace) {
-      return;
-    }
-
-    updateSectionDataCache(prev => prev[pageId] === data ? prev : { ...prev, [pageId]: data });
-    useCanvasStore.getState().setSaveStatus('saving');
-    recordHandwritingTraceMarker('ipcSaveStart', { pageId, revision: snapshot.drawingRevision });
-    pageAudioPersistence.saveDrawing({ workspaceId: targetWorkspace.id, notebookId: targetNotebook.id, pageId }, data)
-      .then(savedData => {
-        recordHandwritingTraceMarker('ipcSaveEnd', { pageId, revision: snapshot.drawingRevision, ok: true });
-        // The persisted result belongs to this exact snapshot. If the live
-        // engine has produced a newer cache entry while the write was in
-        // flight, keep that newer entry visible instead of rolling the page
-        // back until the next interaction.
-        updateSectionDataCache(prev => prev[pageId] === data
-          ? { ...prev, [pageId]: savedData }
-          : prev);
-        if (focusedPageIdRef.current === pageId) notebookEngine.audio.setAll(savedData.audioNotes);
-        useCanvasStore.getState().setSaveStatus('saved');
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new CustomEvent('panvas:notebook-content-changed', { detail: { pageId } }));
-        }
-      })
-      .catch(err => {
-        recordHandwritingTraceMarker('ipcSaveEnd', { pageId, revision: snapshot.drawingRevision, ok: false });
-        useCanvasStore.getState().setSaveStatus('error');
-        console.error('[NotebookRenderer] drawing save failed:', err);
-        const now = Date.now();
-        if (now - lastSaveErrorToastAtRef.current > 10000) {
-          lastSaveErrorToastAtRef.current = now;
-          useUIStore.getState().showToast('Save failed. Your changes are kept in memory and will retry on the next edit.', 'error');
-        }
-      });
-  }, [notebookEngine, notebookPages, notebooks, workspaces, updateSectionDataCache]);
+    }),
+    onScheduled: (snapshot) => {
+      const pageId = snapshot.saveTargetSheetId;
+      updateSectionDataCache(prev => prev[pageId] === snapshot.data ? prev : { ...prev, [pageId]: snapshot.data });
+      recordHandwritingTraceMarker('ipcSaveStart', { pageId, revision: snapshot.drawingRevision });
+    },
+    onSaved: (snapshot, savedData, completion) => {
+      const pageId = snapshot.saveTargetSheetId;
+      recordHandwritingTraceMarker('ipcSaveEnd', { pageId, revision: snapshot.drawingRevision, ok: true });
+      // The persisted result belongs to this exact snapshot. If the live
+      // engine has produced a newer cache entry while the write was in
+      // flight, keep that newer entry visible instead of rolling the page
+      // back until the next interaction.
+      updateSectionDataCache(prev => prev[pageId] === snapshot.data
+        ? { ...prev, [pageId]: savedData }
+        : prev);
+      if (!completion.latestScheduled || !completion.latestPersisted) return;
+      if (focusedPageIdRef.current === pageId) notebookEngine.audio.setAll(savedData.audioNotes);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('panvas:notebook-content-changed', { detail: { pageId } }));
+      }
+    },
+    onFailed: (snapshot, err, context) => {
+      const pageId = snapshot.saveTargetSheetId;
+      recordHandwritingTraceMarker('ipcSaveEnd', { pageId, revision: snapshot.drawingRevision, ok: false });
+      console.error('[NotebookRenderer] drawing save failed:', err);
+      const now = Date.now();
+      if (now - lastSaveErrorToastAtRef.current > 10000) {
+        lastSaveErrorToastAtRef.current = now;
+        useUIStore.getState().showToast(
+          context.willRetry
+            ? 'Save failed. Your changes are kept in memory and will retry automatically.'
+            : 'Save failed. Your changes are kept in memory and will retry when you edit or leave the page.',
+          'error',
+        );
+      }
+    },
+    onStatus: (snapshot, status) => {
+      useCanvasStore.getState().setSaveStatusForPage(snapshot.saveTargetSheetId, snapshot.sequence, status);
+    },
+  };
+  const persistDrawing = useCallback((snapshot: PageOwnedDrawing | null) => {
+    if (snapshot) drawingPersistenceRef.current?.persist(snapshot);
+  }, []);
   persistDrawingRef.current = persistDrawing;
 
   // Debounced writes belong to immutable page snapshots, not to a particular
   // render/effect instance. Rebinding subscriptions while scrolling must not
   // discard the final sheet's pending edit. A genuine unmount flushes both
   // queues before their timers are cleared.
-  useEffect(() => () => {
-    const pendingProperty = pendingPropertySaveRef.current;
-    pendingPropertySaveRef.current = null;
-    if (propertySaveTimeoutRef.current) clearTimeout(propertySaveTimeoutRef.current);
-    propertySaveTimeoutRef.current = null;
-    if (pendingProperty) persistDrawingRef.current(pendingProperty);
-    drawingSaveSchedulerRef.current?.flush();
-    if (deferredSaveTimerRef.current) clearTimeout(deferredSaveTimerRef.current);
-    for (const snapshot of deferredPageSavesRef.current.values()) persistDrawingRef.current(snapshot);
-    deferredPageSavesRef.current.clear();
+  useEffect(() => {
+    drawingPersistenceRef.current?.setRetriesEnabled(true);
+    return () => {
+      const pendingProperty = pendingPropertySaveRef.current;
+      pendingPropertySaveRef.current = null;
+      if (propertySaveTimeoutRef.current) clearTimeout(propertySaveTimeoutRef.current);
+      propertySaveTimeoutRef.current = null;
+      if (pendingProperty) persistDrawingRef.current(pendingProperty);
+      drawingSaveSchedulerRef.current?.flush();
+      if (deferredSaveTimerRef.current) clearTimeout(deferredSaveTimerRef.current);
+      for (const snapshot of deferredPageSavesRef.current.values()) persistDrawingRef.current(snapshot);
+      deferredPageSavesRef.current.clear();
+      // Lifecycle boundary: attempt failed snapshots immediately, then stop
+      // scheduling timers so an unmounted renderer cannot retry forever.
+      drawingPersistenceRef.current?.flushFailed();
+      drawingPersistenceRef.current?.setRetriesEnabled(false);
+    };
   }, [notebookEngine]);
 
   // In-Memory Section Data Cache
@@ -1253,7 +1291,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       // notebook per keystroke. Properties, save completion and handoff publish.
       updateSectionDataCache(prev => prev[currentPageId] === pageOwnedSnapshot.data
         ? prev
-        : { ...prev, [currentPageId]: pageOwnedSnapshot.data }, reason !== 'document-text');
+        : { ...prev, [currentPageId]: pageOwnedSnapshot.data }, false);
       drawingSaveSchedulerRef.current?.enqueue(pageOwnedSnapshot);
     };
 
@@ -1267,13 +1305,21 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   useEffect(() => {
     const unsubscribe = notebookEngine.onDrawingGestureLifecycle(active => {
       drawingGestureActiveRef.current = active;
+      setDrawingGestureActive(notebookEngine, active);
       recordHandwritingTraceMarker(active ? 'penDown' : 'penUp');
       drawingSaveSchedulerRef.current?.setGestureActive(active);
+      if (!active && pendingActivationPageIdRef.current) {
+        const deferredTargetId = pendingActivationPageIdRef.current;
+        pendingActivationPageIdRef.current = null;
+        handleActivatePageRef.current(deferredTargetId);
+      }
     });
     return () => {
       unsubscribe();
       drawingGestureActiveRef.current = false;
+      setDrawingGestureActive(notebookEngine, false);
       drawingSaveSchedulerRef.current?.setGestureActive(false);
+      pendingActivationPageIdRef.current = null;
     };
   }, [notebookEngine]);
 
@@ -1311,7 +1357,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   }, [flushOwnedPageDrawing]);
 
   // Handle immediate page activation on pointerdown or click without jumping the view
-  const handleActivatePage = useCallback((targetPageId: string) => {
+  const handleActivatePage = useCallback((targetPageId: string, recordOpen = true) => {
     // Central protection covers scroll observation, active-page synchronization,
     // direct navigation, and late cache/load arrivals. Queue even the current
     // page: returning to A must replace an earlier pending request for B.
@@ -1323,12 +1369,23 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     const activationStartedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
     if (targetPageId === focusedPageIdRef.current && notebookEngine.getDrawingOwnership().pageId === targetPageId) return;
 
+    const activeMemoryData = latestCapturedDrawingRef.current.get(targetPageId)?.data
+      ?? deferredPageSavesRef.current.get(targetPageId)?.data;
+    if (activeMemoryData) {
+      const cached = sectionDataCacheRef.current[targetPageId];
+      if (!cached || (activeMemoryData.objects?.length ?? 0) >= (cached.objects?.length ?? 0)) {
+        sectionDataCacheRef.current[targetPageId] = activeMemoryData;
+      }
+    }
+
     const incomingData = sectionDataCacheRef.current[targetPageId];
     if (!incomingData) {
       // Never install an empty placeholder into the shared engine for a page
       // that may have persisted objects. Mark it active and let the existing
       // section preload fill this page-ID cache gap before transferring focus.
-      setActivePage(targetPageId);
+      // Scroll observation already publishes the passive activation, so only
+      // call the store when it is actually behind (explicit pointer activation).
+      if (useWorkspaceStore.getState().activePageId !== targetPageId) setActivePage(targetPageId, recordOpen);
       return;
     }
 
@@ -1338,12 +1395,13 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     // an uncaptured revision; never trade persistence safety for smooth scroll.
     const outgoingPageId = focusedPageIdRef.current;
     if (outgoingPageId) {
+      updateSectionDataCache(current => current, true);
       notebookEngine.input.flushPendingErasing();
       const owner = notebookEngine.getDrawingOwnership();
       const latest = latestCapturedDrawingRef.current.get(outgoingPageId);
       if (latest && latest.drawingRevision === owner.revision) {
         if (drawingSaveSchedulerRef.current?.peek()?.sheetId === outgoingPageId) drawingSaveSchedulerRef.current.clear();
-        if (latestScheduledDrawingRevisionRef.current.get(outgoingPageId) !== latest.drawingRevision) {
+        if (drawingPersistenceRef.current?.getScheduledSequence(outgoingPageId) !== latest.sequence) {
           deferredPageSavesRef.current.set(outgoingPageId, latest);
           if (deferredSaveTimerRef.current === null) deferredSaveTimerRef.current = setTimeout(() => {
             deferredSaveTimerRef.current = null;
@@ -1372,8 +1430,21 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     if (oldSlot?.getAttribute('data-page-id') === outgoingPageId) {
       const backing = oldSlot.querySelector<HTMLElement>('[data-stable-page-visual]');
       const interaction = oldSlot.querySelector<HTMLElement>('[data-live-page-visual]');
+      if (backing && oldCanvas) {
+        const backingCanvas = backing.querySelector('canvas');
+        if (backingCanvas && backingCanvas.width > 0 && backingCanvas.height > 0) {
+          const backingCtx = backingCanvas.getContext('2d');
+          if (backingCtx) {
+            backingCtx.clearRect(0, 0, backingCanvas.width, backingCanvas.height);
+            backingCtx.drawImage(oldCanvas, 0, 0);
+          }
+        }
+      }
       if (backing) backing.style.visibility = 'visible';
       if (interaction) interaction.style.visibility = 'hidden';
+    }
+    if (outgoingPageId && notebookEngine.getDrawingOwnership().pageId === outgoingPageId) {
+      sectionDataCacheRef.current[outgoingPageId] = notebookEngine.getDrawingData();
     }
     if (outgoingPageId) residentDrawingEnginesRef.current.get(outgoingPageId)?.retainStrokePaths(notebookEngine.drawing);
     notebookEngine.unmount();
@@ -1389,9 +1460,12 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     loadedSceneRevisionRef.current = notebookEngine.getDrawingOwnership().revision;
     focusedPageIdRef.current = targetPageId;
 
-    // 3. Switch focusedPageId & activePageId
+    // 3. Switch focusedPageId & activePageId. Passive scroll has already
+    // published activePageId (with recordOpen=false), so avoid a duplicate
+    // store write that would rerender every store subscriber and repeat the
+    // last-opened IPC update for the same page.
     setFocusedPageId(targetPageId);
-    setActivePage(targetPageId);
+    if (useWorkspaceStore.getState().activePageId !== targetPageId) setActivePage(targetPageId, recordOpen);
     if (activationStartedAt) gate0Profiler.event('page-focus-transfer', performance.now() - activationStartedAt, { targetPageId });
   }, [flushOwnedPageDrawing, notebookEngine, setActivePage, navigationGestures]);
 
@@ -1450,7 +1524,9 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         // Suppresses the scroll-to-page layout effect below, which is only meant to react
         // to sidebar/navigator navigation, not to the user's own scrolling.
         lastNavigatedPageIdRef.current = dominantPage.id;
-        setActivePage(dominantPage.id);
+        // Passive scroll must not repeat the last-opened IPC/database write on
+        // every page boundary. Explicit pointer/sidebar activation still records.
+        setActivePage(dominantPage.id, false);
 
         // Focus has to follow. `focusedPageId` decides which page owns the live engine
         // canvas and the interactive FloatingTextEditor nodes; every other page renders a
@@ -1462,7 +1538,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         // independent: the dominant page is the single source of truth and focus is derived
         // from it.
         // it has no interactive text DOM at all.
-        handleActivatePageRef.current(dominantPage.id);
+        handleActivatePageRef.current(dominantPage.id, false);
       }
       if (scrollStartedAt) gate0Profiler.event('notebook-scroll-handler', performance.now() - scrollStartedAt, {
         pages: currentSectionPages.length,
@@ -1470,7 +1546,37 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       });
     };
 
+    let savePositionTimeout: ReturnType<typeof setTimeout> | null = null;
+    const persistPositionDebounced = () => {
+      if (savePositionTimeout !== null) clearTimeout(savePositionTimeout);
+      savePositionTimeout = setTimeout(() => {
+        savePositionTimeout = null;
+        if (notebook?.id && currentActivePageIdRef.current) {
+          saveNotebookPosition(notebook.id, {
+            pageId: currentActivePageIdRef.current,
+            scrollX: container.scrollLeft,
+            scrollY: container.scrollTop,
+          });
+        }
+      }, 250);
+    };
+
+    const flushPendingPosition = () => {
+      if (savePositionTimeout !== null) {
+        clearTimeout(savePositionTimeout);
+        savePositionTimeout = null;
+        if (notebook?.id && currentActivePageIdRef.current) {
+          saveNotebookPosition(notebook.id, {
+            pageId: currentActivePageIdRef.current,
+            scrollX: container.scrollLeft,
+            scrollY: container.scrollTop,
+          });
+        }
+      }
+    };
+
     const onScroll = () => {
+      persistPositionDebounced();
       if (scrollRafId !== null) return;
       scrollRafId = requestAnimationFrame(() => {
         scrollRafId = null;
@@ -1481,6 +1587,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       if (scrollRafId !== null) cancelAnimationFrame(scrollRafId);
       scrollRafId = null;
       observeScroll();
+      flushPendingPosition();
     };
     flushNavigationScrollRef.current = flushScroll;
 
@@ -1492,6 +1599,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       if (scrollRafId !== null) {
         cancelAnimationFrame(scrollRafId);
       }
+      flushPendingPosition();
     };
   }, [currentSectionPages, setActivePage, layoutConfig.positions, viewport.scale, containerSize.height, notebookEngine]);
 
@@ -1500,9 +1608,21 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     if (!sectionAppearanceReady) return;
     if (!activePageId || activePageId === lastNavigatedPageIdRef.current) return;
 
+    if (drawingGestureActiveRef.current) {
+      pendingActivationPageIdRef.current = activePageId;
+      return;
+    }
+
     handleActivatePage(activePageId);
 
+    const isDrawingActive = drawingGestureActiveRef.current || isDrawingRecentlyActive(2000);
+
     const scrollToTarget = () => {
+      if (isDrawingActive) {
+        lastNavigatedPageIdRef.current = activePageId;
+        return true;
+      }
+
       const pageElem = document.getElementById(`page-${activePageId}`);
       const container = containerRef.current;
       if (!container) return false;
@@ -1511,7 +1631,34 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         const containerRect = container.getBoundingClientRect();
         const pageRect = pageElem.getBoundingClientRect();
         const relativeTop = pageRect.top - containerRect.top;
+        const relativeBottom = pageRect.bottom - containerRect.top;
+
+        // If the page element is already fully or comfortably visible in the viewport,
+        // avoid instant scroll snap so we don't jump 400px and push lines off-screen.
+        const isComfortablyVisible = relativeTop >= -24 && relativeBottom <= containerRect.height + 60;
         const pageOutsideHorizontalViewport = pageRect.left < containerRect.left || pageRect.right > containerRect.right;
+
+        if (isComfortablyVisible && !pageOutsideHorizontalViewport) {
+          lastNavigatedPageIdRef.current = activePageId;
+          return true;
+        }
+
+        const savedPosition = notebook?.id && initialRestoredNotebookRef.current !== notebook.id
+          ? getNotebookPosition(notebook.id)
+          : null;
+        if (savedPosition && savedPosition.pageId === activePageId) {
+          initialRestoredNotebookRef.current = notebook?.id ?? null;
+          const targetScrollLeft = typeof savedPosition.scrollX === 'number' ? savedPosition.scrollX : container.scrollLeft;
+          const targetScrollTop = typeof savedPosition.scrollY === 'number' ? savedPosition.scrollY : (container.scrollTop + relativeTop - 24);
+          isNavigatingRef.current = true;
+          container.scrollTo({ left: targetScrollLeft, top: Math.max(0, targetScrollTop), behavior: 'instant' });
+          lastNavigatedPageIdRef.current = activePageId;
+          setTimeout(() => {
+            isNavigatingRef.current = false;
+          }, 150);
+          return true;
+        }
+
         const targetScrollLeft = pageOutsideHorizontalViewport
           ? Math.max(0, container.scrollLeft + pageRect.left - containerRect.left - (container.clientWidth - pageRect.width) / 2)
           : container.scrollLeft;
@@ -1758,8 +1905,40 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     if (!content || !content.content || content.content.length === 0) return;
     const targetPageId = focusedPageId || activePageId;
     if (!targetPageId) return;
-    if (notebookEngine.getProperties().layoutMode === 'document') {
-      const body = notebookEngine.texts.getTexts().find(text => text.metadata?.documentRole === 'body');
+
+    const currentProperties = notebookEngine.getProperties();
+    const existingTexts = notebookEngine.texts.getTexts();
+    const existingNonAudioTexts = existingTexts.filter(text => !text.metadata?.audioNoteId);
+    const contentStr = JSON.stringify(content);
+    const isMultiBlock = Array.isArray(content.content) && (
+      content.content.length > 1 ||
+      content.content.some((b: any) => b.type === 'heading' || b.type === 'bulletList' || b.type === 'orderedList' || b.type === 'codeBlock') ||
+      contentStr.length > 300
+    );
+
+    if (currentProperties.layoutMode === 'document') {
+      let body = existingTexts.find(text => text.metadata?.documentRole === 'body');
+      if (!body) {
+        body = {
+          id: generateId('document'),
+          type: 'text',
+          x: 0,
+          y: 0,
+          width: 0,
+          height: 0,
+          content,
+          createdAt: Date.now(),
+          metadata: { documentRole: 'body', richTextSchemaVersion: 3 },
+        };
+        notebookEngine.texts.addText(body);
+        setTextObjects([...notebookEngine.texts.getTexts()]);
+        notebookEngine.texts.setDocumentBodyId(body.id);
+        notebookEngine.tools.setMode('text');
+        if (workspace && notebook && targetPageId) {
+          persistDrawing(captureEngineOwnedDrawing(notebookEngine, notebook?.id, targetPageId));
+        }
+        return;
+      }
       const editor = body && notebookEngine.texts.getEditor(body.id);
       if (editor && !editor.isDestroyed && editor.view.dom.dataset.protectedContent !== 'true' && notebookEngine.layers.isEditable(body.layerId)) {
         notebookEngine.tools.setMode('text');
@@ -1767,12 +1946,40 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         editor.chain().focus().pasteDocumentationContent(content).run();
         return;
       }
-      useUIStore.getState().showToast('The document body is not ready for editing.', 'error');
+      notebookEngine.texts.updateTextContent(body.id, content);
+      notebookEngine.input.notifyChange('document-text');
+      notebookEngine.tools.setMode('text');
+      if (workspace && notebook && targetPageId) {
+        persistDrawing(captureEngineOwnedDrawing(notebookEngine, notebook?.id, targetPageId));
+      }
+      return;
+    }
+
+    // Auto-promote to document flow on fixed-size pages (A4, A3, etc.) when pasting onto a fresh page or multi-block document
+    if ((existingNonAudioTexts.length === 0 || isMultiBlock) && currentProperties.pageSize !== 'Infinite') {
+      const newBody: TextObject = {
+        id: generateId('document'),
+        type: 'text',
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+        content,
+        createdAt: Date.now(),
+        metadata: { documentRole: 'body', richTextSchemaVersion: 3 },
+      };
+      notebookEngine.texts.addText(newBody);
+      setTextObjects([...notebookEngine.texts.getTexts()]);
+      notebookEngine.texts.setDocumentBodyId(newBody.id);
+      handlePagePropertiesUpdate({ layoutMode: 'document' });
+      notebookEngine.tools.setMode('text');
+      if (workspace && notebook && targetPageId) {
+        persistDrawing(captureEngineOwnedDrawing(notebookEngine, notebook?.id, targetPageId));
+      }
       return;
     }
 
     // Check if content has codeBlock or large elements to size appropriately
-    const contentStr = JSON.stringify(content);
     const hasCodeBlock = contentStr.includes('"type":"codeBlock"');
     const hasHeading = contentStr.includes('"type":"heading"');
     const boxWidth = hasCodeBlock ? 520 : (hasHeading ? 420 : 360);
@@ -1820,7 +2027,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     if (workspace && notebook && targetPageId) {
       persistDrawing(captureEngineOwnedDrawing(notebookEngine, notebook?.id, targetPageId));
     }
-  }, [focusedPageId, activePageId, getSensiblePastePosition, notebookEngine, workspace, notebook]);
+  }, [focusedPageId, activePageId, getSensiblePastePosition, notebookEngine, workspace, notebook, handlePagePropertiesUpdate]);
 
   // Import text as editable TextObject (plain text fallback)
   const importText = useCallback((rawText: string, customX?: number, customY?: number, pastePresentation?: 'sticky-note') => {
@@ -1898,10 +2105,27 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
 
   // Unified clipboard paste handler (strictly obeys live OS clipboard precedence)
   const pasteIntoDocument = useCallback((html: string, text: string, original?: DataTransfer): boolean => {
-    if (notebookEngine.getProperties().layoutMode !== 'document') return false;
     const owner = notebookEngine.getDrawingOwnership().pageId;
-    const body = notebookEngine.texts.getTexts().find(object => object.metadata?.documentRole === 'body');
-    if (!owner || !body) { useUIStore.getState().showToast('Choose Document in the writing mode control before pasting.', 'info'); return true; }
+    if (!owner) return false;
+    const currentProps = notebookEngine.getProperties();
+    if (currentProps.layoutMode !== 'document') return false;
+    let body = notebookEngine.texts.getTexts().find(object => object.metadata?.documentRole === 'body');
+    if (!body) {
+      body = {
+        id: generateId('document'),
+        type: 'text',
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+        content: { type: 'doc', content: [{ type: 'paragraph' }] },
+        createdAt: Date.now(),
+        metadata: { documentRole: 'body', richTextSchemaVersion: 3 },
+      };
+      notebookEngine.texts.addText(body);
+      setTextObjects([...notebookEngine.texts.getTexts()]);
+      notebookEngine.texts.setDocumentBodyId(body.id);
+    }
     // Native clipboard data is readable during its event. Copy every textual
     // format before replaying it after the Text tool becomes editable.
     const clipboard = new DataTransfer();
@@ -2497,12 +2721,24 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     return () => notebookEngine.selection.setVoiceDeleteHandler(undefined);
   }, [notebookEngine, handleDeleteVoiceNote]);
 
-  const handleInsertPage = useCallback(() => {
+  const handleInsertPage = useCallback(async () => {
     const sectionId = page?.sectionId ?? activeNotebookSectionId;
     if (!sectionId) return;
 
-    useUIStore.getState().openCreateDialog('page', sectionId, 'section', 'document', activePageId);
-  }, [activePageId, activeNotebookSectionId, page?.sectionId]);
+    const layoutMode = pageProperties.layoutMode ?? 'document';
+    await useWorkspaceStore.getState().createNotebookPage(sectionId, '', {
+      layoutMode,
+      pageSize: pageProperties.pageSize,
+      orientation: pageProperties.orientation,
+      paperColor: pageProperties.paperColor,
+      template: pageProperties.template,
+      ruleLineColor: pageProperties.ruleLineColor,
+      margins: pageProperties.margins,
+      infiniteWidth: pageProperties.infiniteWidth,
+      titleProvenance: 'default',
+      insertAfterPageId: activePageId ?? undefined,
+    });
+  }, [activePageId, activeNotebookSectionId, page?.sectionId, pageProperties]);
 
   const handleExportPagePdf = useCallback(async () => {
     if (!page || !notebook) return;
@@ -2649,7 +2885,10 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         ref={containerRef}
         tabIndex={0}
         aria-label="Notebook pages"
-        style={hasTouchInput ? { touchAction: 'pan-x pan-y' } : undefined}
+        style={{
+          ...(hasTouchInput ? { touchAction: 'pan-x pan-y' } : {}),
+          ...(containerToolCursor ? { cursor: containerToolCursor } : {}),
+        }}
         className={`panvas-notebook-viewport notebook-viewport relative flex-1 min-w-0 min-h-0 overflow-auto bg-panvas-bg-secondary ${
           toolState.mode === 'hand' ? 'cursor-grab active:cursor-grabbing' : ''
         }`}
@@ -2657,13 +2896,20 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         onDragOver={handleDragOver}
         onDragEnter={handleDragOver}
         onContextMenu={workspaceViewMode === 'edit' ? handleContextMenu : event => event.preventDefault()}
-        onPointerDown={() => {
+        onPointerDown={e => {
+          if (e.pointerType === 'touch') setIsTouchDevice(true);
+          else setIsTouchDevice(false);
           containerRef.current?.focus({ preventScroll: true });
           if (contextMenu.isOpen) {
             setContextMenu(prev => ({ ...prev, isOpen: false }));
           }
         }}
+        onPointerMove={e => {
+          if (e.pointerType === 'touch' && !isTouchDevice) setIsTouchDevice(true);
+          else if (e.pointerType !== 'touch' && isTouchDevice) setIsTouchDevice(false);
+        }}
       >
+        <DocumentToolCursorOverlay toolState={toolState} containerRef={containerRef} />
         {!sectionAppearanceReady ? (
           <div className="flex min-h-full w-full items-center justify-center text-xs text-panvas-text-secondary" role="status">
             Preparing notebook appearance…
@@ -2695,8 +2941,18 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
                 pos.id,
                 focusedPageId,
                 sectionDataCacheRef.current,
-                undefined,
+                notebookEngine.getDrawingOwnership().pageId === pos.id ? (latestCapturedDrawingRef.current.get(pos.id)?.data ?? sectionDataCacheRef.current[pos.id]) : undefined,
                 notebookEngine.getDrawingOwnership().pageId ?? '',
+              );
+
+              const isResident = residentIds.has(pos.id) || isFocused;
+              const isFarOffscreen = isPageFarOffscreen(
+                pos.y,
+                viewport.scale,
+                containerRef.current?.scrollTop ?? 0,
+                containerSize.height,
+                isResident,
+                3,
               );
 
               return (
@@ -2714,7 +2970,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
                     height: pos.height 
                   }}
                 >
-                  {residentIds.has(pos.id) || isFocused ? (
+                  {isResident ? (
                     <NotebookPageView
                       key={pos.id}
                       page={pageItem}
@@ -2742,10 +2998,19 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
                       onVoiceNoteRename={(note, title) => void handleRenameVoiceNote(note, title)}
                       onUpdateProperties={handlePagePropertiesUpdate}
                     />
+                  ) : isFarOffscreen ? (
+                    <div
+                      id={`page-${pos.id}`}
+                      data-page-id={pos.id}
+                      className="relative shadow-md rounded border border-panvas-border/20 bg-panvas-bg-card/30 flex items-center justify-center text-xs text-panvas-text-tertiary select-none"
+                      style={{ width: `${pos.width}px`, height: `${pos.height}px` }}
+                    >
+                      <span className="font-mono opacity-50">{pageNumText}</span>
+                    </div>
                   ) : (
                     <PageRenderer id={pos.id} width={pos.width} height={pos.height}
                       properties={resolvedSectionProperties.get(pos.id)!} pageNumberText={pageNumText}>
-                      <div role="status" className="absolute inset-0 flex items-center justify-center text-xs opacity-60">Loading page?</div>
+                      <div role="status" className="absolute inset-0 flex items-center justify-center text-xs opacity-60">Loading page…</div>
                     </PageRenderer>
                   )}
                   {isFocused && workspaceViewMode === 'edit' && !isMobileViewport && (

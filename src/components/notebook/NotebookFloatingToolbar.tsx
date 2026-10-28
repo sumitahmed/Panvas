@@ -163,6 +163,12 @@ interface EraserSettings {
 }
 const DEFAULT_ERASER_SETTINGS: EraserSettings = { thickness: 10, mode: 'pixel' };
 
+export interface LaserSettings {
+  duration: number;
+  connectSeparateStrokes: boolean;
+}
+const DEFAULT_LASER_SETTINGS: LaserSettings = { duration: 3000, connectSeparateStrokes: true };
+
 interface NotebookFloatingToolbarProps {
   editor: Editor | null;
   engine: NotebookEngine;
@@ -208,6 +214,7 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
     highlighter: [...QUICK_COLOR_PRESETS.highlighter],
   }));
   const [eraserSettings, setEraserSettings] = useState<EraserSettings>(() => ({ ...DEFAULT_ERASER_SETTINGS }));
+  const [laserSettings, setLaserSettings] = useState<LaserSettings>(() => ({ ...DEFAULT_LASER_SETTINGS }));
   const [handwritingSettings, setHandwritingSettings] = useState<HandwritingToolPreferences>(() => ({ ...DEFAULT_HANDWRITING_TOOL_PREFERENCES }));
   const [scribbleToErase, setScribbleToErase] = useState(false);
   const [circleToSelect, setCircleToSelect] = useState(false);
@@ -302,6 +309,18 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
           mode: savedMode,
         });
       }
+      if (raw?.laserSettings && typeof raw.laserSettings === 'object') {
+        const savedDuration = typeof raw.laserSettings.duration === 'number' && Number.isFinite(raw.laserSettings.duration)
+          ? Math.max(500, Math.min(10000, raw.laserSettings.duration))
+          : DEFAULT_LASER_SETTINGS.duration;
+        const savedConnect = raw.laserSettings.connectSeparateStrokes !== false;
+        setLaserSettings({
+          duration: savedDuration,
+          connectSeparateStrokes: savedConnect,
+        });
+        engine.laser.setDecayMs(savedDuration);
+        engine.laser.setConnectSeparateStrokes(savedConnect);
+      }
       if (raw?.recentToolColors && typeof raw.recentToolColors === 'object') {
         setRecentToolColors(previous => {
           const next = { ...previous };
@@ -352,6 +371,7 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
         toolSettings,
         recentToolColors,
         eraserSettings,
+        laserSettings,
         handwritingSettings,
         gestureSettings: {
           scribbleToErase,
@@ -367,7 +387,12 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
       else localStorage.setItem(`panvas.${workspaceId}.toolbar.presets.v1`, JSON.stringify(value));
     }, 300);
     return () => clearTimeout(timeout);
-  }, [circleToSelect, eraserSettings, handwritingSettings, recentToolColors, roughShapeRecognition, scribbleToErase, snapRecognizedLines, snapRecognizedShapes, straightLineRecognition, toolSettings, toolState.rulerEnabled, workspaceId]);
+  }, [circleToSelect, eraserSettings, handwritingSettings, laserSettings, recentToolColors, roughShapeRecognition, scribbleToErase, snapRecognizedLines, snapRecognizedShapes, straightLineRecognition, toolSettings, toolState.rulerEnabled, workspaceId]);
+
+  useEffect(() => {
+    engine.laser.setDecayMs(laserSettings.duration);
+    engine.laser.setConnectSeparateStrokes(laserSettings.connectSeparateStrokes);
+  }, [engine, laserSettings]);
 
   useEffect(() => {
     engine.handwriting.setPreferences(handwritingSettings);
@@ -417,21 +442,12 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
       editor.commands.blur();
     }
 
-    if (isConfigurableDrawingTool(toolId)) {
+    if (isConfigurableDrawingTool(toolId) || toolId === 'eraser' || toolId === 'laser' || isShapeTool(toolId)) {
       setShowHandwritingPalette(false);
       if (activeTool === toolId) {
         setShowPopup(prev => !prev);
       } else {
-        setShowPopup(true);
-      }
-    } else if (toolId === 'handwriting-to-text') {
-      setShowPopup(false);
-    } else if (toolId === 'eraser' || isShapeTool(toolId)) {
-      setShowHandwritingPalette(false);
-      if (activeTool === toolId) {
-        setShowPopup(prev => !prev);
-      } else {
-        setShowPopup(true);
+        setShowPopup(prev => prev);
       }
     } else {
       setShowPopup(false);
@@ -768,7 +784,7 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
     {
       id: 'laser',
       items: [
-        <ToolButton key="laser" icon={<ToolGlyph tool="laser" color="#ef4444" />} active={activeTool === 'laser'} onClick={() => handleToolClick('laser')} tooltip="Laser Pointer" />
+        <ToolButton key="laser" icon={<ToolGlyph tool="laser" color="#ef4444" />} active={activeTool === 'laser'} onClick={() => handleToolClick('laser')} tooltip="Laser Pointer" hasPopup />
       ]
     },
     {
@@ -929,7 +945,10 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
           lineStyle={toolState.lineStyle ?? 'solid'}
           onLineStyle={style => { engine.tools.setLineStyle(style); engine.selection.changeLineStyle(style); }}
           fillEnabled={toolState.shapeFillEnabled}
-          onShape={shape => handleToolClick(shape)}
+          onShape={shape => {
+            engine.tools.setShapeTool(shape);
+            setShowPopup(true);
+          }}
           onColor={value => {
             engine.tools.setColor(value);
             engine.selection.changeColor(value);
@@ -942,6 +961,21 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
             engine.selection.changeShapeFill(enabled ? toolState.color : null);
           }}
           onRotate={degrees => engine.selection.rotateSelection(degrees)}
+          onClose={() => setShowPopup(false)}
+        />
+      </OverlayManager>
+
+      <OverlayManager
+        isOpen={showPopup && activeTool === 'laser'}
+        onClose={() => setShowPopup(false)}
+        anchorRef={toolbarRef}
+        placement="bottom-start"
+      >
+        <LaserPopup
+          settings={laserSettings}
+          onUpdate={(key, val) => {
+            setLaserSettings(prev => ({ ...prev, [key]: val }));
+          }}
           onClose={() => setShowPopup(false)}
         />
       </OverlayManager>
@@ -962,9 +996,9 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
               <ToolButton
                 icon={<ToolGlyph tool={activeTool} color={getActiveToolColor(activeTool, toolSettings)} />}
                 active
-                hasPopup={isConfigurableDrawingTool(activeTool) || activeTool === 'eraser'}
+                hasPopup={isConfigurableDrawingTool(activeTool) || activeTool === 'eraser' || activeTool === 'laser'}
                 onClick={() => {
-                  if (isConfigurableDrawingTool(activeTool) || activeTool === 'eraser') {
+                  if (isConfigurableDrawingTool(activeTool) || activeTool === 'eraser' || activeTool === 'laser') {
                     handleToolClick(activeTool);
                   } else {
                     setShowOverflow(true);
@@ -1797,6 +1831,107 @@ function GestureSettingsPopup({
 
 function GestureToggle({ icon, label, enabled, disabled = false, onChange }: { icon: React.ReactNode; label: string; enabled: boolean; disabled?: boolean; onChange: (enabled: boolean) => void }) {
   return <button type="button" role="switch" aria-label={label} aria-checked={enabled} disabled={disabled} onClick={() => onChange(!enabled)} className="flex w-full items-center justify-between rounded-xl border border-panvas-border-subtle bg-panvas-bg-secondary px-3 py-2.5 text-left text-xs text-panvas-text-primary transition-colors hover:bg-panvas-bg-hover disabled:cursor-not-allowed disabled:opacity-50 focus-ring"><span className="flex items-center gap-2.5 font-medium"><span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg border border-panvas-border-subtle bg-panvas-bg-primary text-panvas-text-secondary">{icon}</span>{label}</span><span className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${enabled ? 'bg-panvas-accent-blue' : 'bg-panvas-border-default'}`}><span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${enabled ? 'translate-x-4' : 'translate-x-0.5'}`} /></span></button>;
+}
+
+function LaserPopup({ settings, onUpdate, onClose }: {
+  settings: LaserSettings;
+  onUpdate: <K extends keyof LaserSettings>(key: K, value: LaserSettings[K]) => void;
+  onClose: () => void;
+}) {
+  const PRESETS = [
+    { label: '1s', value: 1000 },
+    { label: '3s', value: 3000 },
+    { label: '5s', value: 5000 },
+    { label: '10s', value: 10000 },
+  ];
+
+  return (
+    <div
+      role="dialog"
+      aria-label="Laser Pointer Settings"
+      className="w-[280px] rounded-2xl bg-panvas-bg-primary border border-panvas-border-strong shadow-2xl backdrop-blur-xl overflow-hidden text-panvas-text-primary"
+    >
+      <div className="flex items-center justify-between px-4 py-3 border-b border-panvas-border-subtle bg-panvas-bg-secondary/50">
+        <div className="flex items-center gap-2">
+          <span className="grid h-7 w-7 place-items-center rounded-lg border border-panvas-border-subtle bg-panvas-bg-primary text-[#ef4444]">
+            <Crosshair size={15} />
+          </span>
+          <span className="text-sm font-semibold">Laser Pointer</span>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="text-panvas-text-secondary hover:text-panvas-text-primary transition-colors focus-ring"
+          aria-label="Close Laser Pointer settings"
+          title="Close Laser Pointer settings"
+        >
+          <X size={14} />
+        </button>
+      </div>
+
+      <div className="p-4 space-y-4">
+        {/* Duration slider */}
+        <div>
+          <div className="flex justify-between items-center text-xs mb-1.5">
+            <span className="text-panvas-text-secondary font-medium">Trail Duration</span>
+            <span className="text-panvas-accent-blue font-semibold">
+              {(settings.duration / 1000).toFixed(1)}s
+            </span>
+          </div>
+          <input
+            type="range"
+            min="500"
+            max="10000"
+            step="100"
+            value={settings.duration}
+            onChange={e => onUpdate('duration', parseInt(e.target.value, 10))}
+            className="w-full h-1.5 rounded-full bg-panvas-border-default appearance-none cursor-pointer accent-panvas-accent-blue"
+            aria-label="Laser trail duration"
+          />
+          {/* Quick preset chips */}
+          <div className="mt-2 grid grid-cols-4 gap-1.5" role="group" aria-label="Duration presets">
+            {PRESETS.map(preset => (
+              <button
+                key={preset.value}
+                type="button"
+                onClick={() => onUpdate('duration', preset.value)}
+                className={`rounded-lg border px-2 py-1 text-center text-xs transition-colors focus-ring ${
+                  settings.duration === preset.value
+                    ? 'border-panvas-accent-blue bg-panvas-accent-blue/10 text-panvas-accent-blue font-semibold'
+                    : 'border-panvas-border-subtle bg-panvas-bg-secondary text-panvas-text-secondary hover:bg-panvas-bg-hover hover:text-panvas-text-primary'
+                }`}
+                aria-pressed={settings.duration === preset.value}
+              >
+                {preset.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Connect separate strokes toggle */}
+        <div>
+          <button
+            type="button"
+            role="switch"
+            aria-label="Connect separate strokes"
+            aria-checked={settings.connectSeparateStrokes}
+            onClick={() => onUpdate('connectSeparateStrokes', !settings.connectSeparateStrokes)}
+            className="flex w-full items-center justify-between rounded-xl border border-panvas-border-subtle bg-panvas-bg-secondary px-3 py-2.5 text-left text-xs text-panvas-text-primary transition-colors hover:bg-panvas-bg-hover focus-ring"
+          >
+            <div>
+              <div className="font-medium">Connect separate strokes</div>
+              <div className="text-2xs text-panvas-text-tertiary">
+                {settings.connectSeparateStrokes ? 'Continuous trail across gestures' : 'Segmented independent strokes'}
+              </div>
+            </div>
+            <span className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${settings.connectSeparateStrokes ? 'bg-panvas-accent-blue' : 'bg-panvas-border-default'}`}>
+              <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${settings.connectSeparateStrokes ? 'translate-x-4' : 'translate-x-0.5'}`} />
+            </span>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function EraserPopup({ settings, onUpdate, onClose }: {

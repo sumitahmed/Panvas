@@ -2,6 +2,15 @@
 
 All notable Panvas changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.1.10] - 2026-10-28
+
+- Fixed text formatting and styling on Date and Mood template placeholder fields, supporting bold, italic, font styling, color, and undo/redo.
+- Added persistent page bookmarks for notebook pages and PDF documents, with navigation indicators in the sidebar and thumbnail views.
+- Added laser pointer duration (500ms–10,000ms) and inter-stroke trail connectivity controls.
+- Restored authentic tool cursor designs (pen, pencil, highlighter, marker, eraser) for stylus/pen input with immediate tracking.
+- Optimized multi-element selection transforms (translation, scaling, rotation) for smooth frame rendering on large stroke sets.
+- Improved middle-mouse auto-scroll directional feedback and responsiveness.
+
 ## [0.1.9] - 2026-10-17
 
 - Fixed drawing and laser-pointer lag on populated notebook pages.

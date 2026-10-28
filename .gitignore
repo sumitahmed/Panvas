@@ -11,7 +11,8 @@ build/*
 !build/icon.ico
 release/
 tsconfig.tsbuildinfo
-Landingpage.png
+*.tsbuildinfo
+/Landingpage.png
 
 # Environment and local integration configuration
 .env
@@ -42,6 +43,9 @@ coverage/
 Thumbs.db
 *.log
 npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
 # Scratch and temporary work
 scratch/
@@ -102,9 +106,12 @@ media-master/
 /test-results/
 /.cache/
 /.vite/
+/.vite-temp/
 /.eslintcache
 *.exe
 *.exe.blockmap
+*.msi
+*.appx
 *.dmp
 *.pid
 *.tmp

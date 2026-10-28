@@ -88,6 +88,7 @@ export interface NotebookPage {
   notebookId: string;
   sectionId: string;
   title: string;
+  titleProvenance?: 'default' | 'custom';
   createdAt: number;
   updatedAt: number;
   lastOpenedAt?: number;

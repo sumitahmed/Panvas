@@ -18,12 +18,23 @@ import { purgeEligibleRoots } from '@/services/cloudsync/trash';
 import type { SyncEntityKind } from '@/services/cloudsync/types';
 import type { PanvasBootstrapSnapshot } from '@/types/bootstrap';
 import { getNextGeneratedPageTitle, isGeneratedPagePlaceholder } from '@/lib/notebookPageNaming';
+import { computeSectionRenumbering } from '@/lib/notebookPageRenumbering';
+import { cancelQueuedPageDrawing } from '@/components/notebook/drawingPersistenceQueue';
 import { derivePagePropertyOverrides, getNotebookPageDefaults } from '@/lib/pageProperties';
 import { generateId } from '@/lib/utils/id';
+import { getNotebookPosition } from '@/lib/readingPosition';
 
 export interface NewDocumentPageOptions {
-  layoutMode: 'document' | 'freeform';
-  pageSize: Exclude<PagePropertySet['pageSize'], 'Custom'>;
+  layoutMode?: 'document' | 'freeform';
+  pageSize?: PagePropertySet['pageSize'];
+  orientation?: 'portrait' | 'landscape';
+  paperColor?: string;
+  template?: PageTemplate;
+  ruleLineColor?: string;
+  margins?: PagePropertySet['margins'];
+  infiniteWidth?: number;
+  titleProvenance?: 'default' | 'custom';
+  insertAfterPageId?: string;
 }
 
 const ACTIVE_WORKSPACE_KEY = 'panvas.activeWorkspaceId';
@@ -463,7 +474,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       .filter(page => page.notebookId === id && !page.deletedAt)
       .sort((left, right) => left.order - right.order);
     if (pages.length > 0) {
-      await get().setActivePage(pages[0].id);
+      const saved = getNotebookPosition(id);
+      const targetPage = (saved && pages.find(p => p.id === saved.pageId)) || pages[0];
+      await get().setActivePage(targetPage.id);
     } else {
       const now = Date.now();
       await notebookRepository.updateLastOpened(wsId, id, now);
@@ -473,19 +486,32 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   setActiveNotebookSection: async (id: string | null) => {
     if (!id) {
-      set({ activeNotebookSectionId: null });
+      set({ activeNotebookSectionId: null, activePageId: null });
+      writeStoredId(ACTIVE_PAGE_KEY, null);
       return;
     }
     const section = get().notebookSections.find(item => item.id === id);
     const notebook = section ? get().notebooks.find(item => item.id === section.notebookId) : undefined;
     if (!section || !notebook) return;
-    set({ activeNotebookSectionId: id, activeNotebookId: section.notebookId, activeWorkspaceId: notebook.workspaceId });
-    writeStoredId(ACTIVE_WORKSPACE_KEY, notebook.workspaceId);
+
     const pages = get().notebookPages
       .filter(page => page.sectionId === id && !page.deletedAt)
       .sort((left, right) => left.order - right.order);
-    if (pages.length > 0) {
-      await get().setActivePage(pages[0].id);
+    const targetPage = pages[0] ?? null;
+
+    set({
+      activeNotebookSectionId: id,
+      activeNotebookId: section.notebookId,
+      activeWorkspaceId: notebook.workspaceId,
+      activePageId: targetPage?.id ?? null,
+      activeCanvasId: null,
+    });
+    writeStoredId(ACTIVE_PAGE_KEY, targetPage?.id ?? null);
+    writeStoredId(ACTIVE_CANVAS_KEY, null);
+    writeStoredId(ACTIVE_WORKSPACE_KEY, notebook.workspaceId);
+
+    if (targetPage) {
+      await get().setActivePage(targetPage.id);
     } else {
       const now = Date.now();
       await notebookRepository.updateLastOpened(notebook.workspaceId, notebook.id, now);
@@ -924,11 +950,24 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     // initialize the canonical drawing payload before exposing the notebook.
     const section = await notebookRepository.createSection(userId, workspaceId, notebook.id, 'Section 1');
     const page = await notebookRepository.createPage(userId, workspaceId, notebook.id, section.id, 'Page 1');
+    const initialDrawingData = createDefaultDrawingData(defaults);
+    initialDrawingData.properties.layoutMode = 'document';
+    initialDrawingData.objects!.push({
+      id: generateId('document'),
+      type: 'text',
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 0,
+      content: { type: 'doc', content: [{ type: 'paragraph' }] },
+      createdAt: Date.now(),
+      metadata: { documentRole: 'body', richTextSchemaVersion: 3 },
+    });
     await notebookRepository.saveDrawingData(
       workspaceId,
       notebook.id,
       page.id,
-      createDefaultDrawingData(defaults),
+      initialDrawingData,
     );
     await get().loadWorkspaceContents(workspaceId);
     get().setActivePage(page.id);
@@ -951,19 +990,68 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const userId = useAuthStore.getState().user?.id ?? null;
     const workspaceId = get().activeWorkspaceId;
     if (!workspaceId) throw new Error('No active workspace');
-    const sectionPages = get().notebookPages.filter(page => page.sectionId === sectionId && !page.deletedAt);
-    const pageTitle = isGeneratedPagePlaceholder(title)
-      ? getNextGeneratedPageTitle(sectionPages)
-      : title.trim();
-    const page = await notebookRepository.createPage(userId, workspaceId, section.notebookId, sectionId, pageTitle);
+    const sectionPages = get().notebookPages
+      .filter(page => page.sectionId === sectionId && !page.deletedAt)
+      .sort((a, b) => a.order - b.order);
+
+    const isPlaceholder = isGeneratedPagePlaceholder(title);
+    let finalTitle = title.trim();
+    let provenance: 'default' | 'custom' = options?.titleProvenance ?? (isPlaceholder ? 'default' : 'custom');
+
+    if (isPlaceholder) {
+      let insertIndex = sectionPages.length;
+      if (options?.insertAfterPageId) {
+        const afterIdx = sectionPages.findIndex(p => p.id === options.insertAfterPageId);
+        if (afterIdx !== -1) {
+          insertIndex = afterIdx + 1;
+        }
+      }
+      finalTitle = `Page ${insertIndex + 1}`;
+      provenance = 'default';
+    }
+
+    const page = await notebookRepository.createPage(
+      userId,
+      workspaceId,
+      section.notebookId,
+      sectionId,
+      finalTitle,
+      'default',
+      undefined,
+      provenance,
+    );
+    page.titleProvenance = provenance;
     
     // Immediately initialize with canonical default settings to avoid black/missing page contents
     const owningNotebook = get().notebooks.find(item => item.id === section.notebookId);
     const defaults = getNotebookPageDefaults(owningNotebook);
     const defaultData = createDefaultDrawingData(defaults);
+    const layoutMode = options?.layoutMode ?? 'document';
+    defaultData.properties.layoutMode = layoutMode;
+    if (layoutMode === 'document') {
+      defaultData.objects!.push({
+        id: generateId('document'),
+        type: 'text',
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+        content: { type: 'doc', content: [{ type: 'paragraph' }] },
+        createdAt: Date.now(),
+        metadata: { documentRole: 'body', richTextSchemaVersion: 3 },
+      });
+    }
     if (options) {
-      defaultData.properties = { ...defaultData.properties, layoutMode: options.layoutMode, pageSize: options.pageSize, orientation: 'portrait' };
-      if (options.pageSize === 'Infinite') defaultData.properties.infiniteWidth = 794;
+      if (options.layoutMode) defaultData.properties.layoutMode = options.layoutMode;
+      if (options.pageSize) defaultData.properties.pageSize = options.pageSize;
+      if (options.orientation) defaultData.properties.orientation = options.orientation;
+      if (options.paperColor) defaultData.properties.paperColor = options.paperColor;
+      if (options.template) defaultData.properties.template = options.template;
+      if (options.ruleLineColor) defaultData.properties.ruleLineColor = options.ruleLineColor;
+      if (options.margins) defaultData.properties.margins = options.margins;
+      if (options.infiniteWidth !== undefined) defaultData.properties.infiniteWidth = options.infiniteWidth;
+      else if (options.pageSize === 'Infinite') defaultData.properties.infiniteWidth = 794;
+
       if (options.layoutMode === 'document') defaultData.objects!.push({
         id: generateId('document'), type: 'text', x: 0, y: 0, width: 0, height: 0,
         content: { type: 'doc', content: [{ type: 'paragraph' }] }, createdAt: Date.now(),
@@ -974,7 +1062,39 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       page.pagePropertyOverrides = overrides;
     }
     await notebookRepository.saveDrawingData(workspaceId, section.notebookId, page.id, defaultData);
-    journalChange({ entityType: 'notebookPage', entityId: page.id, workspaceId, operation: 'create', payload: { title: page.title, notebookId: section.notebookId, sectionId } });
+    journalChange({
+      entityType: 'notebookPage',
+      entityId: page.id,
+      workspaceId,
+      operation: 'create',
+      payload: { title: page.title, notebookId: section.notebookId, sectionId, titleProvenance: provenance },
+    });
+
+    if (options?.insertAfterPageId) {
+      const currentOrderedIds = sectionPages.map(p => p.id);
+      const afterIdx = currentOrderedIds.indexOf(options.insertAfterPageId);
+      if (afterIdx !== -1 && afterIdx < currentOrderedIds.length - 1) {
+        currentOrderedIds.splice(afterIdx + 1, 0, page.id);
+        await workspaceRepository.reorderItems(workspaceId, 'page', currentOrderedIds);
+        const updatedSectionPages = [
+          ...sectionPages.slice(0, afterIdx + 1),
+          page,
+          ...sectionPages.slice(afterIdx + 1),
+        ];
+        updatedSectionPages.forEach((p, idx) => { p.order = idx; });
+        const renumberUpdates = computeSectionRenumbering(updatedSectionPages);
+        for (const update of renumberUpdates) {
+          await notebookRepository.renamePage(workspaceId, update.id, update.title, update.titleProvenance);
+          journalChange({
+            entityType: 'notebookPage',
+            entityId: update.id,
+            workspaceId,
+            operation: 'update',
+            payload: { title: update.title, titleProvenance: update.titleProvenance },
+          });
+        }
+      }
+    }
 
     if (workspaceId) await get().loadWorkspaceContents(workspaceId);
     get().setActivePage(page.id);
@@ -995,6 +1115,30 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     });
     
     await workspaceRepository.reorderItems(wsId, 'page', itemIds);
+
+    const affectedSectionIds = new Set(
+      get().notebookPages.filter(p => itemIds.includes(p.id)).map(p => p.sectionId),
+    );
+    for (const sectionId of affectedSectionIds) {
+      const sectionPages = get().notebookPages
+        .filter(p => p.sectionId === sectionId && !p.deletedAt)
+        .sort((a, b) => a.order - b.order);
+      const renumberUpdates = computeSectionRenumbering(sectionPages);
+      for (const update of renumberUpdates) {
+        await notebookRepository.renamePage(wsId, update.id, update.title, update.titleProvenance);
+        set(state => ({
+          notebookPages: state.notebookPages.map(p => p.id === update.id ? { ...p, title: update.title, titleProvenance: update.titleProvenance } : p),
+        }));
+        journalChange({
+          entityType: 'notebookPage',
+          entityId: update.id,
+          workspaceId: wsId,
+          operation: 'update',
+          payload: { title: update.title, titleProvenance: update.titleProvenance },
+        });
+      }
+    }
+
     await get().loadWorkspaceContents(wsId);
   },
 
@@ -1047,7 +1191,17 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   renameNotebookPage: async (id: string, title: string) => {
     const wsId = get().activeWorkspaceId;
     if (!wsId) return;
-    await notebookRepository.renamePage(wsId, id, title);
+    await notebookRepository.renamePage(wsId, id, title, 'custom');
+    set(state => ({
+      notebookPages: state.notebookPages.map(p => p.id === id ? { ...p, title, titleProvenance: 'custom', updatedAt: Date.now() } : p),
+    }));
+    journalChange({
+      entityType: 'notebookPage',
+      entityId: id,
+      workspaceId: wsId,
+      operation: 'update',
+      payload: { title, titleProvenance: 'custom' },
+    });
     await get().loadWorkspaceContents(wsId);
   },
   deleteNotebook: async (id: string) => {
@@ -1073,9 +1227,32 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   deleteNotebookPage: async (id: string) => {
     const page = get().notebookPages.find(item => item.id === id);
     const wsId = page ? get().notebooks.find(item => item.id === page.notebookId)?.workspaceId : undefined;
-    if (!wsId) return;
+    if (!wsId || !page) return;
+
+    cancelQueuedPageDrawing(id);
+
     await notebookRepository.deletePage(wsId, id);
     journalChange({ entityType: 'notebookPage', entityId: id, workspaceId: wsId, operation: 'delete', deletedAt: Date.now() });
+
+    const remainingPages = get().notebookPages
+      .filter(p => p.sectionId === page.sectionId && p.id !== id && !p.deletedAt)
+      .sort((a, b) => a.order - b.order);
+
+    const renumberUpdates = computeSectionRenumbering(remainingPages);
+    for (const update of renumberUpdates) {
+      await notebookRepository.renamePage(wsId, update.id, update.title, update.titleProvenance);
+      set(state => ({
+        notebookPages: state.notebookPages.map(p => p.id === update.id ? { ...p, title: update.title, titleProvenance: update.titleProvenance } : p),
+      }));
+      journalChange({
+        entityType: 'notebookPage',
+        entityId: update.id,
+        workspaceId: wsId,
+        operation: 'update',
+        payload: { title: update.title, titleProvenance: update.titleProvenance },
+      });
+    }
+
     if (get().activePageId === id) {
       set({ activePageId: null });
     }

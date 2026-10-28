@@ -91,6 +91,8 @@ export class InputManager {
   // selectWithinLoop() implementation.
   private selectionDragMode: 'none' | 'transform' | 'lasso' = 'none';
   private lassoPoints: StrokePoint[] = [];
+  private selectionRafId: number | null = null;
+  private pendingSelectionPoint: StrokePoint | null = null;
 
   private rulerManager: RulerManager;
   private rulerDragMode: Exclude<RulerHit, null> | null = null;
@@ -254,6 +256,7 @@ export class InputManager {
     this.clearSelectionCursor();
     this.rulerDragMode = null;
     this.laserPointerActive = false;
+    this.laserManager.clear();
     this.isDrawing = false;
     this.drawingEngine?.endLiveStroke?.();
     this.cachedCanvasRect = null;
@@ -264,6 +267,12 @@ export class InputManager {
     this.clearInkSamples('detach');
     this.strokeModeAtStart = null;
     this.strokeContextAtStart = null;
+    if (this.selectionRafId !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(this.selectionRafId);
+      this.selectionRafId = null;
+    }
+    this.pendingSelectionPoint = null;
+    this.clearTransientTextDomPositions();
     this.selectionDragMode = 'none';
     this.lassoPoints = [];
     this.laserManager.clear();
@@ -351,9 +360,9 @@ export class InputManager {
   };
 
   private handlePointerMove = (e: PointerEvent): void => {
-    // Hand navigation needs the display-paced move stream. Keep raw/coalesced
+    // Hand navigation and selection transforms need the display-paced move stream. Keep raw/coalesced
     // samples for ink, erasing, ruler and laser interactions below.
-    if (this.isPanning && e.type === 'pointerrawupdate') return;
+    if ((this.isPanning || this.selectionDragMode === 'transform') && e.type === 'pointerrawupdate') return;
     if (this.inkSamples && !this.ownsInkEvent(e)) return;
     if (this.eraserGesture && e.pointerId !== this.eraserGesture.pointerId) return;
     const activeProfile = this.gate0InkGesture ?? this.gate0EraserGesture;
@@ -512,6 +521,12 @@ export class InputManager {
     this.lastProcessedClientY = -1;
     this.clearInkSamples('cancel');
     this.currentPoints = [];
+    if (this.selectionRafId !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(this.selectionRafId);
+      this.selectionRafId = null;
+    }
+    this.pendingSelectionPoint = null;
+    this.clearTransientTextDomPositions();
     this.selectionDragMode = 'none';
     this.lassoPoints = [];
     this.rulerDragMode = null;
@@ -659,13 +674,32 @@ export class InputManager {
     }
 
     if (this.selectionDragMode !== 'transform') return;
-    this.selectionEngine.dragTo(point.x, point.y);
-    if (this.selectionEngine.getSelectedElements().some(el => el.type === 'text')) {
-      this.notifyChange();
+    this.pendingSelectionPoint = point;
+    if (typeof requestAnimationFrame === 'function') {
+      if (this.selectionRafId === null) {
+        this.selectionRafId = requestAnimationFrame(() => {
+          this.selectionRafId = null;
+          if (this.selectionDragMode === 'transform' && this.pendingSelectionPoint) {
+            const pt = this.pendingSelectionPoint;
+            this.pendingSelectionPoint = null;
+            this.selectionEngine.dragTo(pt.x, pt.y);
+            this.updateTransientTextDomPositions();
+          }
+        });
+      }
+    } else {
+      // Direct fallback for headless test environments
+      this.selectionEngine.dragTo(point.x, point.y);
+      this.updateTransientTextDomPositions();
     }
   }
 
   private finishSelection(e: PointerEvent): void {
+    if (this.selectionRafId !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(this.selectionRafId);
+      this.selectionRafId = null;
+    }
+    this.pendingSelectionPoint = null;
     this.isDrawing = false;
     this.strokeModeAtStart = null;
     const point = this.getCanvasPoint(e);
@@ -684,10 +718,58 @@ export class InputManager {
       return;
     }
 
+    if (this.selectionDragMode === 'transform') {
+      this.selectionEngine.dragTo(point.x, point.y);
+      this.clearTransientTextDomPositions();
+      this.selectionDragMode = 'none';
+      const moved = this.selectionEngine.finishDrag(point.x, point.y);
+      if (moved) {
+        this.notifyChange();
+      }
+      return;
+    }
+
     this.selectionDragMode = 'none';
-    const moved = this.selectionEngine.finishDrag(point.x, point.y);
-    if (moved) {
-      this.notifyChange();
+  }
+
+  private updateTransientTextDomPositions(): void {
+    const selected = this.selectionEngine?.getSelectedElements?.() ?? [];
+    for (const el of selected) {
+      if (el.type === 'text') {
+        const domNode = this.canvas?.parentElement?.querySelector(`[data-text-object-id="${el.id}"]`) as HTMLElement | null;
+        if (domNode) {
+          const scale = this.viewport.getState().scale;
+          const orig = this.selectionEngine?.getOriginalPosition?.(el.id);
+          const current = this.textManager?.getTexts?.()?.find(t => t.id === el.id);
+          if (orig && current) {
+            if (!domNode.hasAttribute('data-orig-transform')) {
+              domNode.setAttribute('data-orig-transform', domNode.style.transform);
+            }
+            const shiftX = (current.x - orig.x) * scale;
+            const shiftY = (current.y - orig.y) * scale;
+            const rotation = current.rotation ?? 0;
+            domNode.style.transform = `translate(${shiftX}px, ${shiftY}px) scale(${scale}) rotate(${rotation}deg)`;
+          }
+        }
+      }
+    }
+  }
+
+  private clearTransientTextDomPositions(): void {
+    const selected = this.selectionEngine?.getSelectedElements?.() ?? [];
+    for (const el of selected) {
+      if (el.type === 'text') {
+        const domNode = this.canvas?.parentElement?.querySelector(`[data-text-object-id="${el.id}"]`) as HTMLElement | null;
+        if (domNode) {
+          const orig = domNode.getAttribute('data-orig-transform');
+          if (orig !== null) {
+            domNode.style.transform = orig;
+            domNode.removeAttribute('data-orig-transform');
+          } else {
+            domNode.style.transform = '';
+          }
+        }
+      }
     }
   }
 
@@ -782,6 +864,7 @@ export class InputManager {
     if (this.canvas) this.canvas.setPointerCapture(e.pointerId);
     this.laserPointerActive = true;
     this.strokeStartTime = Date.now();
+    this.laserManager.startStroke();
     this.laserManager.addPoint(this.getCanvasPoint(e));
   }
 

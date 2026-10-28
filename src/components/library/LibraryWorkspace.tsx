@@ -16,6 +16,7 @@ import { NotebookCoverPicker } from './NotebookCoverPicker';
 import { readLastLibraryView, rememberLibraryView } from '@/services/library/libraryRouteState';
 import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
+import { getNotebookPosition } from '@/lib/readingPosition';
 
 const filters: Array<{ id: LibraryFilter; label: string }> = [
   { id: 'all', label: 'All' }, { id: 'notebook', label: 'Notebooks' },
@@ -128,7 +129,8 @@ export function LibraryWorkspace() {
       const pages = store.notebookPages.filter(p => p.notebookId === notebook.id && !p.deletedAt).sort((a, b) => a.order - b.order);
 
       if (pages.length > 0) {
-        const targetPage = pages[0];
+        const saved = getNotebookPosition(notebook.id);
+        const targetPage = (saved && pages.find(p => p.id === saved.pageId)) || pages[0];
         const section = sections.find(s => s.id === targetPage.sectionId);
         if (section) await store.setActiveNotebookSection(section.id);
         await store.setActivePage(targetPage.id);

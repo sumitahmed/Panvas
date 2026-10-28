@@ -64,7 +64,7 @@ contextBridge.exposeInMainWorld('panvas', {
     getAll: (wsId: string) => ipcRenderer.invoke('notebookSection:getAll', wsId),
   },
   notebookPage: {
-    create: (wsId: string, notebookId: string, sectionId: string, title: string, type: 'default' | 'pdf' = 'default', pdfDataId?: string) => ipcRenderer.invoke('notebookPage:create', wsId, notebookId, sectionId, title, type, pdfDataId),
+    create: (wsId: string, notebookId: string, sectionId: string, title: string, type: 'default' | 'pdf' = 'default', pdfDataId?: string, titleProvenance?: 'default' | 'custom') => ipcRenderer.invoke('notebookPage:create', wsId, notebookId, sectionId, title, type, pdfDataId, titleProvenance),
     update: (wsId: string, pageId: string, updates: any) => ipcRenderer.invoke('notebookPage:update', wsId, pageId, updates),
     delete: (wsId: string, pageId: string) => ipcRenderer.invoke('notebookPage:delete', wsId, pageId),
     getAll: (wsId: string) => ipcRenderer.invoke('notebookPage:getAll', wsId),

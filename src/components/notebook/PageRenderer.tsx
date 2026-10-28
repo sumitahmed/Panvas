@@ -3,11 +3,24 @@
 // ============================================
 
 import React, { useEffect, useId, useRef, useState } from 'react';
+import { Bookmark } from 'lucide-react';
+import { EditorContent, useEditor, type Editor } from '@tiptap/react';
+import StarterKit from '@tiptap/starter-kit';
+import Underline from '@tiptap/extension-underline';
+import Highlight from '@tiptap/extension-highlight';
+import { TextStyle } from '@tiptap/extension-text-style';
+import Color from '@tiptap/extension-color';
+import FontFamily from '@tiptap/extension-font-family';
+import { FontSize } from './FontSizeExtension';
+import Placeholder from '@tiptap/extension-placeholder';
+import { Extension } from '@tiptap/core';
 import type { PageProperties } from './engine/drawingTypes';
+import type { NotebookEngine } from './engine/NotebookEngine';
 import { TEMPLATE_REGISTRY } from './templates/TemplateRegistry.tsx';
 import { resolvePageTemplateRenderModel, resolveBasePageDimensions, resolvePageNoteSpace } from '@/lib/pageProperties';
 import { useFullDarkView } from '@/hooks/useFullDarkView';
 import { fullDarkSurfaceColor, fullDarkRuleLineColor } from '@/lib/fullDarkView';
+import { useBookmarkStore } from '@/stores/bookmarkStore';
 
 export { formatPageIndicator } from './pageIndicator';
 
@@ -23,6 +36,9 @@ export interface PageRendererProps {
   onUpdateProperties?: (updates: Partial<PageProperties>) => void;
   renderWindow?: { top: number; height: number };
   logicalBase?: number;
+  isBookmarked?: boolean;
+  engine?: NotebookEngine;
+  onFocusEditor?: (editor: Editor | null) => void;
 }
 
 type TemplateField = { key: string; placeholder: string; x: number; y: number; width: number; fontSize?: number; weight?: number };
@@ -50,7 +66,7 @@ function editableTemplateFields(template: PageProperties['template'], width: num
   }
 }
 
-function TemplateFieldInput({ field, template, scale, value, color, editable, onChange }: {
+interface TemplateFieldInputProps {
   field: TemplateField;
   template: PageProperties['template'];
   scale: number;
@@ -58,31 +74,150 @@ function TemplateFieldInput({ field, template, scale, value, color, editable, on
   color: string;
   editable: boolean;
   onChange: (value: string) => void;
-}) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [draft, setDraft] = useState(value);
-  useEffect(() => {
-    if (document.activeElement !== inputRef.current) setDraft(value);
-  }, [value]);
+  engine?: NotebookEngine;
+  onFocusEditor?: (editor: Editor | null) => void;
+}
+
+function StaticTemplateField({ field, template, scale, value, color }: TemplateFieldInputProps) {
   return (
-    <input
-      ref={inputRef}
+    <div
       key={`${template}-${field.key}`}
-      type="text"
-      value={draft}
-      placeholder={field.placeholder}
       aria-label={`${field.placeholder} template field`}
-      readOnly={!editable}
-      onPointerDown={event => event.stopPropagation()}
-      onClick={event => event.stopPropagation()}
-      onChange={event => { setDraft(event.target.value); onChange(event.target.value); }}
-      className="panvas-colored-content absolute z-30 border-0 border-b border-current bg-transparent px-0 outline-none placeholder:opacity-60 focus:border-panvas-accent-blue"
-      style={{ left: field.x * scale, top: field.y * scale, width: field.width * scale, height: 22 * scale, fontSize: (field.fontSize ?? 10) * scale, fontWeight: field.weight ?? 600, color }}
+      className="panvas-colored-content absolute z-30 border-0 border-b border-current bg-transparent px-0 outline-none overflow-hidden select-none"
+      style={{
+        left: field.x * scale,
+        top: field.y * scale,
+        width: field.width * scale,
+        height: 22 * scale,
+        fontSize: (field.fontSize ?? 10) * scale,
+        fontWeight: field.weight ?? 600,
+        color,
+        lineHeight: `${22 * scale}px`,
+      }}
+      dangerouslySetInnerHTML={{ __html: value || `<span style="opacity: 0.6;">${field.placeholder}</span>` }}
     />
   );
 }
 
-export const PageRenderer: React.FC<PageRendererProps> = ({ id, width, height, properties, className = '', children, pageNumberText, editable = false, onUpdateProperties, renderWindow, logicalBase = 0 }) => {
+function ClientTemplateField({ field, template, scale, value, color, editable, onChange, engine, onFocusEditor }: TemplateFieldInputProps) {
+  const editor = useEditor({
+    extensions: [
+      StarterKit.configure({
+        heading: false,
+        blockquote: false,
+        codeBlock: false,
+        bulletList: false,
+        orderedList: false,
+        listItem: false,
+        horizontalRule: false,
+        link: false,
+        underline: false,
+      }),
+      Underline,
+      Highlight.configure({ multicolor: true }),
+      TextStyle,
+      Color,
+      FontFamily,
+      FontSize,
+      Placeholder.configure({
+        placeholder: field.placeholder,
+        emptyEditorClass: 'is-editor-empty',
+        showOnlyWhenEditable: false,
+      }),
+      Extension.create({
+        name: 'templateFieldEnterKey',
+        addKeyboardShortcuts() {
+          return {
+            Enter: () => {
+              this.editor.commands.blur();
+              return true;
+            },
+          };
+        },
+      }),
+    ],
+    content: value || '',
+    editable,
+    shouldRerenderOnTransaction: true,
+    onUpdate: ({ editor: updatedEditor }) => {
+      const text = updatedEditor.getText().trim();
+      const html = updatedEditor.getHTML();
+      onChange(text === '' ? '' : html);
+    },
+    onFocus: ({ editor: focusedEditor }) => {
+      if (engine && engine.tools.getState().mode !== 'text') {
+        engine.tools.setMode('text');
+      }
+      onFocusEditor?.(focusedEditor);
+    },
+    onSelectionUpdate: ({ editor: currentEditor }) => {
+      onFocusEditor?.(currentEditor);
+    },
+  });
+
+  useEffect(() => {
+    if (!editor || editor.isDestroyed) return;
+    editor.setEditable(editable, false);
+  }, [editable, editor]);
+
+  useEffect(() => {
+    if (!editor || editor.isDestroyed || !engine) return;
+    const registrationKey = `template-field-${field.key}`;
+    engine.texts.registerEditor(registrationKey, editor);
+    return () => {
+      engine.texts.unregisterEditor(registrationKey);
+    };
+  }, [editor, engine, field.key]);
+
+  useEffect(() => {
+    if (!editor || editor.isDestroyed) return;
+    if (editor.isFocused) return;
+    const currentHTML = editor.getHTML();
+    const currentText = editor.getText().trim();
+    const currentNormalized = currentText === '' ? '' : currentHTML;
+    const incomingNormalized = (value || '').trim();
+    if (incomingNormalized !== currentNormalized && incomingNormalized !== currentText) {
+      editor.commands.setContent(value || '', { emitUpdate: false });
+    }
+  }, [value, editor]);
+
+  return (
+    <div
+      key={`${template}-${field.key}`}
+      aria-label={`${field.placeholder} template field`}
+      onPointerDown={event => event.stopPropagation()}
+      onClick={event => {
+        event.stopPropagation();
+        if (editable && editor && !editor.isFocused) {
+          editor.commands.focus();
+        }
+      }}
+      className="panvas-colored-content panvas-template-field-editor absolute z-30 border-0 border-b border-current bg-transparent px-0 outline-none focus-within:border-panvas-accent-blue"
+      style={{
+        left: field.x * scale,
+        top: field.y * scale,
+        width: field.width * scale,
+        height: 22 * scale,
+        fontSize: (field.fontSize ?? 10) * scale,
+        fontWeight: field.weight ?? 600,
+        color,
+        lineHeight: `${22 * scale}px`,
+        overflow: 'hidden',
+      }}
+    >
+      <EditorContent editor={editor} className="h-full w-full" />
+    </div>
+  );
+}
+
+function TemplateFieldInput(props: TemplateFieldInputProps) {
+  if (typeof window === 'undefined') {
+    return <StaticTemplateField {...props} />;
+  }
+  return <ClientTemplateField {...props} />;
+}
+
+const PageRendererComponent: React.FC<PageRendererProps> = ({ id, width, height, properties, className = '', children, pageNumberText, editable = false, onUpdateProperties, renderWindow, logicalBase = 0, isBookmarked: propIsBookmarked, engine, onFocusEditor }) => {
   const templateResourceScope = useId();
   const fullDarkView = useFullDarkView();
   const { template, margins } = properties;
@@ -95,6 +230,16 @@ export const PageRenderer: React.FC<PageRendererProps> = ({ id, width, height, p
     width: geometry.source.width * scale,
     height: geometry.source.height * scale,
   };
+
+  const isContinuationSheet = id.includes('-sheet-') && !id.endsWith('-sheet-1');
+  const baseId = id.includes('-sheet-') ? id.split('-sheet-')[0] : id;
+
+  const isStoreBookmarked = useBookmarkStore(state => {
+    if (propIsBookmarked !== undefined || isContinuationSheet) return false;
+    return state.bookmarks.some(b => b.pageId === id || b.pageId === baseId || b.id.endsWith(`:${id}`) || b.id.endsWith(`:${baseId}`));
+  });
+
+  const isBookmarked = propIsBookmarked ?? isStoreBookmarked;
 
   // Margin insets based on selection
   const getMarginInset = () => {
@@ -128,8 +273,11 @@ export const PageRenderer: React.FC<PageRendererProps> = ({ id, width, height, p
     sheetCount = count;
     paperFrames = <>{Array.from({ length: Math.max(0, last - first + 1) }, (_, offset) => {
         const index = first + offset;
+        const subPageText = pageNumberText
+          ? (count > 1 ? `${pageNumberText} (Sheet ${index + 1}/${count})` : pageNumberText)
+          : (count > 1 ? `Sheet ${index + 1}/${count}` : undefined);
         return <div key={index} data-document-sheet={index + 1} className="absolute" style={{ top: index * stride - logicalBase, width, height: sheetHeight }}>
-          <PageRenderer id={`${id}-sheet-${index + 1}`} width={width} height={sheetHeight} properties={{ ...properties, layoutMode: 'freeform', layoutExtent: undefined }} pageNumberText={`${index + 1} / ${count}`} />
+          <PageRenderer id={`${id}-sheet-${index + 1}`} width={width} height={sheetHeight} properties={{ ...properties, layoutMode: 'freeform', layoutExtent: undefined }} pageNumberText={subPageText} />
         </div>;
       })}</>;
   }
@@ -169,6 +317,8 @@ export const PageRenderer: React.FC<PageRendererProps> = ({ id, width, height, p
           color={effectiveLineColor}
           editable={editable && Boolean(onUpdateProperties)}
           onChange={value => onUpdateProperties?.({ templateFields: { ...(properties.templateFields ?? {}), [field.key]: value } })}
+          engine={engine}
+          onFocusEditor={onFocusEditor}
         />
       ))}
 
@@ -200,16 +350,33 @@ export const PageRenderer: React.FC<PageRendererProps> = ({ id, width, height, p
       {/* Structured Content & Drawing Layer */}
       <div key="page-content" className="absolute inset-0">{children}</div>
 
+      {/* Bookmarked Page Corner Ribbon / Marker */}
+      {isBookmarked && (
+        <div
+          data-testid="page-bookmark-marker"
+          aria-label="Bookmarked page marker"
+          className="absolute top-0 right-0 pointer-events-none select-none z-20"
+        >
+          <div className="relative w-9 h-9 overflow-hidden pointer-events-none select-none">
+            <div className="absolute top-0 right-0 w-0 h-0 border-t-[36px] border-l-[36px] border-t-panvas-accent-blue border-l-transparent drop-shadow-xs pointer-events-none select-none" />
+            <Bookmark
+              size={11}
+              className="absolute top-1 right-1 text-white fill-white pointer-events-none select-none"
+            />
+          </div>
+        </div>
+      )}
+
       {/* Page Number Indicator */}
       {pageNumberText && !paged && properties.pageSize !== 'Infinite' && (
         <div 
           className="absolute pointer-events-none select-none whitespace-nowrap text-right text-[11px] font-mono font-medium tabular-nums text-panvas-text-tertiary"
           style={{
             opacity: 0.75,
-            left: Math.max(8, source.left + source.width - 92),
+            left: Math.max(8, source.left + source.width - 132),
             top: source.top + source.height - 28,
-            width: 84,
-            minWidth: 84,
+            width: 124,
+            minWidth: 124,
           }}
         >
           {pageNumberText}
@@ -218,3 +385,22 @@ export const PageRenderer: React.FC<PageRendererProps> = ({ id, width, height, p
     </div>
   );
 };
+
+export const PageRenderer = React.memo(PageRendererComponent, (prev, next) => {
+  if (prev.id !== next.id) return false;
+  if (prev.width !== next.width || prev.height !== next.height) return false;
+  if (prev.className !== next.className) return false;
+  if (prev.pageNumberText !== next.pageNumberText) return false;
+  if (prev.editable !== next.editable) return false;
+  if (prev.logicalBase !== next.logicalBase) return false;
+  if (prev.children !== next.children) return false;
+  if (prev.onUpdateProperties !== next.onUpdateProperties) return false;
+  if (prev.renderWindow?.top !== next.renderWindow?.top || prev.renderWindow?.height !== next.renderWindow?.height) return false;
+  if (prev.isBookmarked !== next.isBookmarked) return false;
+  if (prev.engine !== next.engine) return false;
+  if (prev.onFocusEditor !== next.onFocusEditor) return false;
+  if (prev.properties !== next.properties) {
+    if (JSON.stringify(prev.properties) !== JSON.stringify(next.properties)) return false;
+  }
+  return true;
+});

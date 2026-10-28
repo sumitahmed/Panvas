@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react';
-import { Download, FileDown, MoreHorizontal, Printer } from 'lucide-react';
+import { Bookmark, Download, FileDown, MoreHorizontal, Printer } from 'lucide-react';
 import type { NotebookEngine } from './engine/NotebookEngine';
 import { NotebookLayersControl } from './NotebookLayersControl';
 import { NotebookElementsControl } from './NotebookElementsControl';
@@ -7,12 +7,16 @@ import { NotebookAudioControl } from './NotebookAudioControl';
 import type { AudioNote, DrawingData } from './engine/drawingTypes';
 import type { PageAudioOwner } from '@/services/audio/audioLifecycle';
 import { OverlayManager } from '@/components/ui/OverlayManager';
+import { useBookmarkStore } from '@/stores/bookmarkStore';
+import { toggleBookmarkWithHistory } from '@/services/bookmarks/bookmarkHistory';
 
 interface NotebookPageUtilitiesProps {
   engine: NotebookEngine;
   workspaceId?: string;
   notebookId?: string;
   ownerId?: string;
+  pageId?: string;
+  pageTitle?: string;
   onChange: () => void;
   onVoiceDelete?: (note: AudioNote) => void;
   onVoiceRename?: (note: AudioNote, title: string) => void;
@@ -27,7 +31,7 @@ interface NotebookPageUtilitiesProps {
   embedded?: boolean;
 }
 
-export function NotebookPageUtilities({ engine, workspaceId, notebookId, ownerId, onChange, onVoiceDelete, onVoiceRename, editable = true, onPageDataPersisted, compact = false, onExportPage, onExportNotebook, onPrintPage, onPrintNotebook, isExporting = false, embedded = false }: NotebookPageUtilitiesProps) {
+export function NotebookPageUtilities({ engine, workspaceId, notebookId, ownerId, pageId, pageTitle, onChange, onVoiceDelete, onVoiceRename, editable = true, onPageDataPersisted, compact = false, onExportPage, onExportNotebook, onPrintPage, onPrintNotebook, isExporting = false, embedded = false }: NotebookPageUtilitiesProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [isPdfMenuOpen, setIsPdfMenuOpen] = useState(false);
   const compactMenuRef = useRef<HTMLDivElement>(null);
@@ -35,10 +39,60 @@ export function NotebookPageUtilities({ engine, workspaceId, notebookId, ownerId
   const audioOwner: PageAudioOwner | undefined = workspaceId && notebookId && ownerId
     ? { workspaceId, notebookId, pageId: ownerId }
     : undefined;
+
+  const effectivePageId = pageId || ownerId;
+  const effectiveNotebookId = notebookId;
+  const effectiveTitle = pageTitle;
+
+  const isBookmarked = useBookmarkStore(state => {
+    if (!effectiveNotebookId || !effectivePageId) return false;
+    return state.isBookmarked(effectiveNotebookId, effectivePageId);
+  });
+
+  const handleToggleBookmark = async () => {
+    if (!effectiveNotebookId || !effectivePageId) return;
+
+    if (engine?.history && typeof engine.history.pushExecuted === 'function') {
+      await toggleBookmarkWithHistory(engine.history, {
+        documentId: effectiveNotebookId,
+        pageIdOrNumber: effectivePageId,
+        documentType: 'notebook',
+        title: effectiveTitle,
+        workspaceId,
+      });
+    } else {
+      await useBookmarkStore.getState().toggleBookmark(
+        effectiveNotebookId,
+        effectivePageId,
+        'notebook',
+        undefined,
+        effectiveTitle,
+        workspaceId
+      );
+    }
+  };
+
   const controls = <>
     {editable && <NotebookLayersControl engine={engine} onChange={onChange} />}
     {editable && <NotebookElementsControl engine={engine} workspaceId={workspaceId} onInsert={onChange} />}
     <NotebookAudioControl engine={engine} owner={audioOwner} canRecord={editable} onPageDataPersisted={onPageDataPersisted} onDelete={onVoiceDelete} onRename={onVoiceRename} />
+    <button
+      type="button"
+      onClick={handleToggleBookmark}
+      disabled={!effectivePageId}
+      className={`panvas-icon-control h-9 w-9 focus-ring transition-colors ${
+        isBookmarked
+          ? 'text-panvas-accent-blue bg-panvas-accent-blue/10'
+          : 'text-panvas-text-tertiary hover:text-panvas-text-primary'
+      }`}
+      aria-label={isBookmarked ? 'Remove bookmark' : 'Bookmark this page'}
+      title={isBookmarked ? 'Remove bookmark' : 'Bookmark this page'}
+    >
+      <Bookmark
+        size={16}
+        className={isBookmarked ? 'text-panvas-accent-blue fill-current' : ''}
+      />
+    </button>
     {onPrintPage && (
       <button
         type="button"

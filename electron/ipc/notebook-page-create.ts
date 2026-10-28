@@ -16,6 +16,7 @@ export interface CreateNotebookPageOptions {
   notebookId: string;
   sectionId: string;
   title: string;
+  titleProvenance?: 'default' | 'custom';
   type: 'default' | 'pdf';
   pdfDataId?: string;
   pageId: string;
@@ -25,16 +26,20 @@ export interface CreateNotebookPageOptions {
 }
 
 export async function createNotebookPageFiles(options: CreateNotebookPageOptions): Promise<Record<string, unknown>> {
+  const sectionPages = options.workspace.notebookPages.filter(
+    (p: any) => p.sectionId === options.sectionId && !p.deletedAt,
+  );
   const page: Record<string, unknown> = {
     id: options.pageId,
     notebookId: options.notebookId,
     sectionId: options.sectionId,
     title: options.title,
+    titleProvenance: options.titleProvenance ?? 'default',
     type: options.type,
     createdAt: options.now,
     updatedAt: options.now,
     lastOpenedAt: options.now,
-    order: options.workspace.notebookPages.length,
+    order: sectionPages.length,
     pagePropertyOverrides: {},
     deletedAt: null,
   };

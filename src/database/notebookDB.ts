@@ -43,10 +43,10 @@ export async function createSection(userId: string | null, notebookId: string, n
   return section;
 }
 
-export async function createPage(userId: string | null, notebookId: string, sectionId: string, title: string, type: 'default' | 'pdf' = 'default', pdfDataId?: string): Promise<NotebookPage> {
+export async function createPage(userId: string | null, notebookId: string, sectionId: string, title: string, type: 'default' | 'pdf' = 'default', pdfDataId?: string, titleProvenance?: 'default' | 'custom'): Promise<NotebookPage> {
   const now = Date.now();
   const order = await db.notebookPages.where('sectionId').equals(sectionId).count();
-  const page: NotebookPage = { id: generateId('page'), notebookId, sectionId, title, createdAt: now, updatedAt: now, lastOpenedAt: now, order, userId, deletedAt: null, type, pdfDataId, pagePropertyOverrides: {} };
+  const page: NotebookPage = { id: generateId('page'), notebookId, sectionId, title, titleProvenance: titleProvenance ?? 'default', createdAt: now, updatedAt: now, lastOpenedAt: now, order, userId, deletedAt: null, type, pdfDataId, pagePropertyOverrides: {} };
   await db.notebookPages.add(page);
   return page;
 }
@@ -98,8 +98,10 @@ export async function renameSection(id: string, name: string): Promise<void> {
   await db.notebookSections.update(id, { name, updatedAt: Date.now() });
 }
 
-export async function renamePage(id: string, title: string): Promise<void> {
-  await db.notebookPages.update(id, { title, updatedAt: Date.now() });
+export async function renamePage(id: string, title: string, titleProvenance?: 'default' | 'custom'): Promise<void> {
+  const updates: Partial<NotebookPage> = { title, updatedAt: Date.now() };
+  if (titleProvenance) updates.titleProvenance = titleProvenance;
+  await db.notebookPages.update(id, updates);
 }
 
 // Soft deletes only: children keep their own deletedAt state and restoring

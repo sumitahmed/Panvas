@@ -198,6 +198,7 @@ export class NotebookEngine {
   /** Unbind input and detach canvas from a canvas remount. */
   unmount(): void {
     this.handwriting.invalidateScope();
+    this.laser.clear();
     this.input.detach();
     this.drawing.detachCanvas();
     this.viewport.setRenderWindowOrigin(0);
@@ -485,6 +486,7 @@ export class NotebookEngine {
   // ---- Cleanup ----
 
   destroy(): void {
+    this.laser.clear();
     this.input.flushPendingErasing('destroy');
     this.unsubscribeDrawingRevision?.();
     this.unsubscribeDrawingRevision = null;

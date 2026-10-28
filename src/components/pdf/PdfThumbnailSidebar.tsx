@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ChevronDown, ChevronUp, Download, Grid2X2, ListFilter, MoreHorizontal, PanelLeftClose, PanelLeftOpen, RotateCcw, RotateCw } from 'lucide-react';
+import { Bookmark, ChevronDown, ChevronUp, Download, Grid2X2, ListFilter, MoreHorizontal, PanelLeftClose, PanelLeftOpen, RotateCcw, RotateCw } from 'lucide-react';
 import type { PdfPageRotation } from '@/types/notebook';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import type { NotebookEngine } from '@/components/notebook/engine/NotebookEngine';
+import { useBookmarkStore } from '@/stores/bookmarkStore';
 
 interface PdfThumbnailSidebarProps {
   pdfDocument: PDFDocumentProxy | null;
@@ -12,6 +13,7 @@ interface PdfThumbnailSidebarProps {
   isSidebarOpen: boolean;
   setIsSidebarOpen: React.Dispatch<React.SetStateAction<boolean>>;
   engine: NotebookEngine;
+  documentId?: string;
   pageOrder?: number[];
   rotations?: Record<number, PdfPageRotation>;
   onRotatePage?: (page: number, direction: 1 | -1) => void;
@@ -19,7 +21,7 @@ interface PdfThumbnailSidebarProps {
   onMovePage?: (from: number, to: number) => void;
 }
 
-export function PdfThumbnailSidebar({ pdfDocument, numPages, currentPage, onPageChange, isSidebarOpen, setIsSidebarOpen, engine, pageOrder, rotations = {}, onRotatePage, onExtractPage, onMovePage }: PdfThumbnailSidebarProps) { 
+export function PdfThumbnailSidebar({ pdfDocument, numPages, currentPage, onPageChange, isSidebarOpen, setIsSidebarOpen, engine, documentId, pageOrder, rotations = {}, onRotatePage, onExtractPage, onMovePage }: PdfThumbnailSidebarProps) { 
   const [activeTab, setActiveTab] = useState<'Thumbnails' | 'Outline'>('Thumbnails'); 
   const [outline, setOutline] = useState<any[] | null>(null);
   const thumbnailRefs = useRef(new Map<number, HTMLDivElement>());
@@ -84,8 +86,8 @@ export function PdfThumbnailSidebar({ pdfDocument, numPages, currentPage, onPage
           {(pageOrder?.length === numPages ? pageOrder : Array.from({ length: numPages }, (_, index) => index + 1)).map((pageNum, index, order) => {
             return (
               <div ref={element => { if (element) thumbnailRefs.current.set(pageNum, element); else thumbnailRefs.current.delete(pageNum); }} key={pageNum} className={`group rounded-lg p-1.5 transition-colors ${currentPage === pageNum ? 'bg-panvas-bg-active' : 'hover:bg-panvas-bg-hover'}`}>
-                <button type="button" onClick={() => onPageChange(pageNum)} aria-pressed={currentPage === pageNum} className="w-full text-left focus-ring rounded-md">
-                  <Thumbnail page={pageNum} pdfDocument={pdfDocument} rotation={rotations[pageNum] ?? 0} />
+                <button type="button" onClick={() => onPageChange(pageNum)} aria-pressed={currentPage === pageNum} className="w-full text-left focus-ring rounded-md relative">
+                  <Thumbnail page={pageNum} pdfDocument={pdfDocument} rotation={rotations[pageNum] ?? 0} documentId={documentId} />
                   <span className={`mt-1.5 block text-center text-2xs ${currentPage === pageNum ? 'font-medium text-panvas-text-primary' : 'text-panvas-text-tertiary'}`}>Page {index + 1}</span>
                 </button>
                 {(onRotatePage || onExtractPage || onMovePage) && <div className="mt-1 flex items-center justify-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
@@ -141,8 +143,9 @@ function OutlineTree({ items, level, onNavigate }: { items: any[]; level: number
 function Tab({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) { return <button type="button" onClick={onClick} className={`h-8 border-b-2 px-1.5 text-2xs transition-colors focus-ring ${active ? 'border-panvas-text-primary text-panvas-text-primary' : 'border-transparent text-panvas-text-tertiary hover:text-panvas-text-secondary'}`}>{label}</button>; }
 function MiniButton({ label, children, onClick, disabled }: { label: string; children: React.ReactNode; onClick?: () => void; disabled?: boolean }) { return <button type="button" title={label} aria-label={label} disabled={disabled} onClick={onClick} className="flex h-6 w-6 items-center justify-center rounded text-panvas-text-tertiary hover:bg-panvas-bg-hover hover:text-panvas-text-primary focus-ring disabled:opacity-35">{children}</button>; }
 
-function Thumbnail({ page, pdfDocument, rotation }: { page: number, pdfDocument: PDFDocumentProxy | null, rotation: number }) { 
+export function Thumbnail({ page, pdfDocument, rotation, documentId }: { page: number; pdfDocument: PDFDocumentProxy | null; rotation: number; documentId?: string }) { 
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const isBookmarked = useBookmarkStore((s) => documentId ? s.isBookmarked(documentId, page) : false);
 
   useEffect(() => {
     let isMounted = true;
@@ -199,8 +202,17 @@ function Thumbnail({ page, pdfDocument, rotation }: { page: number, pdfDocument:
   }, [pdfDocument, page, rotation]);
 
   return (
-    <div className="overflow-hidden rounded-md border border-panvas-border-subtle bg-white shadow-sm flex items-center justify-center min-h-[200px]">
+    <div className="relative overflow-hidden rounded-md border border-panvas-border-subtle bg-white shadow-sm flex items-center justify-center min-h-[200px]">
       <canvas ref={canvasRef} className="max-w-full" dir="ltr" />
+      {isBookmarked && (
+        <div
+          className="absolute top-1.5 right-1.5 pointer-events-none z-10"
+          aria-label={`Page ${page} bookmarked`}
+          data-testid={`thumbnail-bookmark-${page}`}
+        >
+          <Bookmark size={15} className="text-panvas-accent-blue fill-panvas-accent-blue drop-shadow-sm" />
+        </div>
+      )}
     </div>
   ); 
 }

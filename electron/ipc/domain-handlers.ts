@@ -21,10 +21,15 @@ import { requireTrustedSender } from './security.js';
 import { createNotebookPageFiles } from './notebook-page-create.js';
 import { cloudApplyFailure } from '../../src/services/cloudsync/errors.js';
 import { NativeRemoteRecordApplyError } from './workspace-sync-order.js';
+import {
+  MAX_JSON_PAYLOAD_BYTES,
+  requireDrawingPayload,
+  requireJsonPayload,
+  requireRemoteRecordPayload,
+} from './payload-limits.js';
 
 const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const MAX_NAME_LENGTH = 160;
-const MAX_PAYLOAD_BYTES = 10 * 1024 * 1024;
 const MAX_BACKUP_BYTES = 100 * 1024 * 1024;
 // Imported documents (textbooks etc.) legitimately exceed the JSON payload
 // bound; binaries get their own, larger limit.
@@ -54,16 +59,6 @@ function requireName(value: unknown, label: string): asserts value is string {
 
 function requirePlainObject(value: unknown, label: string): asserts value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) throw new Error(`Invalid ${label}.`);
-}
-
-function requireJsonPayload(value: unknown, label: string, maxBytes = MAX_PAYLOAD_BYTES): void {
-  let serialized: string;
-  try {
-    serialized = JSON.stringify(value);
-  } catch {
-    throw new Error(`Invalid ${label}.`);
-  }
-  if (serialized === undefined || Buffer.byteLength(serialized, 'utf8') > maxBytes) throw new Error(`Invalid ${label}.`);
 }
 
 function requirePagePropertyPatch(value: unknown, label: string): void {
@@ -127,11 +122,12 @@ function requireUpdates(channel: string, updates: unknown): void {
     'canvasFile:update': ['name', 'workspaceId', 'folderId', 'notebookId', 'sectionId', 'deletedAt', 'isPinned', 'lastOpenedAt'],
     'notebook:update': ['name', 'workspaceId', 'folderId', 'isExpanded', 'isPinned', 'deletedAt', 'defaultPageProperties', 'cover', 'lastOpenedAt'],
     'notebookSection:update': ['name', 'notebookId', 'isExpanded', 'deletedAt'],
-    'notebookPage:update': ['title', 'sectionId', 'type', 'pdfDataId', 'deletedAt', 'pagePropertyOverrides', 'pdfPageState', 'lastOpenedAt'],
+    'notebookPage:update': ['title', 'titleProvenance', 'sectionId', 'type', 'pdfDataId', 'deletedAt', 'pagePropertyOverrides', 'pdfPageState', 'lastOpenedAt'],
   };
   if (Object.keys(updates).some((key) => !allowed[channel]?.includes(key))) throw new Error('Invalid update fields.');
   for (const [key, value] of Object.entries(updates)) {
     if (key === 'name' || key === 'title') requireName(value, key);
+    if (key === 'titleProvenance' && value !== 'default' && value !== 'custom') throw new Error('Invalid titleProvenance.');
     if (['workspaceId', 'parentId', 'folderId', 'notebookId', 'sectionId', 'pdfDataId'].includes(key)) requireOptionalId(value, key);
     if (['isPinned', 'isExpanded'].includes(key) && typeof value !== 'boolean') throw new Error(`Invalid ${key}.`);
     if (key === 'color' && (typeof value !== 'string' || !/^#[0-9a-f]{6}$/i.test(value))) throw new Error('Invalid folder color.');
@@ -182,6 +178,10 @@ async function validateArguments(channel: string, args: unknown[]): Promise<void
     requireOptionalId(args[5], 'PDF data identifier');
     if (type === 'pdf' && args[5] === undefined) throw new Error('PDF pages require a PDF data identifier.');
     if (type === 'default' && args[5] !== undefined) throw new Error('Default pages cannot reference PDF data.');
+    const titleProvenance = args[6];
+    if (titleProvenance !== undefined && titleProvenance !== 'default' && titleProvenance !== 'custom') {
+      throw new Error('Invalid titleProvenance.');
+    }
   }
   if (channel === 'notebook:applyPageDefaults') requirePagePropertyPatch(args[2], 'page defaults');
   if (channel === 'notebook:restorePageDefaults') requirePagePropertySnapshot(args[1]);
@@ -193,9 +193,9 @@ async function validateArguments(channel: string, args: unknown[]): Promise<void
     throw new Error('Invalid trash entity kind.');
   }
   if (['workspace:update', 'folder:update', 'canvasFile:update', 'notebook:update', 'notebookSection:update', 'notebookPage:update'].includes(channel)) requireUpdates(channel, args[2] ?? args[1]);
-  if (channel === 'notebook:saveDrawing' && typeof args[3] === 'string') {
-    if (Buffer.byteLength(args[3], 'utf8') > MAX_PAYLOAD_BYTES) throw new Error('Invalid content payload.');
-  } else if (['canvas:save', 'notebook:savePage', 'notebook:saveDrawing'].includes(channel)) requireJsonPayload(args[args.length - 1], 'content payload');
+  if (channel === 'notebook:saveDrawing') {
+    requireDrawingPayload(args[3]);
+  } else if (['canvas:save', 'notebook:savePage'].includes(channel)) requireJsonPayload(args[args.length - 1], 'content payload');
   if (channel === 'library:import' || channel === 'library:delete') requireLibraryFileName(args[1]);
   if (channel === 'library:import') {
     if (typeof args[2] !== 'string') throw new Error('Invalid Excalidraw library payload.');
@@ -214,7 +214,7 @@ async function validateArguments(channel: string, args: unknown[]): Promise<void
     if (record.parentId !== undefined && record.parentId !== null) requireId(record.parentId, 'remote parent identifier');
     if (!['workspace', 'folder', 'notebook', 'notebookSection', 'notebookPage', 'pageContent', 'pageDrawing', 'canvasFile', 'canvasScene', 'customBlock'].includes(String(record.kind))) throw new Error('Invalid remote entity kind.');
     if (typeof record.tombstone !== 'boolean') throw new Error('Invalid remote tombstone.');
-    if (!record.tombstone) requireJsonPayload(record.payload, 'remote sync payload');
+    requireRemoteRecordPayload({ kind: record.kind, tombstone: record.tombstone, payload: record.payload });
   }
   if (channel === 'cloudsync:applyRemoteRecords') {
     requireId(args[0], 'workspace identifier');
@@ -226,7 +226,7 @@ async function validateArguments(channel: string, args: unknown[]): Promise<void
       if (record.parentId !== undefined && record.parentId !== null) requireId(record.parentId, 'remote parent identifier');
       if (!['workspace', 'folder', 'notebook', 'notebookSection', 'notebookPage', 'pageContent', 'pageDrawing', 'canvasFile', 'canvasScene', 'customBlock'].includes(String(record.kind))) throw new Error('Invalid remote entity kind.');
       if (typeof record.tombstone !== 'boolean') throw new Error('Invalid remote tombstone.');
-      if (!record.tombstone) requireJsonPayload(record.payload, 'remote sync payload');
+      requireRemoteRecordPayload({ kind: record.kind, tombstone: record.tombstone, payload: record.payload });
     }
   }
   if (channel === 'settings:get' || channel === 'settings:set') {
@@ -287,7 +287,8 @@ async function validateArguments(channel: string, args: unknown[]): Promise<void
       }
     }
     for (const canvas of bundle.canvasData) { requirePlainObject(canvas, 'canvas migration'); requireId(canvas.canvasFileId, 'canvas identifier'); requireJsonPayload(canvas, 'canvas migration'); }
-    for (const record of [...bundle.pageContents, ...bundle.pageDrawings]) { requirePlainObject(record, 'page payload migration'); requireId(record.pageId, 'page payload identifier'); requireId(record.notebookId, 'notebook identifier'); requireJsonPayload(record.data, 'page payload migration'); }
+    for (const record of bundle.pageContents) { requirePlainObject(record, 'page payload migration'); requireId(record.pageId, 'page payload identifier'); requireId(record.notebookId, 'notebook identifier'); requireJsonPayload(record.data, 'page payload migration'); }
+    for (const record of bundle.pageDrawings) { requirePlainObject(record, 'page payload migration'); requireId(record.pageId, 'page payload identifier'); requireId(record.notebookId, 'notebook identifier'); requireDrawingPayload(record.data); }
     for (const asset of [...bundle.pdfFiles, ...bundle.imageFiles]) {
       requirePlainObject(asset, 'asset migration'); requireId(asset.id, 'asset identifier'); requireName(asset.fileName, 'asset file name');
       if (!(asset.data instanceof ArrayBuffer) || asset.data.byteLength === 0 || asset.data.byteLength > MAX_BINARY_BYTES) throw new Error('Invalid migration asset payload.');
@@ -421,7 +422,7 @@ async function permanentlyDeleteWorkspaceEntity(workspaceId: string, id: string,
 
 export function registerDomainHandlers() {
   registerHandler('clipboard:writeText', (_event, text: unknown) => {
-    if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > MAX_PAYLOAD_BYTES) throw new Error('Invalid clipboard text.');
+    if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > MAX_JSON_PAYLOAD_BYTES) throw new Error('Invalid clipboard text.');
     clipboard.writeText(text);
     if (clipboard.readText().replace(/\r\n/g, '\n') !== text.replace(/\r\n/g, '\n')) throw new Error('Clipboard is unavailable.');
   });
@@ -1035,7 +1036,7 @@ export function registerDomainHandlers() {
     return true;
   });
 
-  registerHandler('notebookPage:create', async (event, workspaceId: string, notebookId: string, sectionId: string, title: string, type: 'default' | 'pdf' = 'default', pdfDataId?: string) => {
+  registerHandler('notebookPage:create', async (event, workspaceId: string, notebookId: string, sectionId: string, title: string, type: 'default' | 'pdf' = 'default', pdfDataId?: string, titleProvenance?: 'default' | 'custom') => {
     const dir = workspaceService.getWorkspaceDirById(workspaceId);
     const ws = await workspaceService.readWorkspaceJson(dir);
     const pageId = generateId('page');
@@ -1046,6 +1047,7 @@ export function registerDomainHandlers() {
       notebookId,
       sectionId,
       title,
+      titleProvenance,
       type,
       pdfDataId,
       pageId,
@@ -1152,8 +1154,8 @@ export function registerDomainHandlers() {
   });
 
   registerHandler('notebook:saveDrawing', async (event, workspaceId: string, notebookId: string, pageId: string, drawingData: any) => {
+    requireDrawingPayload(drawingData);
     const decoded = typeof drawingData === 'string' ? JSON.parse(drawingData) : drawingData;
-    requireJsonPayload(decoded, 'drawing payload');
     const dir = workspaceService.getWorkspaceDirById(workspaceId);
     requireWorkspacePage(await workspaceService.readWorkspaceJson(dir), notebookId, pageId);
     const pagesDir = path.join(dir, 'Notebooks', notebookId, 'pages');

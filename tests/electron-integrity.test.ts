@@ -324,7 +324,7 @@ test('mixed note survives restart; trash restores; save failures are honest', as
       await page.waitForTimeout(400);
       // Autosave debounce 1s + IPC round trip; failure must be surfaced.
       const failureSignal = page.getByTestId('save-status').getByText('Save failed')
-        .or(page.getByText('Save failed. Your changes are kept in memory and will retry on the next edit.'));
+        .or(page.getByText(/Save failed\. Your changes are kept in memory/));
       await failureSignal.first().waitFor({ state: 'visible', timeout: 12000 });
       log.push('failure: StatusBar shows "Save failed" (no false success)');
     } finally {

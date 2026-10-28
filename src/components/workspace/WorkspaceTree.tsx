@@ -1,7 +1,8 @@
 import React from 'react';
-import { ChevronRight, FileText, Folder, FolderOpen, Layers, LayoutGrid, MoreHorizontal, Plus, Star } from 'lucide-react';
+import { Bookmark, ChevronRight, FileText, Folder, FolderOpen, Layers, LayoutGrid, MoreHorizontal, Plus, Star } from 'lucide-react';
 import { useLocation } from 'wouter';
 import { useWorkspaceStore } from '@/stores/workspaceStore';
+import { useBookmarkStore } from '@/stores/bookmarkStore';
 import { useUIStore } from '@/stores/uiStore';
 import type { Notebook, NotebookPage, NotebookSection } from '@/types/notebook';
 import type { CanvasFile, Folder as WorkspaceFolder } from '@/types/workspace';
@@ -294,6 +295,7 @@ const PageNode = React.memo(function PageNode({ page, depth }: { page: NotebookP
   const [, navigate] = useLocation();
   const isActive = useWorkspaceStore(state => state.activePageId === page.id);
   const isRenaming = useUIStore(state => state.renamingId === page.id);
+  const isBookmarked = useBookmarkStore(state => state.isBookmarked(page.notebookId, page.id));
   const { setActivePage, renameNotebookPage, moveNotebookPage, reorderItems } = useWorkspaceStore.getState();
   const { openContextMenu, setRenamingId } = useUIStore.getState();
   const [value, setValue] = React.useState(page.title);
@@ -317,7 +319,7 @@ const PageNode = React.memo(function PageNode({ page, depth }: { page: NotebookP
   return (
     <TreeRow
       itemId={page.id}
-        name={page.title}
+      name={page.title}
       depth={depth}
       active={isActive}
       onClick={() => {
@@ -334,6 +336,9 @@ const PageNode = React.memo(function PageNode({ page, depth }: { page: NotebookP
       onDragStart={(event) => event.dataTransfer.setData('application/json', JSON.stringify({ type: 'page', id: page.id, sectionId: page.sectionId }))}
       onDropItem={handleDropItem}
       icon={<FileText size={15} className="text-panvas-text-tertiary" />}
+      trailing={isBookmarked ? (
+        <Bookmark size={12} className="text-panvas-accent-blue fill-panvas-accent-blue shrink-0" aria-label="Bookmarked page" />
+      ) : undefined}
       label={isRenaming ? <input autoFocus value={value} onChange={event => setValue(event.target.value)} onBlur={save} onKeyDown={event => { if (event.key === 'Enter') save(); if (event.key === 'Escape') setRenamingId(null); }} onClick={event => event.stopPropagation()} className="w-full bg-transparent outline-none" /> : page.title}
     />
   );

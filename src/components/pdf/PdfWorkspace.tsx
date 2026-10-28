@@ -39,6 +39,9 @@ import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
 import { useHasTouchInput } from '@/hooks/useHasTouchInput';
 import { useFullDarkView } from '@/hooks/useFullDarkView';
 import { fullDarkSurfaceColor } from '@/lib/fullDarkView';
+import { savePdfPosition, getPdfPosition } from '@/lib/readingPosition';
+import { useBookmarkStore } from '@/stores/bookmarkStore';
+import { toggleBookmarkWithHistory } from '@/services/bookmarks/bookmarkHistory';
 
 const iconButtonClass = 'flex h-8 w-8 items-center justify-center rounded-md text-panvas-text-secondary transition-colors hover:bg-panvas-bg-hover hover:text-panvas-text-primary active:bg-panvas-bg-active focus-ring';
 interface PdfPageDescriptor {
@@ -274,6 +277,14 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
       commandedPageRef.current = target;
       setCurrentPage(target);
       setVisiblePage(target);
+    } else {
+      const saved = getPdfPosition(page.id);
+      if (saved && typeof saved.pdfPage === 'number' && Number.isFinite(saved.pdfPage)) {
+        const target = Math.max(1, Math.min(numPages, Math.floor(saved.pdfPage)));
+        commandedPageRef.current = target;
+        setCurrentPage(target);
+        setVisiblePage(target);
+      }
     }
   }, [numPages, page?.id]);
 
@@ -360,6 +371,29 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
     positionedDocumentRef.current = null;
   }, [documentSessionId]);
 
+  const handleToggleBookmark = useCallback(async () => {
+    if (!documentSessionId || !currentPage) return;
+    if (notebookEngine?.history) {
+      await toggleBookmarkWithHistory(notebookEngine.history, {
+        documentId: documentSessionId,
+        pageIdOrNumber: currentPage,
+        documentType: 'pdf',
+        pageNumber: currentPage,
+        title: `Page ${currentPage}`,
+        workspaceId: workspace?.id,
+      });
+    } else {
+      await useBookmarkStore.getState().toggleBookmark(
+        documentSessionId,
+        currentPage,
+        'pdf',
+        currentPage,
+        `Page ${currentPage}`,
+        workspace?.id
+      );
+    }
+  }, [documentSessionId, currentPage, notebookEngine, workspace?.id]);
+
   useLayoutEffect(() => {
     const scroller = documentScrollRef.current;
     const first = pageElementRefs.current.get(pdfPageState.pageOrder[0]);
@@ -369,9 +403,14 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
     const bounds = scroller.getBoundingClientRect();
     const pageBounds = first.getBoundingClientRect();
     scroller.scrollLeft += pageBounds.left + pageBounds.width / 2 - bounds.left - bounds.width / 2;
-    scroller.scrollTop = containerSize.height / 2;
+    const saved = page?.id ? getPdfPosition(page.id) : null;
+    if (saved && !commandedPageRef.current && typeof saved.scrollY === 'number' && saved.scrollY > 0) {
+      scroller.scrollTop = Math.min(saved.scrollY, Math.max(0, scroller.scrollHeight - scroller.clientHeight));
+    } else {
+      scroller.scrollTop = containerSize.height / 2;
+    }
     positionedDocumentRef.current = documentSessionId;
-  }, [containerSize, documentSessionId, geometryReady, pdfPageState.pageOrder, viewport.scale]);
+  }, [containerSize, documentSessionId, geometryReady, page?.id, pdfPageState.pageOrder, viewport.scale]);
 
   useEffect(() => {
     const fitKey = isPhone ? `${documentSessionId}:${containerSize.width}` : documentSessionId;
@@ -424,6 +463,13 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
       }
       if (visiblePageRef.current !== currentPageRef.current) {
         activatePage(visiblePageRef.current);
+      }
+      if (page?.id) {
+        savePdfPosition(page.id, {
+          pdfPage: visiblePageRef.current,
+          scrollX: scroller.scrollLeft,
+          scrollY: scroller.scrollTop,
+        });
       }
     };
     const resolveVisiblePage = () => {
@@ -520,6 +566,12 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
         if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
           e.preventDefault();
           notebookEngine.selection.pasteSelection();
+        }
+        if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'b' || e.code === 'KeyB')) {
+          if (documentSessionId && currentPage) {
+            e.preventDefault();
+            void handleToggleBookmark();
+          }
         }
         
         // Bug 4: Robust zoom shortcuts
@@ -817,7 +869,20 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
       </div>}
       {useToolDock && mobileControlsOpen && <div className="panvas-pdf-controls-sheet panvas-mobile-sheet panvas-overlay">
         <button type="button" className="panvas-sheet-close" onClick={() => setMobileControlsOpen(false)}>Done</button>
-        <BottomNavigation page={currentOrderIndex + 1} totalPages={numPages} onPageChange={orderPage => navigateToPage(pdfPageState.pageOrder[orderPage - 1] ?? currentPage)} engine={notebookEngine} zoom={viewport.scale} onZoom={setZoomStable} onExport={handleExport} isExporting={isExporting} />
+        <BottomNavigation
+          page={currentOrderIndex + 1}
+          totalPages={numPages}
+          onPageChange={orderPage => navigateToPage(pdfPageState.pageOrder[orderPage - 1] ?? currentPage)}
+          engine={notebookEngine}
+          zoom={viewport.scale}
+          onZoom={setZoomStable}
+          onExport={handleExport}
+          isExporting={isExporting}
+          documentId={documentSessionId ?? undefined}
+          currentPage={currentPage}
+          workspaceId={workspace?.id}
+          onToggleBookmark={handleToggleBookmark}
+        />
       </div>}
       {/* UI Overlays */}
       <div className="panvas-layer-toolbar pointer-events-none absolute inset-0 flex p-4 justify-between pointer-events-none">
@@ -835,6 +900,7 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
             isSidebarOpen={isSidebarOpen}
             setIsSidebarOpen={setIsSidebarOpen}
             engine={notebookEngine}
+            documentId={documentSessionId ?? undefined}
             pageOrder={pdfPageState.pageOrder}
             rotations={pdfPageState.rotations}
             onRotatePage={handleRotatePage}
@@ -885,6 +951,10 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
               onZoom={setZoomStable}
               onExport={handleExport}
               isExporting={isExporting}
+              documentId={documentSessionId ?? undefined}
+              currentPage={currentPage}
+              workspaceId={workspace?.id}
+              onToggleBookmark={handleToggleBookmark}
             />}
             <button
               type="button"
@@ -1005,12 +1075,25 @@ function LazyPdfPageContent({ resident, children }: { resident: boolean; childre
   return <div className="absolute inset-0">{resident ? children : null}</div>;
 }
 
-function BottomNavigation({ 
-  page, totalPages, onPageChange, engine, zoom, onZoom, onExport, isExporting
-}: { 
-  page: number; totalPages: number; onPageChange: (page: number) => void;
-  engine: NotebookEngine; zoom: number; onZoom: (zoom: number) => void; onExport: () => void; isExporting: boolean;
-}) { 
+export interface BottomNavigationProps {
+  page: number;
+  totalPages: number;
+  onPageChange: (page: number) => void;
+  engine: NotebookEngine;
+  zoom: number;
+  onZoom: (zoom: number) => void;
+  onExport: () => void;
+  isExporting: boolean;
+  documentId?: string | null;
+  currentPage?: number;
+  workspaceId?: string | null;
+  onToggleBookmark?: () => void;
+}
+
+export function BottomNavigation({ 
+  page, totalPages, onPageChange, engine, zoom, onZoom, onExport, isExporting,
+  documentId, currentPage, workspaceId, onToggleBookmark
+}: BottomNavigationProps) { 
   const total = totalPages > 0 ? totalPages : 1;
   const zoomPercent = Math.round(zoom * 100);
 
@@ -1021,6 +1104,35 @@ function BottomNavigation({
   // value at first paint and never updates: this button showed a stale highlight, and its
   // toggle then computed the wrong target mode from it.
   const isHandTool = useToolState(engine).mode === 'hand';
+
+  // Active page to check for bookmark: prefer explicit currentPage prop, fallback to page (1-based order)
+  const activeBookmarkPage = currentPage ?? page;
+  const isBookmarked = useBookmarkStore((s) =>
+    documentId && activeBookmarkPage ? s.isBookmarked(documentId, activeBookmarkPage) : false
+  );
+
+  const handleToggle = onToggleBookmark ?? (() => {
+    if (!documentId || !activeBookmarkPage) return;
+    if (engine?.history) {
+      void toggleBookmarkWithHistory(engine.history, {
+        documentId,
+        pageIdOrNumber: activeBookmarkPage,
+        documentType: 'pdf',
+        pageNumber: activeBookmarkPage,
+        title: `Page ${activeBookmarkPage}`,
+        workspaceId,
+      });
+    } else {
+      void useBookmarkStore.getState().toggleBookmark(
+        documentId,
+        activeBookmarkPage,
+        'pdf',
+        activeBookmarkPage,
+        `Page ${activeBookmarkPage}`,
+        workspaceId
+      );
+    }
+  });
 
   return (
     <div className="panvas-floating-surface flex max-w-[calc(100vw-2rem)] flex-wrap items-center justify-center gap-1.5 p-1.5" role="toolbar" aria-label="PDF page controls">
@@ -1045,6 +1157,17 @@ function BottomNavigation({
           aria-label="Pan Tool"
         >
           <Hand size={15} />
+        </button>
+        <button
+          type="button"
+          onClick={handleToggle}
+          className={`${iconButtonClass} ${isBookmarked ? 'text-panvas-accent-blue bg-panvas-bg-active' : ''}`}
+          title={isBookmarked ? 'Remove bookmark' : 'Bookmark this page'}
+          aria-label={isBookmarked ? 'Remove bookmark' : 'Bookmark this page'}
+          aria-pressed={isBookmarked}
+          data-testid="pdf-bookmark-toggle-button"
+        >
+          <Bookmark size={15} className={isBookmarked ? 'text-panvas-accent-blue fill-current' : ''} />
         </button>
         <button type="button" onClick={onExport} disabled={isExporting} className={iconButtonClass} title="Export annotated PDF" aria-label="Export annotated PDF">
           <Download size={15} />

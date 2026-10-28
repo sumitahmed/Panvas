@@ -3,6 +3,7 @@ import test from 'node:test';
 import { residentPageIds, reuseResidentPageIds } from '../src/components/notebook/pageVisualWindow.ts';
 import { InputManager } from '../src/components/notebook/engine/InputManager.ts';
 import { ToolManager } from '../src/components/notebook/engine/ToolManager.ts';
+import { WetInkSurface } from '../src/components/notebook/engine/WetInkSurface.ts';
 import { getBrowserCanvasVisualScale, resolveCanvasBackingScale, ViewportManager } from '../src/components/notebook/engine/ViewportManager.ts';
 
 test('120 scroll positions within the same resident rows retain React state identity', () => {
@@ -128,3 +129,81 @@ for (const mode of ['draw', 'erase', 'ruler', 'laser']) {
     input.detach();
   }));
 }
+
+function fakeCanvasContext(canvas: any) {
+  return {
+    canvas,
+    fillStyle: '',
+    resetTransform() {}, clearRect() {}, save() {}, restore() {}, setTransform() {},
+    beginPath() {}, rect() {}, clip() {}, drawImage() {}, fill() {},
+    moveTo() {}, lineTo() {}, arc() {}, closePath() {},
+  };
+}
+
+function fakeCanvas(connected = false) {
+  const style: any = {};
+  let opacityWrites = 0;
+  Object.defineProperty(style, 'opacity', {
+    enumerable: true,
+    get: () => style._opacity ?? '',
+    set: (value: string) => { style._opacity = value; opacityWrites++; },
+  });
+  const canvas: any = {
+    width: 120, height: 90, style, dataset: {}, isConnected: connected,
+    setAttribute() {},
+    remove() { canvas.isConnected = false; },
+    getContext() { return fakeCanvasContext(canvas); },
+    get opacityWrites() { return opacityWrites; },
+  };
+  return canvas;
+}
+
+function withCanvasDom(run: () => void) {
+  const previousDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  const previousComputedStyle = Object.getOwnPropertyDescriptor(globalThis, 'getComputedStyle');
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: {
+    createElement: () => fakeCanvas(),
+  } });
+  Object.defineProperty(globalThis, 'getComputedStyle', { configurable: true, value: () => ({ zIndex: '10' }) });
+  try { run(); } finally {
+    if (previousDocument) Object.defineProperty(globalThis, 'document', previousDocument);
+    else delete (globalThis as any).document;
+    if (previousComputedStyle) Object.defineProperty(globalThis, 'getComputedStyle', previousComputedStyle);
+    else delete (globalThis as any).getComputedStyle;
+  }
+}
+
+test('wet ink keeps one connected spare across a handwriting burst and avoids redundant opacity writes', () => withCanvasDom(() => {
+  const targetCanvas = fakeCanvas(true);
+  targetCanvas.style = { left: '0px', top: '0px', width: '120px', height: '90px' };
+  targetCanvas.insertions = 0;
+  targetCanvas.insertAdjacentElement = (_position: string, node: any) => {
+    node.isConnected = true;
+    targetCanvas.insertions++;
+  };
+  const target = { canvas: targetCanvas } as any;
+  const transform = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 } as any;
+  const surface = new WetInkSurface(target, transform);
+  assert.equal(targetCanvas.insertions, 1);
+
+  const stroke = {
+    id: 'live', type: 'stroke', tool: 'pen', color: '#111', opacity: 0.4, thickness: 2, createdAt: 0,
+    points: [{ x: 4, y: 4, pressure: 0.5, t: 0 }, { x: 12, y: 10, pressure: 0.5, t: 8 }],
+  } as any;
+  surface.render(stroke);
+  assert.equal(surface.canvas.style.opacity, '0.4');
+  const writes = (surface.canvas as any).opacityWrites;
+  surface.render(stroke);
+  assert.equal((surface.canvas as any).opacityWrites, writes, 'unchanged opacity must not dirty the canvas style');
+
+  surface.pause();
+  assert.equal(surface.canvas.isConnected, true, 'transparent spare stays connected between adjacent strokes');
+  assert.equal(surface.canvas.style.opacity, '0');
+  surface.resume(transform);
+  assert.equal(targetCanvas.insertions, 1, 'resuming a connected spare must not reinsert it');
+  surface.render(stroke);
+  assert.equal(surface.canvas.style.opacity, '0.4', 'resumed surface restores ink opacity');
+
+  surface.dispose();
+  assert.equal(surface.canvas.isConnected, false);
+}));

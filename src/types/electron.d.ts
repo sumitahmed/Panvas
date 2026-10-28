@@ -74,7 +74,7 @@ export interface PanvasDomainAPI {
     getAll: (wsId: string) => Promise<NotebookSection[]>;
   };
   notebookPage: {
-    create: (wsId: string, notebookId: string, sectionId: string, title: string, type?: 'default' | 'pdf', pdfDataId?: string) => Promise<NotebookPage>;
+    create: (wsId: string, notebookId: string, sectionId: string, title: string, type?: 'default' | 'pdf', pdfDataId?: string, titleProvenance?: 'default' | 'custom') => Promise<NotebookPage>;
     update: (wsId: string, pageId: string, updates: Partial<NotebookPage>) => Promise<NotebookPage>;
     delete: (wsId: string, pageId: string) => Promise<boolean>;
     getAll: (wsId: string) => Promise<NotebookPage[]>;

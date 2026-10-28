@@ -54,6 +54,19 @@ export class SelectionEngine {
   // Undo state
   private originalPositions: Map<string, any> = new Map();
   private originalInkClips: Map<string, Stroke['inkClip']> = new Map();
+  private originalElementBoxes: Map<string, BoundingBox> = new Map();
+  private currentDragTransform: {
+    mode: string;
+    dx: number;
+    dy: number;
+    scaleX?: number;
+    scaleY?: number;
+    transX?: number;
+    transY?: number;
+    cos?: number;
+    sin?: number;
+    center?: { x: number; y: number };
+  } | null = null;
   private originalBox: BoundingBox | null = null;
   private rotationStartAngle = 0;
 
@@ -549,6 +562,24 @@ export class SelectionEngine {
     return true;
   }
 
+  getCollectiveBoundingBox(): { x: number; y: number; width: number; height: number } | null {
+    if (this.selectedElements.length === 0) return null;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const el of this.selectedElements) {
+      const box = this.getBoundingBox(el);
+      if (!box) continue;
+      minX = Math.min(minX, box.x);
+      minY = Math.min(minY, box.y);
+      maxX = Math.max(maxX, box.x + box.width);
+      maxY = Math.max(maxY, box.y + box.height);
+    }
+    if (!Number.isFinite(minX)) return null;
+    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+  }
+
   getHandleAt(x: number, y: number): { id: string, handle: Exclude<ResizeHandle, null> } | null {
     if (this.usesStickyDomControls()) return null;
     const handleSize = 12 / this.viewport.getState().scale;
@@ -566,27 +597,39 @@ export class SelectionEngine {
       const rotation = this.getObjectRotation(el) * Math.PI / 180;
       const transform = (px: number, py: number) => {
         const dx = px - midX, dy = py - midY;
-        return { cx: midX + dx * Math.cos(rotation) - dy * Math.sin(rotation), cy: midY + dx * Math.sin(rotation) + dy * Math.cos(rotation) };
+        return {
+          cx: midX + dx * Math.cos(rotation) - dy * Math.sin(rotation),
+          cy: midY + dx * Math.sin(rotation) + dy * Math.cos(rotation),
+        };
       };
-      const rawHandles: { handle: Exclude<ResizeHandle, null>; cx: number; cy: number }[] = [
-        { handle: 'tl', cx: box.x - 4, cy: box.y - 4 },
-        { handle: 'tc', cx: midX, cy: box.y - 4 },
-        { handle: 'tr', cx: box.x + box.width + 4, cy: box.y - 4 },
-        { handle: 'ml', cx: box.x - 4, cy: midY },
-        { handle: 'mr', cx: box.x + box.width + 4, cy: midY },
-        { handle: 'bl', cx: box.x - 4, cy: box.y + box.height + 4 },
-        { handle: 'bc', cx: midX, cy: box.y + box.height + 4 },
-        { handle: 'br', cx: box.x + box.width + 4, cy: box.y + box.height + 4 },
-        { handle: 'rotate', ...transform(midX, box.y - 32 / this.viewport.getState().scale) },
-      ];
-      const handles: { handle: Exclude<ResizeHandle, null>; cx: number; cy: number }[] = rawHandles.map(item => item.handle === 'rotate' ? item : ({ handle: item.handle, ...transform(item.cx, item.cy) }));
 
+      const scale = this.viewport.getState().scale;
+      const handles: { handle: Exclude<ResizeHandle, null>; cx: number; cy: number }[] = [
+        { handle: 'tl', ...transform(box.x - 4, box.y - 4) },
+        { handle: 'tc', ...transform(midX, box.y - 4) },
+        { handle: 'tr', ...transform(box.x + box.width + 4, box.y - 4) },
+        { handle: 'ml', ...transform(box.x - 4, midY) },
+        { handle: 'mr', ...transform(box.x + box.width + 4, midY) },
+        { handle: 'bl', ...transform(box.x - 4, box.y + box.height + 4) },
+        { handle: 'bc', ...transform(midX, box.y + box.height + 4) },
+        { handle: 'br', ...transform(box.x + box.width + 4, box.y + box.height + 4) },
+        { handle: 'rotate', ...transform(midX, box.y - 32 / scale) }
+      ];
+
+      const rotateStalkLower = transform(midX, box.y - 24 / scale);
       for (const h of handles) {
-        if (x >= h.cx - h2 && x <= h.cx + h2 && y >= h.cy - h2 && y <= h.cy + h2) {
+        if (h.handle === 'rotate') {
+          const hitCanonical = x >= h.cx - h2 && x <= h.cx + h2 && y >= h.cy - h2 && y <= h.cy + h2 + (10 / scale);
+          const hitLower = x >= rotateStalkLower.cx - h2 && x <= rotateStalkLower.cx + h2 && y >= rotateStalkLower.cy - h2 && y <= rotateStalkLower.cy + h2;
+          if (hitCanonical || hitLower) {
+            return { id: el.id, handle: h.handle };
+          }
+        } else if (x >= h.cx - h2 && x <= h.cx + h2 && y >= h.cy - h2 && y <= h.cy + h2) {
           return { id: el.id, handle: h.handle };
         }
       }
     }
+
     return null;
   }
 
@@ -599,11 +642,17 @@ export class SelectionEngine {
     }
 
     const topHit = this.hitTest(x, y);
-    // Preserve group dragging only when a higher layer is not covering it.
-    for (const el of this.selectedElements) {
-      const box = this.getBoundingBox(el);
-      if ((!topHit || this.selectedIds.has(topHit.id)) && !shiftKey && box && x >= box.x && x <= box.x + box.width && y >= box.y && y <= box.y + box.height) {
+    if (this.selectedElements.length > 1) {
+      const group = this.getCollectiveBoundingBox();
+      if ((!topHit || this.selectedIds.has(topHit.id)) && !shiftKey && group && x >= group.x && x <= group.x + group.width && y >= group.y && y <= group.y + group.height) {
         return true;
+      }
+    } else {
+      for (const el of this.selectedElements) {
+        const box = this.getBoundingBox(el);
+        if ((!topHit || this.selectedIds.has(topHit.id)) && !shiftKey && box && x >= box.x && x <= box.x + box.width && y >= box.y && y <= box.y + box.height) {
+          return true;
+        }
       }
     }
 
@@ -944,15 +993,22 @@ export class SelectionEngine {
     this.dragStartY = y;
     this.originalPositions.clear();
     this.originalInkClips.clear();
+    this.originalElementBoxes.clear();
+    this.currentDragTransform = null;
+    for (const el of this.selectedElements) {
+      const box = this.getBoundingBox(el);
+      if (box) this.originalElementBoxes.set(el.id, box);
+    }
 
     const handleHit = this.getHandleAt(x, y);
     this.dragMode = handleHit ? handleHit.handle : 'move';
-    // We can only resize one element at a time currently
-    if (this.dragMode !== 'move' && this.selectedElements.length === 1) {
-      this.originalBox = this.getBoundingBox(this.selectedElements[0]);
+    if (this.dragMode !== 'move') {
+      if (this.selectedElements.length === 1) {
+        this.originalBox = this.getBoundingBox(this.selectedElements[0]);
+      } else {
+        this.originalBox = this.getCollectiveBoundingBox();
+      }
     } else {
-      // Force move if multiple selected
-      this.dragMode = 'move';
       this.originalBox = null;
     }
     if (this.dragMode === 'rotate' && this.originalBox) {
@@ -994,80 +1050,147 @@ export class SelectionEngine {
     if (this.dragMode === 'move') {
       const dx = x - this.dragStartX;
       const dy = y - this.dragStartY;
+      this.currentDragTransform = { mode: 'move', dx, dy };
 
       for (const el of this.selectedElements) {
         const orig = this.originalPositions.get(el.id);
         if (!orig) continue;
         const object = this.getObject(el);
-        if (object) applyGroupedTranslation(object, orig, dx, dy);
+        if (object) {
+          if (el.type === 'stroke' && !(object as any).type) (object as any).type = 'stroke';
+          applyGroupedTranslation(object, orig, dx, dy);
+        }
       }
-    } else if (this.originalBox && this.selectedElements.length === 1) {
-      // 8-Handle Resize logic
+    } else if (this.originalBox) {
       const dx = x - this.dragStartX;
       const dy = y - this.dragStartY;
-      const el = this.selectedElements[0];
-      const origPos = this.originalPositions.get(el.id);
-      if (!origPos) return;
-
-      const origX = origPos.x ?? 0;
-      const origY = origPos.y ?? 0;
-      const origW = origPos.width ?? 100;
-      const origH = origPos.height ?? 40;
+      const box = this.originalBox;
 
       if (this.dragMode === 'rotate') {
-        const object = this.getObject(el) as (MixedPlacementObject & { rotation?: number }) | undefined;
-        if (object) {
-          const center = { x: this.originalBox.x + this.originalBox.width / 2, y: this.originalBox.y + this.originalBox.height / 2 };
-          const delta = (Math.atan2(y - center.y, x - center.x) - this.rotationStartAngle) * 180 / Math.PI;
-          object.rotation = ((origPos.rotation ?? 0) + delta + 360) % 360;
+        const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+        const delta = (Math.atan2(y - center.y, x - center.x) - this.rotationStartAngle) * 180 / Math.PI;
+        const rad = delta * Math.PI / 180;
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
+        this.currentDragTransform = { mode: 'rotate', dx, dy, cos, sin, center };
+
+        for (const el of this.selectedElements) {
+          const origPos = this.originalPositions.get(el.id);
+          if (!origPos) continue;
+
+          if (el.type === 'stroke') {
+            const stroke = this.drawingEngine.getStrokes().find(s => s.id === el.id);
+            if (stroke && Array.isArray(origPos)) {
+              for (let i = 0; i < stroke.points.length; i++) {
+                const ox = origPos[i].x - center.x;
+                const oy = origPos[i].y - center.y;
+                stroke.points[i].x = center.x + ox * cos - oy * sin;
+                stroke.points[i].y = center.y + ox * sin + oy * cos;
+              }
+            }
+          } else {
+            const object = this.getObject(el) as (MixedPlacementObject & { rotation?: number }) | undefined;
+            if (object && typeof origPos === 'object' && !Array.isArray(origPos)) {
+              if (this.selectedElements.length === 1) {
+                object.rotation = ((origPos.rotation ?? 0) + delta + 360) % 360;
+              } else {
+                const objW = origPos.width ?? 100;
+                const objH = origPos.height ?? 40;
+                const origObjCx = origPos.x + objW / 2;
+                const origObjCy = origPos.y + objH / 2;
+                const ox = origObjCx - center.x;
+                const oy = origObjCy - center.y;
+                const newObjCx = center.x + ox * cos - oy * sin;
+                const newObjCy = center.y + ox * sin + oy * cos;
+                object.x = newObjCx - objW / 2;
+                object.y = newObjCy - objH / 2;
+                object.rotation = ((origPos.rotation ?? 0) + delta + 360) % 360;
+              }
+            }
+          }
         }
         this.drawingEngine.redraw();
         return;
       }
 
-      if (el.type === 'text' || el.type === 'shape' || el.type === 'image') {
+      if (this.selectedElements.length === 1 && (this.selectedElements[0].type === 'text' || this.selectedElements[0].type === 'shape' || this.selectedElements[0].type === 'image')) {
+        const el = this.selectedElements[0];
+        const origPos = this.originalPositions.get(el.id);
         const object = this.getObject(el) as { x: number; y: number; width: number; height?: number; rotation?: number } | undefined;
-        if (object) this.resizeRotatedBox(object, origPos, this.dragMode, dx, dy, el.type === 'text' ? 40 : el.type === 'image' ? 20 : 10);
+        if (object && origPos) this.resizeRotatedBox(object, origPos, this.dragMode, dx, dy, el.type === 'text' ? 40 : el.type === 'image' ? 20 : 10);
         this.drawingEngine.redraw();
         return;
       }
 
-      {
-        const stroke = this.drawingEngine.getStrokes().find(s => s.id === el.id);
-        if (stroke && this.originalBox) {
-          const box = this.originalBox;
-          let scaleX = 1;
-          let scaleY = 1;
-          let transX = box.x;
-          let transY = box.y;
+      let scaleX = 1;
+      let scaleY = 1;
+      let transX = box.x;
+      let transY = box.y;
 
-          if (this.dragMode === 'br') {
-            scaleX = (box.width + dx) / box.width;
-            scaleY = (box.height + dy) / box.height;
-          } else if (this.dragMode === 'bl') {
-            scaleX = (box.width - dx) / box.width;
-            scaleY = (box.height + dy) / box.height;
-            transX = box.x + box.width;
-          } else if (this.dragMode === 'tr') {
-            scaleX = (box.width + dx) / box.width;
-            scaleY = (box.height - dy) / box.height;
-            transY = box.y + box.height;
-          } else if (this.dragMode === 'tl') {
-            scaleX = (box.width - dx) / box.width;
-            scaleY = (box.height - dy) / box.height;
-            transX = box.x + box.width;
-            transY = box.y + box.height;
+      if (this.dragMode === 'br') {
+        scaleX = (box.width + dx) / box.width;
+        scaleY = (box.height + dy) / box.height;
+      } else if (this.dragMode === 'bl') {
+        scaleX = (box.width - dx) / box.width;
+        scaleY = (box.height + dy) / box.height;
+        transX = box.x + box.width;
+      } else if (this.dragMode === 'tr') {
+        scaleX = (box.width + dx) / box.width;
+        scaleY = (box.height - dy) / box.height;
+        transY = box.y + box.height;
+      } else if (this.dragMode === 'tl') {
+        scaleX = (box.width - dx) / box.width;
+        scaleY = (box.height - dy) / box.height;
+        transX = box.x + box.width;
+        transY = box.y + box.height;
+      } else if (this.dragMode === 'mr') {
+        scaleX = (box.width + dx) / box.width;
+        scaleY = 1;
+      } else if (this.dragMode === 'ml') {
+        scaleX = (box.width - dx) / box.width;
+        scaleY = 1;
+        transX = box.x + box.width;
+      } else if (this.dragMode === 'bc') {
+        scaleX = 1;
+        scaleY = (box.height + dy) / box.height;
+      } else if (this.dragMode === 'tc') {
+        scaleX = 1;
+        scaleY = (box.height - dy) / box.height;
+        transY = box.y + box.height;
+      }
+
+      if (Math.abs(scaleX) < 0.05) scaleX = 0.05 * Math.sign(scaleX) || 0.05;
+      if (Math.abs(scaleY) < 0.05) scaleY = 0.05 * Math.sign(scaleY) || 0.05;
+      this.currentDragTransform = { mode: 'scale', dx, dy, scaleX, scaleY, transX, transY };
+
+      for (const el of this.selectedElements) {
+        const origPos = this.originalPositions.get(el.id);
+        if (!origPos) continue;
+
+        if (el.type === 'stroke') {
+          const stroke = this.drawingEngine.getStrokes().find(s => s.id === el.id);
+          if (stroke && Array.isArray(origPos)) {
+            for (let i = 0; i < stroke.points.length; i++) {
+              stroke.points[i].x = transX + (origPos[i].x - transX) * scaleX;
+              stroke.points[i].y = transY + (origPos[i].y - transY) * scaleY;
+            }
+            const originalClip = this.originalInkClips.get(el.id);
+            stroke.inkClip = originalClip?.map(polygon => polygon.map(ring => ring.map(([clipX, clipY]) => [clipX * scaleX, clipY * scaleY])));
           }
-
-          if (Math.abs(scaleX) < 0.05) scaleX = 0.05 * Math.sign(scaleX) || 0.05;
-          if (Math.abs(scaleY) < 0.05) scaleY = 0.05 * Math.sign(scaleY) || 0.05;
-
-          for (let i = 0; i < stroke.points.length; i++) {
-            stroke.points[i].x = transX + (origPos[i].x - transX) * scaleX;
-            stroke.points[i].y = transY + (origPos[i].y - transY) * scaleY;
+        } else {
+          const object = this.getObject(el) as (MixedPlacementObject & { rotation?: number }) | undefined;
+          if (object && typeof origPos === 'object' && !Array.isArray(origPos)) {
+            const relX = origPos.x - transX;
+            const relY = origPos.y - transY;
+            const newX = transX + relX * scaleX;
+            const newY = transY + relY * scaleY;
+            const newW = Math.max(10, (origPos.width ?? 100) * Math.abs(scaleX));
+            const newH = origPos.height ? Math.max(10, origPos.height * Math.abs(scaleY)) : undefined;
+            object.x = scaleX >= 0 ? newX : newX - newW;
+            object.y = scaleY >= 0 ? newY : newY - (newH ?? 0);
+            object.width = newW;
+            if (newH !== undefined) object.height = newH;
           }
-          const originalClip = this.originalInkClips.get(el.id);
-          stroke.inkClip = originalClip?.map(polygon => polygon.map(ring => ring.map(([clipX, clipY]) => [clipX * scaleX, clipY * scaleY])));
         }
       }
     }
@@ -1078,6 +1201,8 @@ export class SelectionEngine {
   finishDrag(x: number, y: number): boolean {
     if (!this.isDragging) return false;
     this.isDragging = false;
+    this.currentDragTransform = null;
+    this.originalElementBoxes.clear();
 
     const dx = x - this.dragStartX;
     const dy = y - this.dragStartY;
@@ -1277,16 +1402,19 @@ export class SelectionEngine {
           ctx.strokeRect(c.x - h2, c.y - h2, handleSize, handleSize);
           ctx.fillRect(c.x - h2, c.y - h2, handleSize, handleSize);
         }
+
+        // Draw rotation handle (circle above top-center)
         ctx.beginPath();
         ctx.moveTo(midX, box.y - 4);
         ctx.lineTo(midX, box.y - 32 / scale);
         ctx.stroke();
+
         ctx.beginPath();
         ctx.arc(midX, box.y - 32 / scale, 5 / scale, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
+
         ctx.restore();
-        ctx.setLineDash([5 / scale, 5 / scale]); // restore
       }
     }
 
@@ -1401,6 +1529,51 @@ export class SelectionEngine {
       if (!img) return null;
       return { x: img.x, y: img.y, width: img.width, height: img.height };
     } else {
+      if (this.isDragging && this.currentDragTransform && this.originalElementBoxes.has(el.id)) {
+        const origBox = this.originalElementBoxes.get(el.id)!;
+        const t = this.currentDragTransform;
+        if (t.mode === 'move') {
+          return {
+            x: origBox.x + t.dx,
+            y: origBox.y + t.dy,
+            width: origBox.width,
+            height: origBox.height,
+          };
+        }
+        if (t.mode === 'scale' && t.scaleX !== undefined && t.scaleY !== undefined && t.transX !== undefined && t.transY !== undefined) {
+          const x1 = t.transX + (origBox.x - t.transX) * t.scaleX;
+          const x2 = t.transX + (origBox.x + origBox.width - t.transX) * t.scaleX;
+          const y1 = t.transY + (origBox.y - t.transY) * t.scaleY;
+          const y2 = t.transY + (origBox.y + origBox.height - t.transY) * t.scaleY;
+          return {
+            x: Math.min(x1, x2),
+            y: Math.min(y1, y2),
+            width: Math.abs(x2 - x1),
+            height: Math.abs(y2 - y1),
+          };
+        }
+        if (t.mode === 'rotate' && t.cos !== undefined && t.sin !== undefined && t.center) {
+          const corners = [
+            { x: origBox.x, y: origBox.y },
+            { x: origBox.x + origBox.width, y: origBox.y },
+            { x: origBox.x, y: origBox.y + origBox.height },
+            { x: origBox.x + origBox.width, y: origBox.y + origBox.height },
+          ];
+          let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+          for (const c of corners) {
+            const ox = c.x - t.center.x;
+            const oy = c.y - t.center.y;
+            const rx = t.center.x + ox * t.cos - oy * t.sin;
+            const ry = t.center.y + ox * t.sin + oy * t.cos;
+            if (rx < minX) minX = rx;
+            if (rx > maxX) maxX = rx;
+            if (ry < minY) minY = ry;
+            if (ry > maxY) maxY = ry;
+          }
+          return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+        }
+      }
+
       const stroke = this.drawingEngine.getStrokes().find(s => s.id === el.id);
       if (!stroke || stroke.points.length === 0) return null;
 
@@ -1413,5 +1586,13 @@ export class SelectionEngine {
       }
       return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
     }
+  }
+
+  getOriginalPosition(id: string): any {
+    return this.originalPositions.get(id);
+  }
+
+  getOriginalElementBox(id: string): BoundingBox | undefined {
+    return this.originalElementBoxes.get(id);
   }
 }
