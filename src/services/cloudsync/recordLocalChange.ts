@@ -10,6 +10,7 @@
 import { hashCanonical } from './hash.ts';
 import { appendJournalEntry } from '@/database/syncJournalDB';
 import type { SyncEntityKind, JournalOperation } from './types.ts';
+import { CLOUD_SYNC_V2_ENABLED } from '@/config/features';
 
 export interface LocalChangeRecord {
   entityType: SyncEntityKind;
@@ -27,7 +28,7 @@ export async function recordLocalChange(change: LocalChangeRecord): Promise<void
   if (typeof indexedDB === 'undefined' && typeof (globalThis as any).indexedDB === 'undefined') {
     return;
   }
-  if (import.meta.env?.VITE_PANVAS_SYNC_V2 === 'true') {
+  if (CLOUD_SYNC_V2_ENABLED || import.meta.env?.VITE_PANVAS_SYNC_V2 === 'true') {
     const { scheduleAutoCloudSync } = await import('@/stores/cloudSyncStore');
     scheduleAutoCloudSync();
     return;

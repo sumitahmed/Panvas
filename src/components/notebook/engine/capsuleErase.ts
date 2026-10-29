@@ -5,14 +5,18 @@ import { getInkFamilyMaximumHalfWidth } from './inkFamilyGeometry.ts';
 
 type Interval = [number, number];
 export type EraseBounds = { left: number; top: number; right: number; bottom: number };
-export function eraseBounds(stroke: Stroke): EraseBounds {
-  const pad = (stroke.inkFamily ? getInkFamilyMaximumHalfWidth(stroke) : getStrokeRenderHalfWidth(stroke)) + 2;
+export function eraseBoundsWithHalfWidth(stroke: Stroke, halfWidth: number): EraseBounds {
+  const pad = halfWidth + 2;
   let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
   for (const p of stroke.points) {
     left = Math.min(left,p.x-pad); right = Math.max(right,p.x+pad);
     top = Math.min(top,p.y-pad); bottom = Math.max(bottom,p.y+pad);
   }
   return { left, top, right, bottom };
+}
+export function eraseBounds(stroke: Stroke): EraseBounds {
+  const halfWidth = stroke.inkFamily ? getInkFamilyMaximumHalfWidth(stroke) : getStrokeRenderHalfWidth(stroke);
+  return eraseBoundsWithHalfWidth(stroke, halfWidth);
 }
 export const boundsOverlap = (a: EraseBounds, b: EraseBounds) => a.left <= b.right && a.right >= b.left && a.top <= b.bottom && a.bottom >= b.top;
 

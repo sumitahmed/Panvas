@@ -259,7 +259,15 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
         // usable editor floor; never retain a previous, larger object height.
         object.height = nextHeight;
         engine.texts.updateTextBounds(object.id, size.width, nextHeight);
-        engine.drawing.redraw();
+        // Text is a DOM overlay, so its intrinsic height does not change the
+        // committed ink pixels. Only the selection chrome reads these bounds.
+        // Mounting a dense page can fire this observer for every text object at
+        // once; replaying the 1,200-stroke scene synchronously in each callback
+        // blocked layout and scrolling. Repaint only when this text is part of
+        // the current selection, and coalesce those repaints.
+        if (engine.selection.getSelectedElements().some(element => element.id === object.id)) {
+          engine.drawing.scheduleRedraw();
+        }
         setSize(prev => ({ ...prev, height: nextHeight }));
       }
     });

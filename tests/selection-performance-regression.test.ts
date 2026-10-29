@@ -177,7 +177,26 @@ test('Workstream C.1: Multi-element move maintains exact group translation, anal
   assert.equal(draggingBox.width, 150);
   assert.equal(draggingBox.height, 130);
 
-  // In-memory points must be correctly updated
+  // Non-stroke objects update in place during the preview.
+  assert.equal(sh1.x, 140);
+  assert.equal(sh1.y, 160);
+
+  // Stroke points stay canonical during the gesture; the renderer applies the
+  // preview transform and finishDrag commits the final geometry once.
+  assert.equal(s1.points[0].x, 10);
+  assert.equal(s1.points[0].y, 10);
+  assert.equal(s1.points[1].x, 30);
+  assert.equal(s1.points[1].y, 40);
+  assert.equal(s2.points[0].x, 50);
+  assert.equal(s2.points[0].y, 50);
+  assert.equal(engine.getCurrentDragTransform()?.mode, 'move');
+  assert.equal(engine.getCurrentDragTransform()?.dx, 40);
+  assert.equal(engine.getCurrentDragTransform()?.dy, 60);
+
+  // Finish drag commits the preview geometry exactly once.
+  const moved = engine.finishDrag(60, 80);
+  assert.equal(moved, true);
+
   assert.equal(s1.points[0].x, 50);
   assert.equal(s1.points[0].y, 70);
   assert.equal(s1.points[1].x, 70);
@@ -186,10 +205,6 @@ test('Workstream C.1: Multi-element move maintains exact group translation, anal
   assert.equal(s2.points[0].y, 110);
   assert.equal(sh1.x, 140);
   assert.equal(sh1.y, 160);
-
-  // Finish drag
-  const moved = engine.finishDrag(60, 80);
-  assert.equal(moved, true);
 
   // Verify undo restores exact initial state
   assert.equal(historyManager.canUndo(), true);
@@ -282,11 +297,15 @@ test('Workstream C.2: Multi-element 2x resize doubles relative distances and sca
   // Drag outward by collectiveBox.width and collectiveBox.height -> 2.0x scale
   engine.dragTo(214 + initialBox.width, 154 + initialBox.height);
 
-  // Stroke 1 scaled relative to collective origin (10, 10):
-  assert.equal(s1.points[0].x, 10 + (10 - 10) * 2);
-  assert.equal(s1.points[0].y, 10 + (10 - 10) * 2);
-  assert.equal(s1.points[1].x, 10 + (30 - 10) * 2);
-  assert.equal(s1.points[1].y, 10 + (30 - 10) * 2);
+  // Stroke points stay canonical during the preview; non-stroke objects scale
+  // immediately. The preview transform drives the rendered stroke.
+  assert.equal(s1.points[0].x, 10);
+  assert.equal(s1.points[0].y, 10);
+  assert.equal(s1.points[1].x, 30);
+  assert.equal(s1.points[1].y, 30);
+  assert.equal(engine.getCurrentDragTransform()?.mode, 'scale');
+  assert.equal(engine.getCurrentDragTransform()?.scaleX, 2);
+  assert.equal(engine.getCurrentDragTransform()?.scaleY, 2);
 
   // Shape 1 scaled relative to collective origin (10, 10):
   assert.equal(sh1.x, 10 + (110 - 10) * 2); // 210
@@ -299,11 +318,18 @@ test('Workstream C.2: Multi-element 2x resize doubles relative distances and sca
   assert.equal(t1.y, 10 + (110 - 10) * 2); // 210
   assert.equal(t1.width, 50 * 2);          // 100
 
+  // Commit the preview; the stroke now receives the exact scaled geometry.
+  engine.finishDrag(214 + initialBox.width, 154 + initialBox.height);
+
+  // Stroke 1 scaled relative to collective origin (10, 10):
+  assert.equal(s1.points[0].x, 10 + (10 - 10) * 2);
+  assert.equal(s1.points[0].y, 10 + (10 - 10) * 2);
+  assert.equal(s1.points[1].x, 10 + (30 - 10) * 2);
+  assert.equal(s1.points[1].y, 10 + (30 - 10) * 2);
+
   // Verify relative distance between Stroke 1 center (30, 30) and Shape 1 center (250, 160) exactly doubled
   const scaledDistS1ToSh1 = Math.hypot((sh1.x + sh1.width / 2) - 30, (sh1.y + sh1.height / 2) - 30);
   assert.equal(scaledDistS1ToSh1, 2 * initialDistS1ToSh1);
-
-  engine.finishDrag(214 + initialBox.width, 154 + initialBox.height);
 });
 
 test('Workstream C.3: Multi-element collective rotation rotates all items around collective centroid with zero drift', () => {
@@ -368,12 +394,33 @@ test('Workstream C.3: Multi-element collective rotation rotates all items around
   const targetY = centroidY + rotRadius * Math.sin(targetAngle);
   engine.dragTo(targetX, targetY);
 
+  // Stroke geometry is preview-only until commit; derive the preview center
+  // from the active drag transform (the same transform the renderer uses).
+  const transform = engine.getCurrentDragTransform();
+  assert.ok(transform && transform.mode === 'rotate' && transform.center);
+  const previewPoint = (point: { x: number; y: number }) => {
+    const ox = point.x - transform.center!.x;
+    const oy = point.y - transform.center!.y;
+    return {
+      x: transform.center!.x + ox * transform.cos! - oy * transform.sin!,
+      y: transform.center!.y + ox * transform.sin! + oy * transform.cos!,
+    };
+  };
+  const previewStart = previewPoint(s1.points[0]);
+  const previewEnd = previewPoint(s1.points[1]);
+
   // Stroke 1 was at (60, 100), distance 40 to the left of centroid (100, 100).
   // After 90-degree clockwise rotation, it should orbit to 40 above centroid: center at (100, 60).
-  const newS1CenterX = (s1.points[0].x + s1.points[1].x) / 2;
-  const newS1CenterY = (s1.points[0].y + s1.points[1].y) / 2;
-  assert.ok(Math.abs(newS1CenterX - 100) < 0.1, `s1 centerX should be ~100, got ${newS1CenterX}`);
-  assert.ok(Math.abs(newS1CenterY - 60) < 0.1, `s1 centerY should be ~60, got ${newS1CenterY}`);
+  const newS1CenterX = (previewStart.x + previewEnd.x) / 2;
+  const newS1CenterY = (previewStart.y + previewEnd.y) / 2;
+  assert.ok(Math.abs(newS1CenterX - 100) < 0.1, `s1 preview centerX should be ~100, got ${newS1CenterX}`);
+  assert.ok(Math.abs(newS1CenterY - 60) < 0.1, `s1 preview centerY should be ~60, got ${newS1CenterY}`);
+
+  // Canonical points must remain untouched during the preview.
+  assert.equal(s1.points[0].x, 50);
+  assert.equal(s1.points[0].y, 100);
+  assert.equal(s1.points[1].x, 70);
+  assert.equal(s1.points[1].y, 100);
 
   // Shape 1 was at (140, 100), distance 40 to the right of centroid.
   // After 90-degree rotation, it should orbit to 40 below centroid: center at (100, 140).
@@ -384,6 +431,12 @@ test('Workstream C.3: Multi-element collective rotation rotates all items around
   assert.ok(Math.abs((sh1.rotation ?? 0) - 90) < 0.1, `sh1 rotation should be ~90 deg`);
 
   engine.finishDrag(targetX, targetY);
+
+  // Commit applies the exact preview geometry to the canonical stroke points.
+  const finalS1CenterX = (s1.points[0].x + s1.points[1].x) / 2;
+  const finalS1CenterY = (s1.points[0].y + s1.points[1].y) / 2;
+  assert.ok(Math.abs(finalS1CenterX - 100) < 0.1, `s1 final centerX should be ~100, got ${finalS1CenterX}`);
+  assert.ok(Math.abs(finalS1CenterY - 60) < 0.1, `s1 final centerY should be ~60, got ${finalS1CenterY}`);
 });
 
 // ---------------------------------------------------------------------------
@@ -762,4 +815,50 @@ test('Workstream C.6: 500+ strokes selection transformation executes in <16ms pe
   const firstStroke = drawingEngine.getStrokes()[0];
   assert.equal(firstStroke.points[0].x, 60, 'First stroke translated by +60px');
   assert.equal(firstStroke.points[0].y, 60, 'First stroke translated by +60px');
+});
+
+test('SelectionEngine multi-element selection renders collective handles without interior stroke handles', () => {
+  const { engine, drawingEngine, layerManager } = createSelectionTestHarness();
+  const activeLayer = layerManager.getActiveLayerId();
+  for (let s = 0; s < 3; s++) {
+    const points: StrokePoint[] = [];
+    for (let i = 0; i < 10; i++) {
+      points.push({ x: 100 + s * 100 + i * 5, y: 100 + i * 5, pressure: 0.5, t: i * 16 });
+    }
+    const stroke: Stroke = {
+      id: `multi-stroke-${s}`,
+      points,
+      color: '#000000',
+      thickness: 2,
+      opacity: 1,
+      tool: 'pen',
+      layerId: activeLayer,
+    };
+    drawingEngine.addStroke(stroke);
+  }
+
+  engine.selectElement('multi-stroke-0', 'stroke', true);
+  engine.selectElement('multi-stroke-1', 'stroke', true);
+  engine.selectElement('multi-stroke-2', 'stroke', true);
+
+  const collective = engine.getCollectiveBoundingBox();
+  assert.ok(collective, 'Collective bounding box must exist');
+
+  const interiorX = collective.x + collective.width / 2;
+  const interiorY = collective.y + collective.height / 2;
+  const interiorHandle = engine.getHandleAt(interiorX, interiorY);
+  assert.equal(interiorHandle, null, 'Interior point must not hit any handle in multi-selection');
+
+  const cornerHandle = engine.getHandleAt(collective.x + collective.width, collective.y + collective.height);
+  assert.ok(cornerHandle, 'Perimeter corner must hit collective resize handle');
+  assert.equal(cornerHandle?.handle, 'br');
+  assert.equal(cornerHandle?.id, 'collective');
+
+  engine.clearSelection(false);
+  engine.selectElement('multi-stroke-0', 'stroke', false);
+  const singleBox = engine.getBoundingBox({ type: 'stroke', id: 'multi-stroke-0' });
+  assert.ok(singleBox);
+  const singleHandle = engine.getHandleAt(singleBox.x + singleBox.width, singleBox.y + singleBox.height);
+  assert.ok(singleHandle);
+  assert.equal(singleHandle?.id, 'multi-stroke-0');
 });

@@ -638,7 +638,18 @@ test('CHALLENGE 3.1: Group 2x scaling strictly doubles all pairwise relative dis
   selectionEngine.startDrag(brX + 4, brY + 4);
   selectionEngine.dragTo(brX + 4 + initialBox.width, brY + 4 + initialBox.height);
 
-  // Centers after scale:
+  // Preview keeps canonical stroke points untouched; shapes/text scale live.
+  assert.equal(s1.points[0].x, 20);
+  assert.equal(s1.points[0].y, 20);
+  assert.equal(s1.points[1].x, 40);
+  assert.equal(s1.points[1].y, 40);
+  assert.equal(sh1.width, 80);
+  assert.equal(sh1.height, 80);
+  assert.equal(t1.width, 120);
+
+  selectionEngine.finishDrag(brX + 4 + initialBox.width, brY + 4 + initialBox.height);
+
+  // Centers after scale (stroke geometry committed exactly once):
   const c1_new = { x: (s1.points[0].x + s1.points[1].x) / 2, y: (s1.points[0].y + s1.points[1].y) / 2 };
   const c2_new = { x: sh1.x + sh1.width / 2, y: sh1.y + sh1.height / 2 };
   const c3_new = { x: t1.x + t1.width / 2, y: t1.y + (t1.height ?? 40) / 2 };
@@ -656,8 +667,6 @@ test('CHALLENGE 3.1: Group 2x scaling strictly doubles all pairwise relative dis
   assert.equal(sh1.width, 80);
   assert.equal(sh1.height, 80);
   assert.equal(t1.width, 120);
-
-  selectionEngine.finishDrag(brX + 4 + initialBox.width, brY + 4 + initialBox.height);
 });
 
 test('CHALLENGE 3.2: Collective rotation rotates elements in pure orbit around centroid with stationary centroid and zero drift', () => {
@@ -730,8 +739,23 @@ test('CHALLENGE 3.2: Collective rotation rotates elements in pure orbit around c
     const targetY = cy + rHandle * Math.sin(rad);
     selectionEngine.dragTo(targetX, targetY);
 
-    const s1_cx = (s1.points[0].x + s1.points[1].x) / 2;
-    const s1_cy = (s1.points[0].y + s1.points[1].y) / 2;
+    // Canonical stroke points stay untouched during the preview. Derive the
+    // rendered center from the active transform, exactly as the renderer does.
+    assert.equal(s1.points[0].x, 140);
+    assert.equal(s1.points[0].y, 200);
+    assert.equal(s1.points[1].x, 160);
+    assert.equal(s1.points[1].y, 200);
+    const transform = selectionEngine.getCurrentDragTransform();
+    assert.ok(transform && transform.mode === 'rotate' && transform.center && transform.cos !== undefined && transform.sin !== undefined);
+    const previewCenter = { x: 0, y: 0 };
+    for (const point of s1.points) {
+      const ox = point.x - transform.center!.x;
+      const oy = point.y - transform.center!.y;
+      previewCenter.x += transform.center!.x + ox * transform.cos! - oy * transform.sin!;
+      previewCenter.y += transform.center!.y + ox * transform.sin! + oy * transform.cos!;
+    }
+    const s1_cx = previewCenter.x / s1.points.length;
+    const s1_cy = previewCenter.y / s1.points.length;
     const sh1_cx = sh1.x + sh1.width / 2;
     const sh1_cy = sh1.y + sh1.height / 2;
 
@@ -748,13 +772,13 @@ test('CHALLENGE 3.2: Collective rotation rotates elements in pure orbit around c
     assert.ok(Math.abs(currentCentroidY - cy) < 1e-4, `Centroid Y drifted: got ${currentCentroidY}`);
   }
 
-  // At 360 degrees: verify return to exact initial coordinates
+  selectionEngine.finishDrag(200, rotStartY);
+
+  // At 360 degrees: verify the committed stroke returns to exact initial coordinates
   const s1_final_cx = (s1.points[0].x + s1.points[1].x) / 2;
   const s1_final_cy = (s1.points[0].y + s1.points[1].y) / 2;
   assert.ok(Math.abs(s1_final_cx - 150) < 1e-3, `Stroke 1 X after 360 rotation: got ${s1_final_cx}, expected 150`);
   assert.ok(Math.abs(s1_final_cy - 200) < 1e-3, `Stroke 1 Y after 360 rotation: got ${s1_final_cy}, expected 200`);
-
-  selectionEngine.finishDrag(200, rotStartY);
 });
 
 test('CHALLENGE 3.3: Undo/Redo restores exact 64-bit IEEE coordinates with zero accumulated drift across repeated cycles', () => {

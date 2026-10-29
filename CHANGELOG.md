@@ -2,6 +2,14 @@
 
 All notable Panvas changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.1.13] - 2026-10-29
+
+- Fluid live handwriting: enabled immediate synchronous inking for solid pen strokes, eliminated synchronous style queries on pen down, and extended buffer retention across pauses to eliminate GC churn.
+- Fixed intermittent frame drop and stroke jitter during active handwriting: introduced sub-millisecond memoized canonical JSON hashing with StrokePoint fast paths (from ~198ms to 0.03ms), eliminated spurious React re-renders on save cycles, deferred external state updates during active stylus contact, and added event-loop yielding in background cloud sync scans.
+- Fixed Select tool geometry distortion and stretching during drag transforms on dense notebook pages.
+- Fixed Cloud Sync "Use this device" conflict resolution failure, ensuring unresolved conflicts cleanly complete and review state dismisses.
+- Maintained smooth dense multi-page scrolling and high-fidelity handwriting input across 60Hz and 120Hz displays.
+
 ## [0.1.12] - 2026-10-28
 
 - Optimized Select tool and transform manipulation on dense notebook pages (2,000+ strokes), replacing per-frame geometry re-extrusion with GPU affine transforms on pre-compiled Path2D and backing-canvas damage caching (<1.8ms frames under 4× CPU throttling).

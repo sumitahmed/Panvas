@@ -151,7 +151,11 @@ export function splitStrokePointsOutsideCircle(
 export function getStrokeRenderHalfWidth(stroke: Stroke): number {
   if (stroke.inkFamily) return getInkFamilyRenderHalfWidth(stroke);
   const thickness = Math.max(0, stroke.thickness || 0);
-  const maxPressure = Math.max(0.5, ...stroke.points.map(point => point.pressure || 0.5));
+  let maxPressure = 0.5;
+  for (const point of stroke.points) {
+    const pressure = point.pressure || 0.5;
+    if (pressure > maxPressure) maxPressure = pressure;
+  }
 
   switch (stroke.tool) {
     case 'marker':

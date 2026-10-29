@@ -24,7 +24,21 @@ function appendToken(doc: Document, parent: HTMLElement, node: HighlightNode, cl
   }
 }
 
+// Text snapshots are immutable and page data is cached by identity. Page
+// previews remount on every scroll pass, so re-running TipTap's DOM serializer
+// for the same rich-text/code/table content rebuilt the whole extension graph
+// each time. Weak keys release the HTML with the page cache.
+const staticHtmlCache = new WeakMap<object, string>();
+
 export function renderNotebookStaticHtml(content: JSONContent): string {
+  const cached = staticHtmlCache.get(content);
+  if (cached !== undefined) return cached;
+  const html = renderNotebookStaticHtmlUncached(content);
+  staticHtmlCache.set(content, html);
+  return html;
+}
+
+function renderNotebookStaticHtmlUncached(content: JSONContent): string {
   const unsupported = unsupportedNotebookContent(content, getNotebookSchema());
   if (unsupported.length) content = unsupportedContentFallback(content, unsupported);
   else content = notebookDocumentViewContent(content);

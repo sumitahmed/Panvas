@@ -64,7 +64,10 @@ function providerForCycle(provider: SyncV2Provider): SyncV2Provider & { releaseO
 async function mapBounded<T>(items: readonly T[], worker: (item: T) => Promise<void>, concurrency = 8): Promise<void> {
   let next = 0;
   const settled = await Promise.allSettled(Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (next < items.length) await worker(items[next++]);
+    while (next < items.length) {
+      await worker(items[next++]);
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
   }));
   const failed = settled.find(item => item.status === 'rejected');
   if (failed?.status === 'rejected') throw failed.reason;

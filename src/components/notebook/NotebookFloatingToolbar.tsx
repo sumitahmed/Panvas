@@ -174,7 +174,6 @@ interface NotebookFloatingToolbarProps {
   engine: NotebookEngine;
   saveKey?: string; // Optional custom key for persistence (e.g. PDF composite key)
   workspaceId?: string;
-  hasSelectedStrokes?: boolean;
   onConvertHandwriting?: () => void;
   embedded?: boolean;
   hideCollapseButton?: boolean;
@@ -184,7 +183,7 @@ interface NotebookFloatingToolbarProps {
   overflowActions?: React.ReactNode;
 }
 
-export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = ({ editor, engine, saveKey, workspaceId, hasSelectedStrokes = false, onConvertHandwriting, embedded = false, hideCollapseButton = false, fullscreenToolOnly = false, availableWidth, pageUtilities, overflowActions }) => {
+export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = ({ editor, engine, saveKey, workspaceId, onConvertHandwriting, embedded = false, hideCollapseButton = false, fullscreenToolOnly = false, availableWidth, pageUtilities, overflowActions }) => {
   const isPhone = useIsMobileViewport();
   const compactTools = useIsMobileViewport(1023);
   // Derive the displayed tool from the same ToolManager snapshot used by input routing.
@@ -194,6 +193,9 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
     toolState.mode === 'draw' ? toolState.drawingTool :
     toolState.mode === 'shape' ? toolState.shapeTool :
     toolState.mode;
+  // The toolbar already subscribes to selection changes below. Deriving this
+  // locally keeps selection updates out of the whole NotebookRenderer subtree.
+  const hasSelectedStrokes = engine.selection.hasSelectedStrokes();
 
   const [showPopup, setShowPopup] = useState(false);
   const [showHandwritingPalette, setShowHandwritingPalette] = useState(false);

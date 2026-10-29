@@ -21,8 +21,9 @@ const encode = (value: unknown): Uint8Array => new TextEncoder().encode(canonica
  */
 function canonicalSyncValue(value: unknown): unknown {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  if (!('userId' in (value as object)) || (value as { userId?: unknown }).userId === null) return value;
   const copy = { ...(value as Record<string, unknown>) };
-  if (Object.prototype.hasOwnProperty.call(copy, 'userId')) copy.userId = null;
+  copy.userId = null;
   return copy;
 }
 
@@ -182,7 +183,11 @@ async function mapBounded<T, R>(items: readonly T[], worker: (item: T) => Promis
   const result = new Array<R>(items.length);
   let next = 0;
   await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (next < items.length) { const index = next++; result[index] = await worker(items[index]); }
+    while (next < items.length) {
+      const index = next++;
+      result[index] = await worker(items[index]);
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
   }));
   return result;
 }

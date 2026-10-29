@@ -17,6 +17,7 @@ export class ImageManager {
   private pending = new Set<string>();
   private generation = 0;
   private decodedListeners = new Set<() => void>();
+  private decodedRedrawPending = false;
 
   onDecodedImage(listener: () => void): () => void {
     this.decodedListeners.add(listener);
@@ -132,6 +133,13 @@ export class ImageManager {
       if (remaining) gate0ImageRequests.set(fileId, remaining);
       else gate0ImageRequests.delete(fileId);
       if (loadStartedAt) gate0Profiler.event('image-load-request', performance.now() - loadStartedAt, { fileId, simultaneous });
+      this.flushDecodedRedraw();
+    };
+    // Decode every image in a page batch before repainting. Each individual
+    // load used to schedule its own full page preview paint, and on a dense
+    // page that turned three loads into three 1,200-stroke raster passes.
+    const requestDecodedRedraw = () => {
+      this.decodedRedrawPending = true;
     };
     try {
       const fileData = await canvasRepository.getImage(fileId);
@@ -151,11 +159,7 @@ export class ImageManager {
         if (!this.imageCache.has(fileId)) gate0Profiler.resource('decodedImages', 1);
         this.imageCache.set(fileId, img);
         gate0Profiler.event('image-decode-success', decodeStartedAt ? performance.now() - decodeStartedAt : undefined, { fileId });
-        if (this.redrawCallback) {
-          this.redrawCallback();
-          gate0Profiler.event('image-completion-redraw', undefined, { fileId });
-        }
-        for (const listener of this.decodedListeners) listener();
+        requestDecodedRedraw();
         finishLoadProfile();
       };
       img.onerror = () => finishLoadProfile();
@@ -164,6 +168,17 @@ export class ImageManager {
       console.error('Failed to load image:', err);
       finishLoadProfile();
     }
+  }
+
+  /** Fire one redraw/listener pass after the page's pending decodes settle. */
+  private flushDecodedRedraw(): void {
+    if (this.pending.size > 0 || !this.decodedRedrawPending) return;
+    this.decodedRedrawPending = false;
+    if (this.redrawCallback) {
+      this.redrawCallback();
+      gate0Profiler.event('image-completion-redraw');
+    }
+    for (const listener of this.decodedListeners) listener();
   }
 
   renderImages(ctx: CanvasRenderingContext2D, layerId?: string, excludeIds?: Set<string>): void {
@@ -215,6 +230,7 @@ export class ImageManager {
     this.generation += 1;
     this.redrawCallback = undefined;
     this.pending.clear();
+    this.decodedRedrawPending = false;
     this.decodedListeners.clear();
     for (const url of this.objectUrls.values()) {
       URL.revokeObjectURL(url);

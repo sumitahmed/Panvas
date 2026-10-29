@@ -191,10 +191,13 @@ export function CloudSyncPanel() {
   };
 
   const handleResolveConcurrentConflict = async (choice: SyncV2ConflictChoice) => {
-    if (isResolvingReview || !hasConcurrentConflict) return;
+    if (isResolvingReview) return;
     setIsResolvingReview(true);
     try {
-      const resolved = await resolveReviewChanges(choice);
+      let resolved = await resolveReviewChanges(choice);
+      if (!resolved && choice === 'cloud') {
+        resolved = await resolveReviewChanges();
+      }
       if (resolved) {
         setShowReviewDetails(false);
         const label = choice === 'cloud' ? 'Google Drive version' : choice === 'device' ? 'This device version' : 'Both versions';
@@ -347,63 +350,54 @@ export function CloudSyncPanel() {
               Older sync data was preserved for recovery and does not affect your current workspaces.
             </p>
           )}
-          {gdConnected && reviewItems.length > 0 && (gdStatus === 'synced-review' || gdStatus === 'conflict') && showReviewDetails && (
+          {gdConnected && (gdStatus === 'synced-review' || gdStatus === 'conflict') && !hasRecoveryOnly && showReviewDetails && (
             <div id="cloud-sync-review" className="mx-5 mb-5 rounded-xl border border-panvas-accent-amber/45 bg-panvas-accent-amber/10 p-4" role="region" aria-labelledby="cloud-sync-review-heading" aria-live="polite">
               <div className="flex items-start gap-3">
                 <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-panvas-accent-amber/15 text-panvas-accent-amber">
                   <AlertCircle size={17} aria-hidden="true" />
                 </span>
-                 <div className="min-w-0">
-                   <h3 id="cloud-sync-review-heading" className="text-sm font-semibold text-panvas-text-primary">Review changes</h3>
-                   <p className="mt-1 text-xs leading-5 text-panvas-text-secondary">
-                     {hasConcurrentConflict ? 'This device already contains Panvas data, and Google Drive also contains synced work. Choose which version to use for the affected workspace.' : 'Some changes need your review. Your work was preserved.'}
-                   </p>
-                  {reviewItems.length > 0 ? (
-                    <>
-                      <p className="mt-2 text-2xs text-panvas-text-secondary">{reviewItems.length === 1 ? 'One change needs your review.' : `${reviewItems.length} changes need your review.`}</p>
-                      {hasConcurrentConflict ? <div className="mt-3 flex flex-wrap items-center gap-2">
-                        <button
-                          type="button"
-                          disabled={isResolvingReview}
-                          onClick={() => void handleResolveConcurrentConflict('cloud')}
-                          className="panvas-action-button panvas-action-button--secondary text-xs focus-ring disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          Use Google Drive
-                        </button>
-                        <button
-                          type="button"
-                          disabled={isResolvingReview}
-                          onClick={() => void handleResolveConcurrentConflict('device')}
-                          className="panvas-action-button panvas-action-button--secondary text-xs focus-ring disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          Use this device
-                        </button>
-                        <button
-                          type="button"
-                          disabled={isResolvingReview}
-                          onClick={() => void handleResolveConcurrentConflict('both')}
-                          className="panvas-action-button panvas-action-button--primary text-xs focus-ring disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          Keep both
-                        </button>
-                        <div className="basis-full space-y-2 text-2xs text-panvas-text-secondary">
-                          <p><strong>Use Google Drive:</strong> Replace the active Panvas data on this device with the version from Google Drive. Your current device data will be preserved as a recovery copy.</p>
-                          <p><strong>Use this device:</strong> Use the Panvas data currently on this device as the synced version. A recovery copy of the previous cloud version will be preserved.</p>
-                          <p><strong>Keep both:</strong> Keep the Drive workspace and create a second normal workspace named “Device copy”. Both workspaces sync independently. Recovery copies are retained too.</p>
-                        </div>
-                      </div> : hasResolvableReview ? <div className="mt-3 flex flex-wrap items-center gap-3">
-                        <button
-                          type="button"
-                          disabled={isResolvingReview}
-                          onClick={() => void handleKeepGoogleDriveVersion()}
-                          className="panvas-action-button panvas-action-button--secondary text-xs focus-ring disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          {isResolvingReview ? 'Savingâ€¦' : 'Keep Google Drive version'}
-                        </button>
-                        <span className="text-2xs text-panvas-text-tertiary">Your preserved local copy remains in recovery storage.</span>
-                      </div> : <p className="mt-3 text-2xs text-panvas-text-tertiary">Panvas kept your local copy while the review record is loading.</p>}
-                    </>
-                  ) : null}
+                <div className="min-w-0">
+                  <h3 id="cloud-sync-review-heading" className="text-sm font-semibold text-panvas-text-primary">Review changes</h3>
+                  <p className="mt-1 text-xs leading-5 text-panvas-text-secondary">
+                    {hasConcurrentConflict ? 'This device already contains Panvas data, and Google Drive also contains synced work. Choose which version to use for the affected workspace.' : 'Some changes need your review. Your work was preserved.'}
+                  </p>
+                  {reviewItems.length > 0 && (
+                    <p className="mt-2 text-2xs text-panvas-text-secondary">
+                      {reviewItems.length === 1 ? 'One change needs your review.' : `${reviewItems.length} changes need your review.`}
+                    </p>
+                  )}
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={isResolvingReview}
+                      onClick={() => void handleResolveConcurrentConflict('cloud')}
+                      className="panvas-action-button panvas-action-button--secondary text-xs focus-ring disabled:cursor-not-allowed disabled:opacity-60"
+                      title="Keep Google Drive version"
+                    >
+                      Use Google Drive
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isResolvingReview}
+                      onClick={() => void handleResolveConcurrentConflict('device')}
+                      className="panvas-action-button panvas-action-button--secondary text-xs focus-ring disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      Use this device
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isResolvingReview}
+                      onClick={() => void handleResolveConcurrentConflict('both')}
+                      className="panvas-action-button panvas-action-button--primary text-xs focus-ring disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      Keep both
+                    </button>
+                    <div className="basis-full space-y-2 text-2xs text-panvas-text-secondary">
+                      <p><strong>Use Google Drive:</strong> Keep Google Drive version and replace the active Panvas data on this device with the version from Google Drive. Your current device data will be preserved as a recovery copy.</p>
+                      <p><strong>Use this device:</strong> Use the Panvas data currently on this device as the synced version. A recovery copy of the previous cloud version will be preserved.</p>
+                      <p><strong>Keep both:</strong> Keep the Drive workspace and create a second normal workspace named “Device copy”. Both workspaces sync independently. Recovery copies are retained too.</p>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>

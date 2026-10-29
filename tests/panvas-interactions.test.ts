@@ -1103,8 +1103,10 @@ test('resizing clipped ink scales its ruler-protected region and undo restores i
   harness.selection.selectElement(stroke.id, 'stroke');
   harness.selection.startDrag(124, 74);
   harness.selection.dragTo(224, 124);
-  assert.deepEqual(stroke.inkClip?.[0]?.[0]?.[1], [100, 0]);
+  // Clip geometry stays canonical during the preview.
+  assert.deepEqual(stroke.inkClip?.[0]?.[0]?.[1], [50, 0]);
   assert.equal(harness.selection.finishDrag(224, 124), true);
+  assert.deepEqual(stroke.inkClip?.[0]?.[0]?.[1], [100, 0]);
   harness.history.undo();
   assert.deepEqual(stroke.inkClip?.[0]?.[0]?.[1], [50, 0]);
   harness.history.redo();

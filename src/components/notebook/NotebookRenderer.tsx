@@ -1,5 +1,5 @@
 import type { ImageManager } from './engine/ImageManager';
-import React, { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback, startTransition } from 'react';
 import { flushSync } from 'react-dom';
 import { NotebookEngine } from './engine/NotebookEngine';
 import type { ViewportState } from './engine/drawingTypes';
@@ -9,6 +9,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { UniversalDropRouter } from '@/services/drop/UniversalDropRouter';
 import { useLayoutStore } from '@/stores/layoutStore';
 import { useWorkspaceStore } from '@/stores/workspaceStore';
+import { useShallow } from 'zustand/react/shallow';
 import { NotebookToolPropertiesPanel } from './NotebookToolPropertiesPanel';
 import { NotebookFloatingToolbar } from './NotebookFloatingToolbar';
 import { NotebookNavigator } from './NotebookNavigator';
@@ -128,7 +129,14 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   const gate0OnRender = useCallback((_id: string, phase: 'mount' | 'update' | 'nested-update', actualDuration: number, baseDuration: number) => {
     gate0Profiler.event('react-profiler-commit', actualDuration, { phase, baseDuration });
   }, []);
-  const { activePageId, notebookPages, notebookSections, notebooks, workspaces, activeNotebookSectionId } = useWorkspaceStore();
+  const { activePageId, notebookPages, notebookSections, notebooks, workspaces, activeNotebookSectionId } = useWorkspaceStore(useShallow(state => ({
+    activePageId: state.activePageId,
+    notebookPages: state.notebookPages,
+    notebookSections: state.notebookSections,
+    notebooks: state.notebooks,
+    workspaces: state.workspaces,
+    activeNotebookSectionId: state.activeNotebookSectionId,
+  })));
   const page = notebookPages.find(item => item.id === activePageId);
   const notebook = page ? notebooks.find(item => item.id === page.notebookId) : undefined;
   const workspace = notebook ? workspaces.find(item => item.id === notebook.workspaceId) : undefined;
@@ -145,7 +153,6 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     onEngineReady?.(notebookEngine);
   }, [notebookEngine, onEngineReady]);
   useEffect(() => {
-    if (!gate0Profiler.isEnabled()) return;
     (window as any).__PANVAS_GATE0_ENGINE__ = notebookEngine;
     return () => {
       if ((window as any).__PANVAS_GATE0_ENGINE__ === notebookEngine) delete (window as any).__PANVAS_GATE0_ENGINE__;
@@ -162,6 +169,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   // Keep large scene payloads only in the live ref, not in those contexts;
   // a scalar revision still publishes every required visual update.
   const [sectionDataRevision, setSectionDataRevision] = useState(0);
+  const pendingSectionPublishRef = useRef(false);
   const sectionDataCacheRef = useRef<Record<string, DrawingData>>({});
   const publishedSectionDataRef = useRef(sectionDataCacheRef.current);
   const updateSectionDataCache = useCallback((update: (current: Record<string, DrawingData>) => Record<string, DrawingData>, publish = true) => {
@@ -169,9 +177,41 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     sectionDataCacheRef.current = next;
     if (publish && next !== publishedSectionDataRef.current) {
       publishedSectionDataRef.current = next;
-      setSectionDataRevision(revision => revision + 1);
+      if (drawingGestureActiveRef.current) {
+        pendingSectionPublishRef.current = true;
+      } else {
+        setSectionDataRevision(revision => revision + 1);
+      }
     }
   }, []);
+  // A save snapshot contains the same scene at the same drawing revision but
+  // freshly cloned object arrays. Replacing a page-cache entry with it would
+  // invalidate an already-current page-owned preview and replay 1,200 strokes.
+  // Preserve the content-bearing arrays unless the engine actually advanced.
+  const sectionDataRevisionRef = useRef<Record<string, number>>({});
+  const publishSnapshotPageData = useCallback((snapshot: PageOwnedDrawing, data: DrawingData) => {
+    const pageId = snapshot.saveTargetSheetId;
+    const knownRevision = sectionDataRevisionRef.current[pageId];
+    if (knownRevision !== undefined && knownRevision > snapshot.drawingRevision) return;
+    if (knownRevision === snapshot.drawingRevision) {
+      updateSectionDataCache(previous => {
+        const current = previous[pageId];
+        if (!current) return { ...previous, [pageId]: data };
+        return {
+          ...previous,
+          [pageId]: {
+            ...current,
+            version: data.version,
+            properties: data.properties,
+            audioNotes: data.audioNotes,
+          },
+        };
+      }, false);
+      return;
+    }
+    sectionDataRevisionRef.current[pageId] = snapshot.drawingRevision;
+    updateSectionDataCache(previous => ({ ...previous, [pageId]: data }));
+  }, [updateSectionDataCache]);
   const focusedPageLoadGenerationRef = useRef(0);
   const loadedSceneRevisionRef = useRef<number | null>(null);
   const residentImageManagersRef = useRef(new Map<string, ImageManager>());
@@ -196,7 +236,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       };
       let samples = [...residentDrawingEnginesRef.current].reduce((sum, [id, engine]) => sum + sampleCount(id, engine), 0);
       for (const [id, engine] of residentDrawingEnginesRef.current) {
-        if (residentDrawingEnginesRef.current.size <= 6 && samples <= 500_000) break;
+        if (residentDrawingEnginesRef.current.size <= 10 && samples <= 1_000_000) break;
         if (id === pageId) continue;
         samples -= sampleCount(id, engine);
         residentDrawingEnginesRef.current.delete(id);
@@ -212,6 +252,11 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   const pendingPropertySaveRef = useRef<PageOwnedDrawing | null>(null);
   const persistDrawingRef = useRef<(snapshot: PageOwnedDrawing | null) => void>(() => {});
   const drawingGestureActiveRef = useRef(false);
+  // Scrolling a dense page is also a gesture that must not compete with the
+  // synchronous multi-megabyte snapshot encode. The save scheduler already
+  // understands deferral and a hard 10s checkpoint, so extending its active
+  // window to scroll keeps persistence safe without serializing mid-fling.
+  const scrollGestureActiveRef = useRef(false);
   const deferredPageSavesRef = useRef(new Map<string, PageOwnedDrawing>());
   const deferredSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const drawingSaveSchedulerRef = useRef<DrawingSaveScheduler<PageOwnedDrawing> | null>(null);
@@ -226,6 +271,11 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       { onEvent: event => recordHandwritingTraceMarker(event.type, event) },
     );
   }
+  const syncSaveGestureActive = useCallback(() => {
+    drawingSaveSchedulerRef.current?.setGestureActive(
+      drawingGestureActiveRef.current || scrollGestureActiveRef.current,
+    );
+  }, []);
   const latestCapturedDrawingRef = useRef(new Map<string, PageOwnedDrawing>());
   const drawingPersistenceCallbacksRef = useRef<DrawingPersistenceCallbacks | null>(null);
   const drawingPersistenceRef = useRef<DrawingPersistenceQueue | null>(null);
@@ -235,13 +285,19 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     );
   }
   const [, setTextObjects] = useState<TextObject[]>([]);
-  const [, setSelectionRevision] = useState(0);
   const [handwritingStrokes, setHandwritingStrokes] = useState<Stroke[]>([]);
   const [isHandwritingDialogOpen, setIsHandwritingDialogOpen] = useState(false);
   const [activeEditor, setActiveEditor] = useState<Editor | null>(null);
   const [, setLayerRevision] = useState(0);
-  const { isPropertiesPanelOpen } = useUIStore();
-  const { notebookModeLevel, setNotebookModeLevel, workspaceViewMode, setWorkspaceViewMode, isToolbarCollapsed, setToolbarCollapsed } = useLayoutStore();
+  const { isPropertiesPanelOpen } = useUIStore(useShallow(state => ({ isPropertiesPanelOpen: state.isPropertiesPanelOpen })));
+  const { notebookModeLevel, setNotebookModeLevel, workspaceViewMode, setWorkspaceViewMode, isToolbarCollapsed, setToolbarCollapsed } = useLayoutStore(useShallow(state => ({
+    notebookModeLevel: state.notebookModeLevel,
+    setNotebookModeLevel: state.setNotebookModeLevel,
+    workspaceViewMode: state.workspaceViewMode,
+    setWorkspaceViewMode: state.setWorkspaceViewMode,
+    isToolbarCollapsed: state.isToolbarCollapsed,
+    setToolbarCollapsed: state.setToolbarCollapsed,
+  })));
   const setActivePage = useWorkspaceStore(s => s.setActivePage);
   useEffect(() => installNotebookReferenceNavigation(
     notebookEngine, () => useWorkspaceStore.getState().notebookPages,
@@ -282,11 +338,21 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   const navigationGestures = notebookEngine.input.navigationGestures;
   const pendingFocusPageIdRef = useRef<string | null>(null);
   const pendingActivationPageIdRef = useRef<string | null>(null);
+  // Passive scroll coalesces its focus transfer until motion settles. Running a
+  // handoff at every intermediate page boundary would commit the whole notebook
+  // subtree repeatedly while the user is still scrolling past those pages.
+  const passiveActivationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingPassiveActivationRef = useRef<string | null>(null);
   const flushNavigationScrollRef = useRef<() => void>(() => {});
   // Clear before child layout cleanup detaches the focused canvas on teardown.
   useLayoutEffect(() => () => {
     pendingFocusPageIdRef.current = null;
     pendingActivationPageIdRef.current = null;
+    if (passiveActivationTimerRef.current !== null) {
+      clearTimeout(passiveActivationTimerRef.current);
+      passiveActivationTimerRef.current = null;
+    }
+    pendingPassiveActivationRef.current = null;
     flushNavigationScrollRef.current = () => {};
   }, []);
   const pageGeometryTransitionRef = useRef<{ pageId: string; anchor: PageGeometryAnchor } | null>(null);
@@ -359,11 +425,9 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       }, 500);
     });
     
-    const unsubSelection = notebookEngine.selection.subscribe(() => setSelectionRevision(revision => revision + 1));
     return () => {
       unsubViewport();
       unsubProps();
-      unsubSelection();
     };
   }, [notebookEngine, notebook?.id, updateSectionDataCache]);
 
@@ -952,7 +1016,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     }),
     onScheduled: (snapshot) => {
       const pageId = snapshot.saveTargetSheetId;
-      updateSectionDataCache(prev => prev[pageId] === snapshot.data ? prev : { ...prev, [pageId]: snapshot.data });
+      publishSnapshotPageData(snapshot, snapshot.data);
       recordHandwritingTraceMarker('ipcSaveStart', { pageId, revision: snapshot.drawingRevision });
     },
     onSaved: (snapshot, savedData, completion) => {
@@ -962,9 +1026,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       // engine has produced a newer cache entry while the write was in
       // flight, keep that newer entry visible instead of rolling the page
       // back until the next interaction.
-      updateSectionDataCache(prev => prev[pageId] === snapshot.data
-        ? { ...prev, [pageId]: savedData }
-        : prev);
+      publishSnapshotPageData(snapshot, savedData);
       if (!completion.latestScheduled || !completion.latestPersisted) return;
       if (focusedPageIdRef.current === pageId) notebookEngine.audio.setAll(savedData.audioNotes);
       if (typeof window !== 'undefined') {
@@ -1224,6 +1286,9 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       const map: Record<string, DrawingData> = {};
       for (const [id, d] of entries) {
         map[id] = d;
+        // Repository data has no engine revision; a later save from a new
+        // engine must replace it rather than matching a stale page revision.
+        delete sectionDataRevisionRef.current[id];
       }
       updateSectionDataCache(prev => mergeLoadedPageData(prev, map));
     }
@@ -1286,6 +1351,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       });
       if (!pageOwnedSnapshot) return;
       latestCapturedDrawingRef.current.set(currentPageId, pageOwnedSnapshot);
+      sectionDataRevisionRef.current[currentPageId] = pageOwnedSnapshot.drawingRevision;
       // Capture and enqueue every document edit synchronously. Its live editor
       // owns the DOM; publishing identical geometry would rerender the whole
       // notebook per keystroke. Properties, save completion and handoff publish.
@@ -1307,21 +1373,25 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       drawingGestureActiveRef.current = active;
       setDrawingGestureActive(notebookEngine, active);
       recordHandwritingTraceMarker(active ? 'penDown' : 'penUp');
-      drawingSaveSchedulerRef.current?.setGestureActive(active);
+      syncSaveGestureActive();
       if (!active && pendingActivationPageIdRef.current) {
         const deferredTargetId = pendingActivationPageIdRef.current;
         pendingActivationPageIdRef.current = null;
         handleActivatePageRef.current(deferredTargetId);
+      }
+      if (!active && pendingSectionPublishRef.current) {
+        pendingSectionPublishRef.current = false;
+        setSectionDataRevision(revision => revision + 1);
       }
     });
     return () => {
       unsubscribe();
       drawingGestureActiveRef.current = false;
       setDrawingGestureActive(notebookEngine, false);
-      drawingSaveSchedulerRef.current?.setGestureActive(false);
+      syncSaveGestureActive();
       pendingActivationPageIdRef.current = null;
     };
-  }, [notebookEngine]);
+  }, [notebookEngine, syncSaveGestureActive]);
 
   // NOTE: no early return may be placed above this point, and none between here and the JSX.
   // Seventeen hooks are declared below, so bailing out early changes the hook count for the
@@ -1358,6 +1428,13 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
 
   // Handle immediate page activation on pointerdown or click without jumping the view
   const handleActivatePage = useCallback((targetPageId: string, recordOpen = true) => {
+    // Any explicit activation supersedes a passive scroll handoff that has not
+    // fired yet. The pending page is no longer the user's current target.
+    if (passiveActivationTimerRef.current !== null) {
+      clearTimeout(passiveActivationTimerRef.current);
+      passiveActivationTimerRef.current = null;
+    }
+    pendingPassiveActivationRef.current = null;
     // Central protection covers scroll observation, active-page synchronization,
     // direct navigation, and late cache/load arrivals. Queue even the current
     // page: returning to A must replace an earlier pending request for B.
@@ -1373,7 +1450,15 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       ?? deferredPageSavesRef.current.get(targetPageId)?.data;
     if (activeMemoryData) {
       const cached = sectionDataCacheRef.current[targetPageId];
-      if (!cached || (activeMemoryData.objects?.length ?? 0) >= (cached.objects?.length ?? 0)) {
+      // The cache entry refreshed at the previous handoff is at least as new as
+      // an earlier mutation capture. Keep its identity when the page-owned
+      // preview already represents it, so the incoming mount can adopt those
+      // pixels instead of replaying the scene. A larger memory snapshot still
+      // wins, preserving the recovery path for pages missing cached objects.
+      const previewCurrent = Boolean(cached
+        && residentDrawingEnginesRef.current.get(targetPageId)?.isSurfaceCurrent(cached));
+      if (!cached || (!previewCurrent
+        && (activeMemoryData.objects?.length ?? 0) >= (cached.objects?.length ?? 0))) {
         sectionDataCacheRef.current[targetPageId] = activeMemoryData;
       }
     }
@@ -1427,11 +1512,29 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     // engine detaches/clears its old interaction canvas, even in that interval.
     const oldCanvas = notebookEngine.drawing.getCanvasElement();
     const oldSlot = oldCanvas?.closest('[data-page-id]');
+    if (outgoingPageId && notebookEngine.getDrawingOwnership().pageId === outgoingPageId) {
+      if (notebookEngine.getDrawingOwnership().revision !== loadedSceneRevisionRef.current) {
+        sectionDataCacheRef.current[outgoingPageId] = notebookEngine.getDrawingData();
+        sectionDataRevisionRef.current[outgoingPageId] = notebookEngine.getDrawingOwnership().revision;
+      }
+    }
+    const outgoingDrawing = outgoingPageId ? residentDrawingEnginesRef.current.get(outgoingPageId) : undefined;
+    const outgoingData = outgoingPageId ? sectionDataCacheRef.current[outgoingPageId] : undefined;
+    // Copy the focused live surfaces into the outgoing page-owned preview
+    // before unmount clears them. Unlike the DOM fallback below this also
+    // preserves every layer canvas. When the preview already represents the
+    // outgoing payload, skip the blit: during pure scrolling the live surface
+    // was itself adopted from that preview, so a copy would only resample the
+    // same pixels and queue another GPU raster.
+    const previewCurrent = Boolean(outgoingDrawing && outgoingData
+      && outgoingDrawing.isSurfaceCurrent(outgoingData));
+    const previewCopied = previewCurrent || Boolean(outgoingDrawing && outgoingData
+      && notebookEngine.drawing.copySurfacesTo(outgoingDrawing, outgoingData));
     if (oldSlot?.getAttribute('data-page-id') === outgoingPageId) {
       const backing = oldSlot.querySelector<HTMLElement>('[data-stable-page-visual]');
       const interaction = oldSlot.querySelector<HTMLElement>('[data-live-page-visual]');
-      if (backing && oldCanvas) {
-        const backingCanvas = backing.querySelector('canvas');
+      if (!previewCopied && backing && oldCanvas) {
+        const backingCanvas = backing.querySelector<HTMLCanvasElement>('canvas[data-committed-page-id]');
         if (backingCanvas && backingCanvas.width > 0 && backingCanvas.height > 0) {
           const backingCtx = backingCanvas.getContext('2d');
           if (backingCtx) {
@@ -1443,11 +1546,6 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       if (backing) backing.style.visibility = 'visible';
       if (interaction) interaction.style.visibility = 'hidden';
     }
-    if (outgoingPageId && notebookEngine.getDrawingOwnership().pageId === outgoingPageId) {
-      if (notebookEngine.getDrawingOwnership().revision !== loadedSceneRevisionRef.current) {
-        sectionDataCacheRef.current[outgoingPageId] = notebookEngine.getDrawingData();
-      }
-    }
     if (outgoingPageId) residentDrawingEnginesRef.current.get(outgoingPageId)?.retainStrokePaths(notebookEngine.drawing);
     notebookEngine.unmount();
     const incomingImages = residentImageManagersRef.current.get(targetPageId);
@@ -1455,11 +1553,15 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       (incomingData.objects ?? []).filter(object => object.type === 'image').map(object => object.fileId));
     const incomingDrawing = residentDrawingEnginesRef.current.get(targetPageId);
     notebookEngine.setDrawingData(incomingData, targetPageId, incomingDrawing);
+    // Offer the incoming page-owned preview to the live canvas mount so the
+    // focus handoff does not replay the whole scene behind React's commit.
+    if (incomingDrawing) notebookEngine.drawing.prepareSurfaceAdoption(incomingDrawing, incomingData);
     if (incomingDrawing) {
       residentDrawingEnginesRef.current.delete(targetPageId);
       residentDrawingEnginesRef.current.set(targetPageId, incomingDrawing);
     }
     loadedSceneRevisionRef.current = notebookEngine.getDrawingOwnership().revision;
+    sectionDataRevisionRef.current[targetPageId] = loadedSceneRevisionRef.current;
     focusedPageIdRef.current = targetPageId;
 
     // 3. Switch focusedPageId & activePageId. Passive scroll has already
@@ -1484,6 +1586,20 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     if (!container) return;
 
     let scrollRafId: number | null = null;
+    let scrollSaveReleaseTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const holdSaveDuringScroll = () => {
+      if (!scrollGestureActiveRef.current) {
+        scrollGestureActiveRef.current = true;
+        syncSaveGestureActive();
+      }
+      if (scrollSaveReleaseTimer !== null) clearTimeout(scrollSaveReleaseTimer);
+      scrollSaveReleaseTimer = setTimeout(() => {
+        scrollSaveReleaseTimer = null;
+        scrollGestureActiveRef.current = false;
+        syncSaveGestureActive();
+      }, 160);
+    };
 
     const updateResidency = (top: number, height: number) => {
       const previous = residentIdsRef.current;
@@ -1491,6 +1607,36 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       if (next === previous) return;
       residentIdsRef.current = next;
       setResidentIds(next);
+    };
+
+    // Focus has to follow the dominant page. `focusedPageId` decides which page
+    // owns the live engine canvas and the interactive FloatingTextEditor nodes;
+    // every other page renders a `pointer-events-none` StaticTextPreview over a
+    // `pointer-events-none` canvas, so it has no interactive text DOM at all.
+    // Run that transfer once scrolling settles instead of at every intermediate
+    // boundary. Pointer activation and direct navigation cancel this pending
+    // handoff synchronously through handleActivatePage.
+    const runPassiveActivation = () => {
+      passiveActivationTimerRef.current = null;
+      const pendingPageId = pendingPassiveActivationRef.current;
+      pendingPassiveActivationRef.current = null;
+      if (!pendingPageId) return;
+      if (pendingPageId === currentActivePageIdRef.current) return;
+      const dominantPage = currentSectionPages.find(page => page.id === pendingPageId);
+      if (!dominantPage || dominantPage.type === 'pdf') return;
+      currentActivePageIdRef.current = dominantPage.id;
+      startTransition(() => {
+        if (useWorkspaceStore.getState().activePageId !== dominantPage.id) setActivePage(dominantPage.id, false);
+        handleActivatePageRef.current(dominantPage.id, false);
+      });
+    };
+    const armPassiveActivation = () => {
+      if (passiveActivationTimerRef.current !== null) clearTimeout(passiveActivationTimerRef.current);
+      passiveActivationTimerRef.current = setTimeout(runPassiveActivation, 140);
+    };
+    const schedulePassiveActivation = (dominantPage: (typeof currentSectionPages)[number]) => {
+      pendingPassiveActivationRef.current = dominantPage.id;
+      armPassiveActivation();
     };
 
     const observeScroll = () => {
@@ -1528,19 +1674,10 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         lastNavigatedPageIdRef.current = dominantPage.id;
         // Passive scroll must not repeat the last-opened IPC/database write on
         // every page boundary. Explicit pointer/sidebar activation still records.
-        setActivePage(dominantPage.id, false);
-
-        // Focus has to follow. `focusedPageId` decides which page owns the live engine
-        // canvas and the interactive FloatingTextEditor nodes; every other page renders a
-        // `pointer-events-none` StaticTextPreview over a `pointer-events-none` canvas, so
-        // it has no interactive text DOM at all. This observer used to update only
-        // `activePageId` — the page indicator — and leave focus behind on whichever page
-        // was last *clicked*, which made text (and drawing) inert on the page actually on
-        // screen until a throwaway click re-activated it. The two values are no longer
-        // independent: the dominant page is the single source of truth and focus is derived
-        // from it.
-        // it has no interactive text DOM at all.
-        handleActivatePageRef.current(dominantPage.id, false);
+        // Coalesce the handoff itself until motion settles: committing a focus
+        // transfer at every intermediate boundary rerenders the notebook subtree
+        // while the user is still scrolling past those pages.
+        schedulePassiveActivation(dominantPage);
       }
       if (scrollStartedAt) gate0Profiler.event('notebook-scroll-handler', performance.now() - scrollStartedAt, {
         pages: currentSectionPages.length,
@@ -1578,7 +1715,11 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     };
 
     const onScroll = () => {
+      holdSaveDuringScroll();
       persistPositionDebounced();
+      // Keep deferring while wheel/touch motion continues. The handoff runs
+      // after the last scroll event, not between two pages the user is passing.
+      if (pendingPassiveActivationRef.current) armPassiveActivation();
       if (scrollRafId !== null) return;
       scrollRafId = requestAnimationFrame(() => {
         scrollRafId = null;
@@ -1589,6 +1730,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       if (scrollRafId !== null) cancelAnimationFrame(scrollRafId);
       scrollRafId = null;
       observeScroll();
+      if (pendingPassiveActivationRef.current) runPassiveActivation();
       flushPendingPosition();
     };
     flushNavigationScrollRef.current = flushScroll;
@@ -1601,9 +1743,22 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       if (scrollRafId !== null) {
         cancelAnimationFrame(scrollRafId);
       }
+      if (passiveActivationTimerRef.current !== null) {
+        clearTimeout(passiveActivationTimerRef.current);
+        passiveActivationTimerRef.current = null;
+      }
+      if (scrollSaveReleaseTimer !== null) {
+        clearTimeout(scrollSaveReleaseTimer);
+        scrollSaveReleaseTimer = null;
+      }
+      if (scrollGestureActiveRef.current) {
+        scrollGestureActiveRef.current = false;
+        syncSaveGestureActive();
+      }
+      pendingPassiveActivationRef.current = null;
       flushPendingPosition();
     };
-  }, [currentSectionPages, setActivePage, layoutConfig.positions, viewport.scale, containerSize.height, notebookEngine]);
+  }, [currentSectionPages, setActivePage, layoutConfig.positions, viewport.scale, containerSize.height, notebookEngine, syncSaveGestureActive]);
 
   // Scroll to active page when activePageId changes from sidebar/navigator clicks
   useLayoutEffect(() => {
@@ -2685,6 +2840,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     if (!currentPageId) return;
     const snapshot = captureEngineOwnedDrawing(notebookEngine, notebook?.id, currentPageId);
     if (!snapshot) return;
+    sectionDataRevisionRef.current[currentPageId] = snapshot.drawingRevision;
     updateSectionDataCache(previous => ({ ...previous, [currentPageId]: snapshot.data }));
     persistDrawing(snapshot);
   }, [notebook?.id, notebookEngine, page?.id, persistDrawing, updateSectionDataCache]);
@@ -2850,7 +3006,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         ) : (
           <div ref={fullscreenToolbarHostRef} className="panvas-fullscreen-toolbar-host absolute left-3 right-3 top-3 z-40 flex min-w-0 justify-center overflow-visible pointer-events-none">
             <div className="panvas-layer-toolbar panvas-floating-surface flex w-fit max-w-full items-center gap-1 overflow-visible rounded-2xl p-1 pointer-events-auto" role="toolbar" aria-label="Fullscreen notebook tools">
-              {workspaceViewMode === 'edit' && <NotebookFloatingToolbar editor={activeEditor} engine={notebookEngine} workspaceId={workspace?.id} hasSelectedStrokes={notebookEngine.selection.hasSelectedStrokes()} onConvertHandwriting={openHandwritingConversion} pageUtilities={landscapePageUtilities} embedded hideCollapseButton fullscreenToolOnly availableWidth={fullscreenToolbarHostWidth === null ? null : Math.max(0, fullscreenToolbarHostWidth - 104)} />}
+              {workspaceViewMode === 'edit' && <NotebookFloatingToolbar editor={activeEditor} engine={notebookEngine} workspaceId={workspace?.id} onConvertHandwriting={openHandwritingConversion} pageUtilities={landscapePageUtilities} embedded hideCollapseButton fullscreenToolOnly availableWidth={fullscreenToolbarHostWidth === null ? null : Math.max(0, fullscreenToolbarHostWidth - 104)} />}
               <button type="button" onClick={() => setToolbarCollapsed(true)} className="panvas-icon-control shrink-0 focus-ring" title="Hide fullscreen tools" aria-label="Hide fullscreen tools">
                 <PanelTopOpen size={16} className="rotate-180" />
               </button>
@@ -2872,7 +3028,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         )}
 
         <div className="pointer-events-none flex-1 flex justify-center items-start min-w-0">
-          {workspaceViewMode === 'edit' && <NotebookFloatingToolbar editor={activeEditor} engine={notebookEngine} workspaceId={workspace?.id} hasSelectedStrokes={notebookEngine.selection.hasSelectedStrokes()} onConvertHandwriting={openHandwritingConversion} pageUtilities={landscapePageUtilities} />}
+          {workspaceViewMode === 'edit' && <NotebookFloatingToolbar editor={activeEditor} engine={notebookEngine} workspaceId={workspace?.id} onConvertHandwriting={openHandwritingConversion} pageUtilities={landscapePageUtilities} />}
         </div>
 
         <div className={`pointer-events-auto flex flex-shrink-0 items-end gap-2 ${isConstrainedHeader ? 'flex-col gap-1' : 'items-start'}`}>
@@ -2939,12 +3095,24 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
               const pageNumText = formatPageIndicator(index + 1, totalPages);
               const isFocused = pos.id === focusedPageId;
               const pageItem = currentSectionPages.find(p => p.id === pos.id)!;
+              const sceneOwnerPageId = notebookEngine.getDrawingOwnership().pageId;
+              const cachedData = sectionDataCacheRef.current[pos.id];
+              // A page-owned preview is marked current for the exact cache entry
+              // that was blitted into it at handoff. Prefer that identity for the
+              // mount so the incoming live canvas can adopt the preview pixels.
+              // Falling back to an older captured snapshot with the same content
+              // but different array identities would force a full scene replay.
+              const previewCurrent = sceneOwnerPageId === pos.id && Boolean(cachedData)
+                && residentDrawingEnginesRef.current.get(pos.id)?.isSurfaceCurrent(cachedData);
+              const focusedData = sceneOwnerPageId === pos.id
+                ? (previewCurrent ? cachedData : (latestCapturedDrawingRef.current.get(pos.id)?.data ?? cachedData))
+                : undefined;
               const renderData = resolveNotebookPageRenderData(
                 pos.id,
                 focusedPageId,
                 sectionDataCacheRef.current,
-                notebookEngine.getDrawingOwnership().pageId === pos.id ? (latestCapturedDrawingRef.current.get(pos.id)?.data ?? sectionDataCacheRef.current[pos.id]) : undefined,
-                notebookEngine.getDrawingOwnership().pageId ?? '',
+                focusedData,
+                sceneOwnerPageId ?? '',
               );
 
               const isResident = residentIds.has(pos.id) || isFocused;
@@ -2989,6 +3157,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
                       toolState={toolState}
                       notebookEngine={notebookEngine}
                       sceneOwnerPageId={isFocused ? notebookEngine.getDrawingOwnership().pageId ?? '' : ''}
+                      previewSource={residentDrawingEnginesRef.current.get(pos.id)}
                       activeEditor={activeEditor}
                       setActiveEditor={setActiveEditor}
                       onActivatePage={() => handleActivatePage(pos.id)}
@@ -3040,7 +3209,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
           editor={activeEditor}
           engine={notebookEngine}
           workspaceId={workspace?.id}
-          hasSelectedStrokes={notebookEngine.selection.hasSelectedStrokes()}
+         
           onConvertHandwriting={openHandwritingConversion}
           pageUtilities={
             <NotebookPageUtilities

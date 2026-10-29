@@ -11,7 +11,7 @@ import { ToolManager } from './ToolManager';
 import { HistoryManager } from './HistoryManager';
 import { DrawingEngine } from './DrawingEngine';
 import { EraserEngine } from './EraserEngine';
-import { cloneStrokeSnapshot } from './cloneStrokeSnapshot.ts';
+import { adoptPageStrokeSnapshot, cloneStrokeSnapshot } from './cloneStrokeSnapshot.ts';
 import { ShapeManager } from './ShapeManager';
 import { TextManager } from './TextManager';
 import { ImageManager } from './ImageManager';
@@ -152,8 +152,10 @@ export class NotebookEngine {
     });
     this.properties = createEmptyDrawingData().properties;
     
-    // Wire up redraw callback
-    this.images.setRedrawCallback(() => this.drawing.redraw());
+    // Wire up redraw callback. Coalesce decoded-image repaints into a
+    // microtask so a batch of page images cannot synchronously replay the
+    // whole scene inside each onload task.
+    this.images.setRedrawCallback(() => this.drawing.scheduleRedraw());
     this.layers.subscribe(() => {
       this.selection.clearSelection();
       this.drawing.redraw();
@@ -163,7 +165,14 @@ export class NotebookEngine {
   // ---- Canvas Lifecycle ----
 
   /** Bind the engine to a canvas element. Call once after the canvas mounts. */
-  mount(canvas: HTMLCanvasElement, cssWidth: number, cssHeight: number): void {
+  mount(
+    canvas: HTMLCanvasElement,
+    cssWidth: number,
+    cssHeight: number,
+    surfaceSource?: DrawingEngine,
+    surfaceKey?: unknown,
+    onSurfaceReady?: () => void,
+  ): 'adopted' | 'deferred' | 'painting' {
     // React Strict Mode replays effect cleanup/setup against the same engine.
     // Restore the owned listeners that destroy() released.
     this.handwriting.revive();
@@ -191,8 +200,26 @@ export class NotebookEngine {
       });
     }
     this.drawing.setCanvas(canvas, cssWidth, cssHeight);
+    // A freshly created page-owned preview has no pixels yet; keep the source
+    // prepared by the renderer (a retained preview from the resident window)
+    // so a return handoff can adopt it. Only replace that source when this
+    // engine actually represents the incoming payload, or when the renderer
+    // did not prepare one.
+    if (surfaceSource && (!this.drawing.hasPendingSurfaceAdoption() || surfaceSource.isSurfaceCurrent(surfaceKey))) {
+      this.drawing.prepareSurfaceAdoption(surfaceSource, surfaceKey);
+    }
     this.input.attach(canvas);
-    this.drawing.redraw();
+    const paintFallback = () => this.drawing.paintProgressive(onSurfaceReady);
+    if (this.drawing.adoptPendingSurface(adopted => {
+      if (adopted) onSurfaceReady?.();
+      else paintFallback();
+    })) {
+      onSurfaceReady?.();
+      return 'adopted';
+    }
+    if (this.drawing.isSurfaceAdoptionDeferred()) return 'deferred';
+    paintFallback();
+    return 'painting';
   }
 
   /** Unbind input and detach canvas from a canvas remount. */
@@ -262,13 +289,15 @@ export class NotebookEngine {
   /** Load drawing data (e.g., from disk). Replaces current state. */
   setDrawingData(data: DrawingData | null, pageId: string | null = null, pathSource?: DrawingEngine): void {
     this.input.setEraserPageOwner(pageId);
+    // A new scene must never inherit preview pixels prepared for the old one.
+    this.drawing.prepareSurfaceAdoption(null);
     // Numeric stroke samples already have a detached, lossless snapshot path.
     // Generic structuredClone of the entire populated scene stalls navigation.
     const ownedData = data ? (() => {
       const { objects, strokes, ...rest } = data;
       return { ...structuredClone(rest),
-        ...(objects ? { objects: objects.map(object => object.type === 'stroke' ? cloneStrokeSnapshot(object) : structuredClone(object)) } : {}),
-        ...(strokes ? { strokes: strokes.map(cloneStrokeSnapshot) } : {}),
+        ...(objects ? { objects: objects.map(object => object.type === 'stroke' ? adoptPageStrokeSnapshot(object) : structuredClone(object)) } : {}),
+        ...(strokes ? { strokes: strokes.map(adoptPageStrokeSnapshot) } : {}),
       };
     })() : null;
     this.sceneOwnerPageId = pageId;

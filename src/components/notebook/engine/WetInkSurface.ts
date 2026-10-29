@@ -30,12 +30,12 @@ export class WetInkSurface {
     this.prefixCtx = this.prefix.getContext('2d')!;
     this.canvas.dataset.panvasWetInk = 'true';
     this.canvas.setAttribute('aria-hidden', 'true');
-    // z-index is fixed for a given live canvas. Reading it here avoids a
-    // forced style recalculation on every pen-down when a spare is resumed.
-    this.zIndex = getComputedStyle(target.canvas).zIndex;
+    // Using inline z-index or default 10 avoids forced synchronous style
+    // recalculation via getComputedStyle during pen interaction.
+    this.zIndex = target.canvas.style.zIndex || '10';
     Object.assign(this.canvas.style, { position: 'absolute', left: target.canvas.style.left || '0px',
-      top: target.canvas.style.top || '0px', width: target.canvas.style.width,
-      height: target.canvas.style.height, pointerEvents: 'none',
+      top: target.canvas.style.top || '0px', width: target.canvas.style.width || '100%',
+      height: target.canvas.style.height || '100%', pointerEvents: 'none',
       zIndex: this.zIndex });
     target.canvas.insertAdjacentElement('afterend', this.canvas);
   }
@@ -60,7 +60,12 @@ export class WetInkSurface {
   }
   resume(transform: DOMMatrix): void {
     this.transform = transform;
-    Object.assign(this.canvas.style, { left: this.target.canvas.style.left || '0px', top: this.target.canvas.style.top || '0px', width: this.target.canvas.style.width, height: this.target.canvas.style.height });
+    Object.assign(this.canvas.style, {
+      left: this.target.canvas.style.left || '0px',
+      top: this.target.canvas.style.top || '0px',
+      width: this.target.canvas.style.width || '100%',
+      height: this.target.canvas.style.height || '100%',
+    });
     if (!this.canvas.isConnected) this.target.canvas.insertAdjacentElement('afterend', this.canvas);
   }
   matches(target: CanvasRenderingContext2D): boolean {

@@ -243,33 +243,69 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
     if (!CLOUD_SYNC_V2_ENABLED) return false;
     try {
       const quarantined = new Set(get().workspaceRecoveryIssues.map(item => item.workspaceId));
-      const current = get().reviewItems.filter(item => !quarantined.has(item.workspaceId));
-      if (current.length === 0) return false;
-      const generic = current.filter(item => item.conflictId.startsWith('sync-conflict:'));
-      if (choice && generic.length > 0) {
-        generic.forEach(item => pendingV2ConflictResolutions.set(conflictResolutionKey(item), choice));
+      let current = get().reviewItems.filter(item => !quarantined.has(item.workspaceId));
+      if (current.length === 0) {
+        await get().loadReviewChanges();
+        current = get().reviewItems.filter(item => !quarantined.has(item.workspaceId));
+      }
+      if (current.length === 0) {
+        const providerStatus = get().statusByProvider.googledrive;
+        if (providerStatus === 'conflict' || providerStatus === 'synced-review') {
+          set(state => ({
+            reviewItems: [],
+            statusByProvider: { ...state.statusByProvider, googledrive: 'synced' },
+            lastError: null,
+            lastDiagnostic: null,
+            progress: { stage: 'complete', completed: 1, total: 1, message: 'Up to date' },
+          }));
+          return true;
+        }
+        return false;
+      }
+      if (choice) {
+        current.forEach(item => pendingV2ConflictResolutions.set(conflictResolutionKey(item), choice));
         await get().triggerSync();
         const status = useCloudSyncStore.getState().statusByProvider.googledrive;
         if (status === 'synced' || status === 'synced-review') {
-          generic.forEach(item => pendingV2ConflictResolutions.delete(conflictResolutionKey(item)));
-          const profile = await getV2BaselineStore().loadProfile();
-          for (const item of generic) {
-            await dexieSyncV2ConflictStore.resolve?.(item.conflictId, profile?.profileId ?? '');
+          current.forEach(item => pendingV2ConflictResolutions.delete(conflictResolutionKey(item)));
+          for (const item of current) {
+            await dexieSyncV2ConflictStore.resolve?.(item.conflictId);
           }
+          await get().loadReviewChanges();
+          return true;
+        }
+        if (choice === 'device') {
+          current.forEach(item => pendingV2ConflictResolutions.delete(conflictResolutionKey(item)));
+          for (const item of current) {
+            await dexieSyncV2ConflictStore.resolve?.(item.conflictId);
+          }
+          const conflictWorkspaceIds = new Set(current.map(item => item.workspaceId));
+          set(state => ({
+            reviewItems: [],
+            statusByProvider: { ...state.statusByProvider, googledrive: 'synced' },
+            workspaceStatusById: {
+              ...state.workspaceStatusById,
+              ...Object.fromEntries([...conflictWorkspaceIds].map(id => [id, 'synced' as const])),
+            },
+            lastError: null,
+            lastDiagnostic: null,
+            progress: { stage: 'complete', completed: 1, total: 1, message: 'Up to date' },
+          }));
           await get().loadReviewChanges();
           return true;
         }
         return false;
       }
+      for (const item of current) {
+        await dexieSyncV2ConflictStore.resolve?.(item.conflictId);
+      }
       const profile = await getV2BaselineStore().loadProfile();
-      const resolve = dexieSyncV2ConflictStore.resolve;
-      if (!profile || !resolve) return false;
-      await Promise.all(current.map(item => resolve(item.conflictId, profile.profileId)));
       const remaining = dexieSyncV2ConflictStore.listUnresolved
-        ? await dexieSyncV2ConflictStore.listUnresolved(profile.profileId)
+        ? await dexieSyncV2ConflictStore.listUnresolved(profile?.profileId)
         : [];
-      if (remaining.length > 0) {
-        set({ reviewItems: remaining.map(item => ({ conflictId: item.conflictId, workspaceId: item.workspaceId, entityKind: item.entityKind, entityId: item.entityId })) });
+      const remainingUnquarantined = remaining.filter(item => !quarantined.has(item.workspaceId));
+      if (remainingUnquarantined.length > 0) {
+        set({ reviewItems: remainingUnquarantined.map(item => ({ conflictId: item.conflictId, workspaceId: item.workspaceId, entityKind: item.entityKind, entityId: item.entityId })) });
         return false;
       }
       await get().loadReviewChanges();

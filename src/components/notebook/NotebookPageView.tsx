@@ -61,6 +61,8 @@ export interface NotebookPageViewProps {
   notebookEngine: NotebookEngine;
   /** Page currently represented by the shared live NotebookEngine scene. */
   sceneOwnerPageId?: string;
+  /** Retained page-owned preview from a previous mount, if still current. */
+  previewSource?: DrawingEngine;
   activeEditor: Editor | null;
   setActiveEditor: (editor: Editor | null) => void;
   onActivatePage: () => void;
@@ -95,6 +97,7 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
   toolState,
   notebookEngine,
   sceneOwnerPageId = '',
+  previewSource,
   activeEditor,
   setActiveEditor,
   onActivatePage,
@@ -167,7 +170,12 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
   const activeRasterOriginRef = useRef(0);
   const staticCanvasConfigurationRef = useRef<string | null>(null);
   const staticEngineRef = useRef<{ drawing: DrawingEngine; viewport: ViewportManager; layers: LayerManager; images: ImageManager; shapes: ShapeManager } | null>(null);
+  const pendingPreviewAdoptionRef = useRef<{ source: DrawingEngine; data: DrawingData } | null>(null);
   const [staticDrawing, setStaticDrawing] = useState<DrawingEngine | null>(null);
+  // The page-owned preview stays visible until the shared live surface has
+  // actual pixels. Deferred handoffs and sliced fallback paints would otherwise
+  // expose a transparent canvas for the duration of the paint.
+  const [liveSurfacePainted, setLiveSurfacePainted] = useState(false);
   const instanceIdRef = useRef<string>('');
   if (!instanceIdRef.current) {
     instanceIdRef.current = 'inst_' + Math.random().toString(36).substring(2, 8);
@@ -207,9 +215,10 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
       const shapes = new ShapeManager(viewport, layers);
       const images = new ImageManager(viewport, layers);
       const drawing = new DrawingEngine(viewport, shapes, images, layers);
+      drawing.setCoalesceRedraws(true);
       // Geometry caches outlive this component. A closure created here also
       // retains the render/effect contexts and their old page payloads.
-      images.setRedrawCallback(drawing.redraw.bind(drawing));
+      images.setRedrawCallback(drawing.scheduleRedraw.bind(drawing));
       engine = { drawing, viewport, layers, images, shapes };
       staticEngineRef.current = engine;
       drawing.setFullDarkView(fullDarkView);
@@ -217,25 +226,46 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
       setStaticDrawing(drawing);
     }
     if (liveSceneReady) return;
-    engine.viewport.setPageCoordinateTransform(0, width, height, pageGeometry.source.left, pageGeometry.source.top);
-    engine.viewport.setRenderWindowOrigin(rasterTop, expandedSurface ? rasterHeight : undefined);
-    engine.layers.setData(data.layers, data.activeLayerId);
-    const fallbackLayerId = engine.layers.getLayers()[0].id;
-    const withLayer = (object: any) => ({ ...object, layerId: object.layerId ?? fallbackLayerId });
-    // Configure only when geometry changes; the retained canvas is never reset
-    // by focus. Data updates finish synchronously before the next paint.
-    engine.drawing.setScaleMultiplier(Math.min(renderScale, MAX_INACTIVE_PAGE_RENDER_ZOOM));
     const staticConfiguration = `${width}:${rasterHeight}:${renderScale}`;
-    if (staticCanvasConfigurationRef.current !== staticConfiguration || engine.drawing.getCanvasElement() !== canvasRef.current) {
+    const canvasMatches = engine.drawing.getCanvasElement() === canvasRef.current;
+    if (!canvasMatches || staticCanvasConfigurationRef.current !== staticConfiguration) {
+      engine.drawing.setScaleMultiplier(Math.min(renderScale, MAX_INACTIVE_PAGE_RENDER_ZOOM));
       engine.drawing.setCanvas(canvasRef.current, width, rasterHeight);
       staticCanvasConfigurationRef.current = staticConfiguration;
     }
+    engine.viewport.setPageCoordinateTransform(0, width, height, pageGeometry.source.left, pageGeometry.source.top);
+    engine.viewport.setRenderWindowOrigin(rasterTop, expandedSurface ? rasterHeight : undefined);
+    // Page handoff already blitted the live pixels into this page-owned
+    // surface. Reusing them avoids replaying the whole scene twice per
+    // boundary (once for the outgoing preview, once for the incoming live
+    // canvas) while still repainting after any real data/geometry change.
+    if (engine.drawing.isSurfaceCurrent(data) || engine.drawing.isSurfacePaintCurrent(data)) {
+      return;
+    }
+    engine.layers.setData(data.layers, data.activeLayerId);
+    const fallbackLayerId = engine.layers.getLayers()[0].id;
+    const withLayer = (object: any) => ({ ...object, layerId: object.layerId ?? fallbackLayerId });
     const objects = data.objects || [];
-    engine.drawing.setStrokes((data.version === 1 ? data.strokes || [] : objects.filter(o => o.type === 'stroke')).map(withLayer), notebookEngine.drawing, false);
+    // A retained preview from the previous mount can supply both Path2D geometry
+    // and finished pixels. Retaining its paths avoids rebuilding ~90ms of dense
+    // ink, and the pixel blit below avoids replaying the whole scene.
+    const previewCurrent = Boolean(previewSource && previewSource !== engine.drawing
+      && previewSource.getCanvasElement() && previewSource.isSurfaceCurrent(data));
+    engine.drawing.setStrokes((data.version === 1 ? data.strokes || [] : objects.filter(o => o.type === 'stroke')).map(withLayer), previewSource ?? notebookEngine.drawing, false);
     engine.shapes.setShapes((data.version === 1 ? data.shapes || [] : objects.filter(o => o.type === 'shape')).map(withLayer));
     engine.images.adoptDecodedImages(notebookEngine.images, objects.filter(o => o.type === 'image').map(o => o.fileId));
     engine.images.setImages(objects.filter(o => o.type === 'image').map(withLayer));
-    engine.drawing.redraw();
+    if (previewCurrent && previewSource!.copySurfacesTo(engine.drawing, data)) {
+      return;
+    }
+    // Multi-layer previews attach their layer canvases in child layout effects.
+    // Defer the adoption attempt until those canvases exist, then fall back to
+    // the sliced paint if the retained pixels are not usable.
+    if (previewCurrent && !staticDrawing && (data.layers?.length ?? 0) > 1) {
+      pendingPreviewAdoptionRef.current = { source: previewSource!, data };
+      return;
+    }
+    engine.drawing.schedulePreviewPaint(data);
   // `data` also carries page properties. A paper-color update replaces that
   // wrapper object, but must not replay unchanged strokes/images/shapes.
   }, [
@@ -258,15 +288,31 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
   ]);
 
   useLayoutEffect(() => {
+    const pending = pendingPreviewAdoptionRef.current;
+    const engine = staticEngineRef.current;
+    if (!pending || !staticDrawing || !engine || engine.drawing !== staticDrawing) return;
+    pendingPreviewAdoptionRef.current = null;
+    // Child LayerCanvas effects have run by now, so every target layer exists.
+    if (pending.source.isSurfaceCurrent(pending.data)
+      && pending.source.copySurfacesTo(staticDrawing, pending.data)) {
+      return;
+    }
+    staticDrawing.schedulePreviewPaint(pending.data);
+  }, [staticDrawing]);
+
+  useLayoutEffect(() => {
     const unsubscribe = notebookEngine.images.onDecodedImage(() => {
       const preview = staticEngineRef.current;
       if (!preview || notebookEngine.getDrawingOwnership().pageId !== page.id) return;
       preview.images.adoptDecodedImages(notebookEngine.images);
-      preview.drawing.redraw();
+      preview.drawing.scheduleRedraw();
     });
     return () => {
       unsubscribe();
-      staticEngineRef.current?.drawing.detachCanvas();
+      // Keep the page-owned pixels alive for the resident geometry window.
+      // React removes the canvas element, but the engine can still source a
+      // handoff blit when the user scrolls back, avoiding a full preview
+      // repaint. The renderer detaches it when the engine leaves that window.
       staticEngineRef.current?.images.destroy();
       onImageManagerReady?.(page.id, null);
       staticEngineRef.current = null;
@@ -284,7 +330,16 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
     notebookEngine.drawing.setScaleMultiplier(renderScale);
     notebookEngine.viewport.setPageCoordinateTransform(0, width, height, pageGeometry.source.left, pageGeometry.source.top);
     notebookEngine.viewport.setRenderWindowOrigin(rasterTop, expandedSurface ? rasterHeight : undefined);
-    notebookEngine.mount(canvas, width, rasterHeight);
+    setLiveSurfacePainted(false);
+    const markLiveSurfacePainted = () => {
+      if (notebookEngine.drawing.getCanvasElement() !== canvas) return;
+      // The hidden page-owned preview no longer needs to finish its own paint;
+      // the live surface now owns these pixels and will refresh the preview at
+      // the next handoff.
+      preview?.drawing.cancelPaint();
+      setLiveSurfacePainted(true);
+    };
+    notebookEngine.mount(canvas, width, rasterHeight, preview?.drawing, data, markLiveSurfacePainted);
     activeRasterOriginRef.current = rasterTop;
     activeCanvasConfigurationRef.current = `${width}:${rasterHeight}:${renderScale}:${pageGeometry.source.left}:${pageGeometry.source.top}`;
     return () => {
@@ -470,11 +525,15 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
         onFocusEditor={setActiveEditor}
       >
         {/* This page-owned visual subtree survives every interaction handoff. */}
-        <div data-stable-page-visual={page.id} style={{ visibility: liveSceneReady && page.type !== 'pdf' ? 'hidden' : 'visible' }}>
+        <div data-stable-page-visual={page.id} style={{ visibility: liveSceneReady && page.type !== 'pdf' && liveSurfacePainted ? 'hidden' : 'visible' }}>
         {staticDrawing && (data?.layers?.length ?? 0) > 1 && data!.layers!.map((layer, order) => <LayerCanvas key={layer.id} drawing={staticDrawing} id={layer.id} width={width} height={rasterHeight} top={rasterTop - logicalBase} scale={Math.min(renderScale, MAX_INACTIVE_PAGE_RENDER_ZOOM)} order={order} />)}
-        {staticTextObjects.filter(obj => !isDocumentBody(obj) && (!expandedSurface || obj.y + (obj.height ?? 100) > rasterTop && obj.y < rasterTop + rasterHeight)).map(obj => isVoiceNoteObject(obj) ? <StaticVoiceNote key={obj.id} object={obj} note={data?.audioNotes?.find(note => note.id === obj.metadata.audioNoteId)} offset={textPageOffset}/> : (
-          <StaticTextPreview key={obj.id} object={obj} scale={1} zIndex={textZIndex(obj.layerId)} offset={textPageOffset} />
-        ))}
+        {/* Live text editors already render on focus; keep the static HTML
+            hidden so the two copies never stack during a deferred ink handoff. */}
+        <div style={{ visibility: liveSceneReady ? 'hidden' : 'visible' }}>
+          {staticTextObjects.filter(obj => !isDocumentBody(obj) && (!expandedSurface || obj.y + (obj.height ?? 100) > rasterTop && obj.y < rasterTop + rasterHeight)).map(obj => isVoiceNoteObject(obj) ? <StaticVoiceNote key={obj.id} object={obj} note={data?.audioNotes?.find(note => note.id === obj.metadata.audioNoteId)} offset={textPageOffset}/> : (
+            <StaticTextPreview key={obj.id} object={obj} scale={1} zIndex={textZIndex(obj.layerId)} offset={textPageOffset} />
+          ))}
+        </div>
 
         <canvas ref={canvasRef} data-committed-page-id={page.id} className="absolute inset-0 z-10 w-full h-full pointer-events-none"
           style={{ ...canvasStyle, filter: page.type === 'pdf' ? (fullDarkView && brightPdfPreview ? FULL_DARK_PDF_FILTER : 'none') : undefined }} />

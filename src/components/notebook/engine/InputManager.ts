@@ -197,7 +197,10 @@ export class InputManager {
 
     this.canvas = canvas;
     this.rulerManager.setEnabled(this.toolManager.getState().rulerEnabled);
+    let previousToolMode = this.toolManager.getState().mode;
     this.unsubscribeToolState = this.toolManager.subscribe((state) => {
+      if (state.mode === 'select' && previousToolMode !== 'select') this.drawingEngine.warmSelectionBacking?.();
+      previousToolMode = state.mode;
       if (state.mode !== 'select') this.clearSelectionCursor();
       if (state.mode !== 'draw' || state.drawingTool !== 'laser') {
         this.laserPointerActive = false;
@@ -273,6 +276,7 @@ export class InputManager {
     }
     this.pendingSelectionPoint = null;
     this.clearTransientTextDomPositions();
+    this.drawingEngine?.endLasso?.();
     this.selectionDragMode = 'none';
     this.lassoPoints = [];
     this.laserManager.clear();
@@ -293,6 +297,12 @@ export class InputManager {
     if (this.inkSamples) return;
     if (this.eraserGesture) return;
     const toolState = this.toolManager.getState();
+    // A deferred preview handoff leaves the live canvas blank until the
+    // preview finishes. The first real gesture needs pixels now; repaint
+    // synchronously rather than selecting/erasing against an empty surface.
+    if (['draw', 'erase', 'shape', 'select', 'text'].includes(toolState.mode)) {
+      this.drawingEngine.ensureSurfaceReadyForInteraction?.();
+    }
     if (toolState.rulerEnabled && e.button === 0) {
       const point = this.getCanvasPoint(e);
       const rulerHit = this.rulerManager.hitTest(point.x, point.y);
@@ -649,19 +659,29 @@ export class InputManager {
 
     // getHandleAt() and selectAt() preserve the existing handle, active-bounds,
     // click-to-select, and Shift+click behavior. Only a genuine empty-canvas hit starts
-    // lasso collection.
-    const handleHit = this.selectionEngine.getHandleAt(point.x, point.y);
-    const hitSelectionOrElement = Boolean(handleHit)
-      || this.selectionEngine.selectAt(point.x, point.y, e.shiftKey);
+    // lasso collection. Toolbar/React selection notifications are coalesced to
+    // the next frame so dense-page hit testing and drag setup stay in one task.
+    const selectGesture = () => {
+      const handleHit = this.selectionEngine.getHandleAt(point.x, point.y);
+      const hit = Boolean(handleHit)
+        || this.selectionEngine.selectAt(point.x, point.y, e.shiftKey, Boolean(handleHit));
+      if (hit) {
+        this.selectionDragMode = 'transform';
+        this.selectionEngine.startDrag(point.x, point.y);
+      }
+      return hit;
+    };
+    const hitSelectionOrElement = typeof this.selectionEngine.withDeferredSelectionNotifications === 'function'
+      ? this.selectionEngine.withDeferredSelectionNotifications(selectGesture)
+      : selectGesture();
 
     if (hitSelectionOrElement) {
-      this.selectionDragMode = 'transform';
-      this.selectionEngine.startDrag(point.x, point.y);
       return;
     }
 
     this.selectionDragMode = 'lasso';
     this.lassoPoints = [point];
+    this.drawingEngine.startLasso?.();
     this.drawingEngine.renderLasso(this.lassoPoints);
   }
 
@@ -709,8 +729,9 @@ export class InputManager {
       const completedLoop = this.lassoPoints;
       this.lassoPoints = [];
       this.selectionDragMode = 'none';
+      this.drawingEngine.endLasso?.();
       if (completedLoop.length >= 3) {
-        this.selectionEngine.selectWithinLoop(completedLoop);
+        this.selectionEngine.selectWithinLoop(completedLoop, false);
       }
       // selectWithinLoop intentionally does not redraw when nothing is enclosed; always
       // redraw here so the transient lasso disappears for both hit and miss outcomes.

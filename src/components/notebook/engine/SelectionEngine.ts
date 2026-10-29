@@ -7,6 +7,7 @@ import { recropImageGeometry } from './imageAppearance.ts';
 
 import type { SelectedElement, BoundingBox, ImageObject, Shape, Stroke, StrokePoint, TextObject } from './drawingTypes.ts';
 import type { DrawingEngine } from './DrawingEngine.ts';
+import type { EraseBounds } from './capsuleErase.ts';
 import type { ShapeManager } from './ShapeManager.ts';
 import type { HistoryManager } from './HistoryManager.ts';
 import type { ViewportManager } from './ViewportManager.ts';
@@ -23,6 +24,18 @@ import { getEligibleSelectedHandwritingStrokes } from '../../../services/recogni
 import { validateElementSnapshot } from '../../../services/elements/LocalElementRepository.ts';
 
 type ResizeHandle = 'tl' | 'tc' | 'tr' | 'ml' | 'mr' | 'bl' | 'bc' | 'br' | 'rotate' | null;
+type DragTransform = {
+  mode: string;
+  dx: number;
+  dy: number;
+  scaleX?: number;
+  scaleY?: number;
+  transX?: number;
+  transY?: number;
+  cos?: number;
+  sin?: number;
+  center?: { x: number; y: number };
+};
 type ObjectOrderSnapshot = {
   strokes: Stroke[];
   shapes: Shape[];
@@ -44,6 +57,17 @@ export class SelectionEngine {
   private selectedIds: Set<string> = new Set();
   private selectedElements: SelectedElement[] = [];
   private selectionListeners: Set<() => void> = new Set();
+  private selectionNotifyDeferred = 0;
+  private selectionNotifyPending = false;
+  private selectionNotifyScheduled = false;
+  private selectionNotifyFrame: number | null = null;
+
+  // Selection feedback is canvas-only. Painting the union of the old and new
+  // selection bounds can wait one frame on pointerdown so hit testing and drag
+  // setup stay in a single short task; a drag repaint cancels the pending one.
+  private pendingSelectRedraw: EraseBounds | null = null;
+  private pendingSelectRedrawScheduled = false;
+  private pendingSelectRedrawFrame: number | null = null;
 
   // Drag state
   private isDragging = false;
@@ -55,20 +79,16 @@ export class SelectionEngine {
   private originalPositions: Map<string, any> = new Map();
   private originalInkClips: Map<string, Stroke['inkClip']> = new Map();
   private originalElementBoxes: Map<string, BoundingBox> = new Map();
-  private currentDragTransform: {
-    mode: string;
-    dx: number;
-    dy: number;
-    scaleX?: number;
-    scaleY?: number;
-    transX?: number;
-    transY?: number;
-    cos?: number;
-    sin?: number;
-    center?: { x: number; y: number };
-  } | null = null;
+  private currentDragTransform: DragTransform | null = null;
   private originalBox: BoundingBox | null = null;
   private rotationStartAngle = 0;
+  private cachedCollectiveBoundingBox: BoundingBox | null = null;
+  private isCollectiveBoxDirty: boolean = true;
+
+  invalidateCollectiveBoundingBox(): void {
+    this.isCollectiveBoxDirty = true;
+    this.cachedCollectiveBoundingBox = null;
+  }
 
   constructor(drawingEngine: DrawingEngine, shapeManager: ShapeManager, historyManager: HistoryManager, viewport: ViewportManager, textManager: TextManager, imageManager: ImageManager, layerManager: LayerManager = new LayerManager()) {
     this.drawingEngine = drawingEngine;
@@ -90,11 +110,113 @@ export class SelectionEngine {
   }
 
   private notifySelectionChange(): void {
+    this.invalidateCollectiveBoundingBox();
+    if (this.selectionNotifyDeferred > 0) {
+      this.selectionNotifyPending = true;
+      this.scheduleSelectionNotification();
+      return;
+    }
+    this.flushSelectionNotification();
+  }
+
+  /**
+   * Coalesce UI selection notifications to the next animation frame. Canvas
+   * selection feedback is already immediate; deferring the React toolbar
+   * commit keeps the pointerdown task short on dense pages.
+   */
+  withDeferredSelectionNotifications<T>(callback: () => T): T {
+    this.selectionNotifyDeferred++;
+    try {
+      return callback();
+    } finally {
+      this.selectionNotifyDeferred--;
+      if (this.selectionNotifyDeferred === 0 && this.selectionNotifyPending) {
+        this.scheduleSelectionNotification();
+      }
+    }
+  }
+
+  private scheduleSelectionNotification(): void {
+    if (this.selectionNotifyScheduled) return;
+    this.selectionNotifyScheduled = true;
+    if (typeof requestAnimationFrame === 'function') {
+      this.selectionNotifyFrame = requestAnimationFrame(() => {
+        this.selectionNotifyFrame = null;
+        this.selectionNotifyScheduled = false;
+        if (this.selectionNotifyDeferred === 0) this.flushSelectionNotification();
+      });
+      return;
+    }
+    queueMicrotask(() => {
+      if (!this.selectionNotifyScheduled) return;
+      this.selectionNotifyScheduled = false;
+      if (this.selectionNotifyDeferred === 0) this.flushSelectionNotification();
+    });
+  }
+
+  private flushSelectionNotification(): void {
+    if (this.selectionNotifyFrame !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(this.selectionNotifyFrame);
+    }
+    this.selectionNotifyFrame = null;
+    this.selectionNotifyScheduled = false;
+    this.selectionNotifyPending = false;
     this.selectionListeners.forEach(listener => listener());
   }
 
+  private scheduleSelectionRedraw(damage: EraseBounds | null): void {
+    if (typeof requestAnimationFrame !== 'function') {
+      this.drawingEngine.redraw(damage ?? undefined);
+      return;
+    }
+    // Keep the union of multiple pointerdown updates in the same frame.
+    if (this.pendingSelectRedraw && damage) {
+      this.pendingSelectRedraw = {
+        left: Math.min(this.pendingSelectRedraw.left, damage.left),
+        top: Math.min(this.pendingSelectRedraw.top, damage.top),
+        right: Math.max(this.pendingSelectRedraw.right, damage.right),
+        bottom: Math.max(this.pendingSelectRedraw.bottom, damage.bottom),
+      };
+    } else {
+      this.pendingSelectRedraw = damage;
+    }
+    if (this.pendingSelectRedrawScheduled) return;
+    this.pendingSelectRedrawScheduled = true;
+    // Paint one frame after the pointerdown task. The first rAF callback runs in
+    // the same rendering turn as the input event on Chromium; a second hop keeps
+    // hit testing, drag setup, toolbar notification, and the damage repaint in
+    // separate tasks on throttled hardware.
+    this.pendingSelectRedrawFrame = requestAnimationFrame(() => {
+      this.pendingSelectRedrawFrame = requestAnimationFrame(() => {
+        this.pendingSelectRedrawFrame = null;
+        this.pendingSelectRedrawScheduled = false;
+        const pending = this.pendingSelectRedraw;
+        this.pendingSelectRedraw = null;
+        this.drawingEngine.redraw(pending ?? undefined);
+      });
+    });
+  }
+
+  private cancelPendingSelectionRedraw(): void {
+    if (this.pendingSelectRedrawFrame !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(this.pendingSelectRedrawFrame);
+    }
+    this.pendingSelectRedrawFrame = null;
+    this.pendingSelectRedrawScheduled = false;
+    this.pendingSelectRedraw = null;
+  }
+
   hasSelectedStrokes(): boolean {
-    return this.getSelectedStrokes().length > 0;
+    if (this.selectedElements.length === 0) return false;
+    for (const el of this.selectedElements) {
+      if (el.type === 'stroke') {
+        const stroke = this.getStroke(el.id);
+        if (stroke && this.layerManager.isEditable(stroke.layerId)) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   /** Returns a copied, ordered snapshot suitable for asynchronous recognition. */
@@ -115,11 +237,21 @@ export class SelectionEngine {
     let maxX = -Infinity;
     let maxY = -Infinity;
     for (const stroke of strokes) {
-      for (const point of stroke.points) {
-        minX = Math.min(minX, point.x);
-        minY = Math.min(minY, point.y);
-        maxX = Math.max(maxX, point.x);
-        maxY = Math.max(maxY, point.y);
+      const box = typeof (this.drawingEngine as any).getStrokePointBounds === 'function'
+        ? (this.drawingEngine as any).getStrokePointBounds(stroke)
+        : null;
+      if (box) {
+        minX = Math.min(minX, box.x);
+        minY = Math.min(minY, box.y);
+        maxX = Math.max(maxX, box.x + box.width);
+        maxY = Math.max(maxY, box.y + box.height);
+      } else {
+        for (const point of stroke.points) {
+          minX = Math.min(minX, point.x);
+          minY = Math.min(minY, point.y);
+          maxX = Math.max(maxX, point.x);
+          maxY = Math.max(maxY, point.y);
+        }
       }
     }
     return Number.isFinite(minX)
@@ -127,27 +259,137 @@ export class SelectionEngine {
       : null;
   }
 
-  clearSelection(): void {
+  clearSelection(repaint = true): void {
+    const damage = (repaint && this.selectedElements.length > 0) ? this.getSelectionDamage() : null;
     this.drawingEngine.endSelectionDrag?.();
     this.selectedIds.clear();
     this.selectedElements = [];
+    this.invalidateCollectiveBoundingBox();
     this.textManager.setActiveTextId?.(undefined);
     this.notifySelectionChange();
-    this.drawingEngine.redraw();
+    if (repaint) {
+      if (damage) {
+        this.scheduleSelectionRedraw(damage);
+      } else {
+        this.drawingEngine.redraw();
+      }
+    }
+  }
+
+  /**
+   * Page-space bounds covering every selected object's box, rotated handles and
+   * rotation stem. Selection changes can then repaint only the damaged region
+   * instead of replaying the whole page just to move a handle.
+   */
+  private getSelectionDamage(): EraseBounds | null {
+    if (this.selectedElements.length === 0) return null;
+    const scale = Math.max(0.05, this.viewport.getState().scale);
+    const padding = 40 / scale;
+
+    if (this.selectedElements.length > 1) {
+      const group = this.getCollectiveBoundingBox();
+      if (group) {
+        let left = group.x - padding;
+        let top = group.y - padding - 36 / scale;
+        let right = group.x + group.width + padding;
+        let bottom = group.y + group.height + padding;
+
+        for (const el of this.selectedElements) {
+          if (el.type === 'stroke') continue;
+          const rot = this.getObjectRotation(el);
+          if (rot !== 0) {
+            const box = this.getBoundingBox(el);
+            if (box) {
+              const cx = box.x + box.width / 2;
+              const cy = box.y + box.height / 2;
+              const angle = rot * Math.PI / 180;
+              const cos = Math.cos(angle);
+              const sin = Math.sin(angle);
+              const corners = [
+                [box.x - padding, box.y - padding],
+                [box.x + box.width + padding, box.y - padding],
+                [box.x + box.width + padding, box.y + box.height + padding],
+                [box.x - padding, box.y + box.height + padding],
+              ];
+              for (const [x, y] of corners) {
+                const dx = x - cx, dy = y - cy;
+                const px = cx + dx * cos - dy * sin;
+                const py = cy + dx * sin + dy * cos;
+                left = Math.min(left, px);
+                top = Math.min(top, py);
+                right = Math.max(right, px);
+                bottom = Math.max(bottom, py);
+              }
+            }
+          }
+        }
+        return { left, top, right, bottom };
+      }
+    }
+
+    let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+    for (const el of this.selectedElements) {
+      const box = this.getBoundingBox(el);
+      if (!box) continue;
+      const cx = box.x + box.width / 2;
+      const cy = box.y + box.height / 2;
+      const angle = this.getObjectRotation(el) * Math.PI / 180;
+      const cos = Math.cos(angle);
+      const sin = Math.sin(angle);
+      const corners = [
+        [box.x - padding, box.y - padding],
+        [box.x + box.width + padding, box.y - padding],
+        [box.x + box.width + padding, box.y + box.height + padding],
+        [box.x - padding, box.y + box.height + padding],
+      ];
+      for (const [x, y] of corners) {
+        const dx = x - cx, dy = y - cy;
+        const px = cx + dx * cos - dy * sin;
+        const py = cy + dx * sin + dy * cos;
+        left = Math.min(left, px);
+        top = Math.min(top, py);
+        right = Math.max(right, px);
+        bottom = Math.max(bottom, py);
+      }
+    }
+    return Number.isFinite(left) ? { left, top, right, bottom } : null;
+  }
+
+  private unionDamage(a: EraseBounds | null, b: EraseBounds | null): EraseBounds | null {
+    if (!a) return b;
+    if (!b) return a;
+    return {
+      left: Math.min(a.left, b.left),
+      top: Math.min(a.top, b.top),
+      right: Math.max(a.right, b.right),
+      bottom: Math.max(a.bottom, b.bottom),
+    };
   }
 
   selectElement(id: string, type: 'stroke' | 'shape' | 'text' | 'image', multi = false): void {
-    const source = type === 'stroke' ? this.drawingEngine.getStrokes() : type === 'shape' ? this.shapeManager.getShapes() : type === 'text' ? this.textManager.getTexts() : this.imageManager.getImages();
-    const object = source.find(item => item.id === id);
-    if (!object || type === 'text' && 'metadata' in object && object.metadata?.documentRole === 'body' || !this.layerManager.isEditable(object.layerId)) return;
+    const object = type === 'stroke'
+      ? this.getStroke(id)
+      : type === 'shape'
+      ? ((typeof this.shapeManager.getShape === 'function' ? this.shapeManager.getShape(id) : undefined) ?? this.shapeManager.getShapes().find(item => item.id === id))
+      : type === 'text'
+      ? this.textManager.getTexts().find(item => item.id === id)
+      : ((typeof this.imageManager.getImage === 'function' ? this.imageManager.getImage(id) : undefined) ?? this.imageManager.getImages().find(item => item.id === id));
+    if (!object || type === 'text' && 'metadata' in object && (object as any).metadata?.documentRole === 'body' || !this.layerManager.isEditable(object.layerId)) return;
+    let prevDamage: EraseBounds | null = null;
     if (!multi) {
-      this.clearSelection();
+      prevDamage = this.getSelectionDamage();
+      this.clearSelection(false);
     }
     if (!this.selectedIds.has(id)) {
       this.selectedIds.add(id);
       this.selectedElements.push({ type, id });
       this.notifySelectionChange();
-      this.drawingEngine.redraw();
+      const damage = this.unionDamage(prevDamage, this.getSelectionDamage());
+      if (damage) {
+        this.scheduleSelectionRedraw(damage);
+      } else {
+        this.drawingEngine.redraw();
+      }
     }
   }
 
@@ -286,6 +528,7 @@ export class SelectionEngine {
           origMap.set(el.id, stroke.color);
           finalMap.set(el.id, color);
           stroke.color = color;
+          this.drawingEngine.invalidateStrokeSnapshot?.(stroke.id);
         }
       } else if (el.type === 'shape' && !toolFilter) {
         const shape = this.shapeManager.getShapes().find(item => item.id === el.id);
@@ -307,7 +550,10 @@ export class SelectionEngine {
           if (!finalColor) continue;
           if (el.type === 'stroke') {
             const stroke = this.drawingEngine.getStrokes().find(s => s.id === el.id);
-            if (stroke) stroke.color = finalColor;
+            if (stroke) {
+              stroke.color = finalColor;
+              this.drawingEngine.invalidateStrokeSnapshot?.(stroke.id);
+            }
           } else if (el.type === 'shape') {
             const shape = this.shapeManager.getShapes().find(item => item.id === el.id);
             if (shape) shape.color = finalColor;
@@ -321,7 +567,10 @@ export class SelectionEngine {
           if (!origColor) continue;
           if (el.type === 'stroke') {
             const stroke = this.drawingEngine.getStrokes().find(s => s.id === el.id);
-            if (stroke) stroke.color = origColor;
+            if (stroke) {
+              stroke.color = origColor;
+              this.drawingEngine.invalidateStrokeSnapshot?.(stroke.id);
+            }
           } else if (el.type === 'shape') {
             const shape = this.shapeManager.getShapes().find(item => item.id === el.id);
             if (shape) shape.color = origColor;
@@ -349,6 +598,7 @@ export class SelectionEngine {
           origMap.set(el.id, stroke.thickness);
           finalMap.set(el.id, thickness);
           stroke.thickness = thickness;
+          this.drawingEngine.invalidateStrokeGeometry?.(stroke.id);
         }
       } else if (el.type === 'shape' && !toolFilter) {
         const shape = this.shapeManager.getShapes().find(item => item.id === el.id);
@@ -370,7 +620,10 @@ export class SelectionEngine {
           if (finalThickness === undefined) continue;
           if (el.type === 'stroke') {
             const stroke = this.drawingEngine.getStrokes().find(s => s.id === el.id);
-            if (stroke) stroke.thickness = finalThickness;
+            if (stroke) {
+              stroke.thickness = finalThickness;
+              this.drawingEngine.invalidateStrokeGeometry?.(stroke.id);
+            }
           } else if (el.type === 'shape') {
             const shape = this.shapeManager.getShapes().find(item => item.id === el.id);
             if (shape) shape.strokeWidth = finalThickness;
@@ -384,7 +637,10 @@ export class SelectionEngine {
           if (origThickness === undefined) continue;
           if (el.type === 'stroke') {
             const stroke = this.drawingEngine.getStrokes().find(s => s.id === el.id);
-            if (stroke) stroke.thickness = origThickness;
+            if (stroke) {
+              stroke.thickness = origThickness;
+              this.drawingEngine.invalidateStrokeGeometry?.(stroke.id);
+            }
           } else if (el.type === 'shape') {
             const shape = this.shapeManager.getShapes().find(item => item.id === el.id);
             if (shape) shape.strokeWidth = origThickness;
@@ -412,6 +668,7 @@ export class SelectionEngine {
           origMap.set(el.id, stroke.opacity);
           finalMap.set(el.id, opacity);
           stroke.opacity = opacity;
+          this.drawingEngine.invalidateStrokeSnapshot?.(stroke.id);
         }
       } else if (el.type === 'shape' && !toolFilter) {
         const shape = this.shapeManager.getShapes().find(item => item.id === el.id);
@@ -440,7 +697,10 @@ export class SelectionEngine {
           if (finalOpacity === undefined) continue;
           if (el.type === 'stroke') {
             const stroke = this.drawingEngine.getStrokes().find(s => s.id === el.id);
-            if (stroke) stroke.opacity = finalOpacity;
+            if (stroke) {
+              stroke.opacity = finalOpacity;
+              this.drawingEngine.invalidateStrokeSnapshot?.(stroke.id);
+            }
           } else if (el.type === 'shape') {
             const shape = this.shapeManager.getShapes().find(item => item.id === el.id);
             if (shape) shape.opacity = finalOpacity;
@@ -457,7 +717,10 @@ export class SelectionEngine {
           if (origOpacity === undefined) continue;
           if (el.type === 'stroke') {
             const stroke = this.drawingEngine.getStrokes().find(s => s.id === el.id);
-            if (stroke) stroke.opacity = origOpacity;
+            if (stroke) {
+              stroke.opacity = origOpacity;
+              this.drawingEngine.invalidateStrokeSnapshot?.(stroke.id);
+            }
           } else if (el.type === 'shape') {
             const shape = this.shapeManager.getShapes().find(item => item.id === el.id);
             if (shape) shape.opacity = origOpacity;
@@ -565,6 +828,9 @@ export class SelectionEngine {
 
   getCollectiveBoundingBox(): { x: number; y: number; width: number; height: number } | null {
     if (this.selectedElements.length === 0) return null;
+    if (!this.isCollectiveBoxDirty && this.cachedCollectiveBoundingBox) {
+      return this.cachedCollectiveBoundingBox;
+    }
     let minX = Infinity;
     let minY = Infinity;
     let maxX = -Infinity;
@@ -577,8 +843,14 @@ export class SelectionEngine {
       maxX = Math.max(maxX, box.x + box.width);
       maxY = Math.max(maxY, box.y + box.height);
     }
-    if (!Number.isFinite(minX)) return null;
-    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+    if (!Number.isFinite(minX)) {
+      this.cachedCollectiveBoundingBox = null;
+      this.isCollectiveBoxDirty = false;
+      return null;
+    }
+    this.cachedCollectiveBoundingBox = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+    this.isCollectiveBoxDirty = false;
+    return this.cachedCollectiveBoundingBox;
   }
 
   getHandleAt(x: number, y: number): { id: string, handle: Exclude<ResizeHandle, null> } | null {
@@ -589,7 +861,100 @@ export class SelectionEngine {
     const h2 = handleSize / 2;
     const padding = 36 / scale;
 
-    // Check backwards (top-most elements first)
+    if (this.selectedElements.length > 1) {
+      const box = this.getCollectiveBoundingBox();
+      if (box && !(
+        x < box.x - padding ||
+        x > box.x + box.width + padding ||
+        y < box.y - padding ||
+        y > box.y + box.height + padding
+      )) {
+        const midX = box.x + box.width / 2;
+        const midY = box.y + box.height / 2;
+
+        const rotX = midX;
+        const rotY = box.y - 32 / scale;
+        const rotDistSq = (x - rotX) ** 2 + (y - rotY) ** 2;
+        if (rotDistSq <= (8 / scale) ** 2) {
+          return { id: 'collective', handle: 'rotate' };
+        }
+
+        const handles: { handle: Exclude<ResizeHandle, null>; x: number; y: number }[] = [
+          { handle: 'tl', x: box.x, y: box.y },
+          { handle: 'tc', x: midX, y: box.y },
+          { handle: 'tr', x: box.x + box.width, y: box.y },
+          { handle: 'ml', x: box.x, y: midY },
+          { handle: 'mr', x: box.x + box.width, y: midY },
+          { handle: 'bl', x: box.x, y: box.y + box.height },
+          { handle: 'bc', x: midX, y: box.y + box.height },
+          { handle: 'br', x: box.x + box.width, y: box.y + box.height },
+        ];
+
+        for (const h of handles) {
+          if (x >= h.x - h2 && x <= h.x + h2 && y >= h.y - h2 && y <= h.y + h2) {
+            return { id: 'collective', handle: h.handle };
+          }
+        }
+      }
+
+      // In multi-selection, only non-stroke elements (shapes, text, images) allow individual handle access.
+      // Strokes are skipped to avoid hundreds of handles cluttering the interior and hijacking drag.
+      for (let i = this.selectedElements.length - 1; i >= 0; i--) {
+        const el = this.selectedElements[i];
+        if (el.type === 'stroke') continue;
+        const box = this.getBoundingBox(el);
+        if (!box) continue;
+
+        if (
+          x < box.x - padding ||
+          x > box.x + box.width + padding ||
+          y < box.y - padding ||
+          y > box.y + box.height + padding
+        ) {
+          continue;
+        }
+
+        const midX = box.x + box.width / 2;
+        const midY = box.y + box.height / 2;
+
+        const rotation = this.getObjectRotation(el) * Math.PI / 180;
+        const transform = (px: number, py: number) => {
+          const dx = px - midX, dy = py - midY;
+          return {
+            cx: midX + dx * Math.cos(rotation) - dy * Math.sin(rotation),
+            cy: midY + dx * Math.sin(rotation) + dy * Math.cos(rotation),
+          };
+        };
+
+        const rotPoint = transform(midX, box.y - 32 / scale);
+        const rotDistSq = (x - rotPoint.cx) ** 2 + (y - rotPoint.cy) ** 2;
+        if (rotDistSq <= (8 / scale) ** 2) {
+          return { id: el.id, handle: 'rotate' };
+        }
+
+        const handles: { handle: Exclude<ResizeHandle, null>; x: number; y: number }[] = [
+          { handle: 'tl', x: box.x, y: box.y },
+          { handle: 'tc', x: midX, y: box.y },
+          { handle: 'tr', x: box.x + box.width, y: box.y },
+          { handle: 'ml', x: box.x, y: midY },
+          { handle: 'mr', x: box.x + box.width, y: midY },
+          { handle: 'bl', x: box.x, y: box.y + box.height },
+          { handle: 'bc', x: midX, y: box.y + box.height },
+          { handle: 'br', x: box.x + box.width, y: box.y + box.height },
+        ];
+
+        for (const h of handles) {
+          const pt = transform(h.x, h.y);
+          if (x >= pt.cx - h2 && x <= pt.cx + h2 && y >= pt.cy - h2 && y <= pt.cy + h2) {
+            return { id: el.id, handle: h.handle };
+          }
+        }
+      }
+
+      return null;
+    }
+
+    // Check backwards (top-most elements first) for single element
     for (let i = this.selectedElements.length - 1; i >= 0; i--) {
       const el = this.selectedElements[i];
       const box = this.getBoundingBox(el);
@@ -616,28 +981,26 @@ export class SelectionEngine {
         };
       };
 
-      const scale = this.viewport.getState().scale;
-      const handles: { handle: Exclude<ResizeHandle, null>; cx: number; cy: number }[] = [
-        { handle: 'tl', ...transform(box.x - 4, box.y - 4) },
-        { handle: 'tc', ...transform(midX, box.y - 4) },
-        { handle: 'tr', ...transform(box.x + box.width + 4, box.y - 4) },
-        { handle: 'ml', ...transform(box.x - 4, midY) },
-        { handle: 'mr', ...transform(box.x + box.width + 4, midY) },
-        { handle: 'bl', ...transform(box.x - 4, box.y + box.height + 4) },
-        { handle: 'bc', ...transform(midX, box.y + box.height + 4) },
-        { handle: 'br', ...transform(box.x + box.width + 4, box.y + box.height + 4) },
-        { handle: 'rotate', ...transform(midX, box.y - 32 / scale) }
+      const rotPoint = transform(midX, box.y - 32 / scale);
+      const rotDistSq = (x - rotPoint.cx) ** 2 + (y - rotPoint.cy) ** 2;
+      if (rotDistSq <= (8 / scale) ** 2) {
+        return { id: el.id, handle: 'rotate' };
+      }
+
+      const handles: { handle: Exclude<ResizeHandle, null>; x: number; y: number }[] = [
+        { handle: 'tl', x: box.x, y: box.y },
+        { handle: 'tc', x: midX, y: box.y },
+        { handle: 'tr', x: box.x + box.width, y: box.y },
+        { handle: 'ml', x: box.x, y: midY },
+        { handle: 'mr', x: box.x + box.width, y: midY },
+        { handle: 'bl', x: box.x, y: box.y + box.height },
+        { handle: 'bc', x: midX, y: box.y + box.height },
+        { handle: 'br', x: box.x + box.width, y: box.y + box.height },
       ];
 
-      const rotateStalkLower = transform(midX, box.y - 24 / scale);
       for (const h of handles) {
-        if (h.handle === 'rotate') {
-          const hitCanonical = x >= h.cx - h2 && x <= h.cx + h2 && y >= h.cy - h2 && y <= h.cy + h2 + (10 / scale);
-          const hitLower = x >= rotateStalkLower.cx - h2 && x <= rotateStalkLower.cx + h2 && y >= rotateStalkLower.cy - h2 && y <= rotateStalkLower.cy + h2;
-          if (hitCanonical || hitLower) {
-            return { id: el.id, handle: h.handle };
-          }
-        } else if (x >= h.cx - h2 && x <= h.cx + h2 && y >= h.cy - h2 && y <= h.cy + h2) {
+        const pt = transform(h.x, h.y);
+        if (x >= pt.cx - h2 && x <= pt.cx + h2 && y >= pt.cy - h2 && y <= pt.cy + h2) {
           return { id: el.id, handle: h.handle };
         }
       }
@@ -646,9 +1009,8 @@ export class SelectionEngine {
     return null;
   }
 
-  /** Select element at given coordinates (pointer down). */
-  selectAt(x: number, y: number, shiftKey: boolean = false): boolean {
-    const handleHit = this.getHandleAt(x, y);
+  selectAt(x: number, y: number, shiftKey: boolean = false, knownHandleHit?: boolean): boolean {
+    const handleHit = knownHandleHit !== undefined ? knownHandleHit : Boolean(this.getHandleAt(x, y));
     if (handleHit) {
       // User clicked a resize handle of an already selected element
       return true;
@@ -673,8 +1035,9 @@ export class SelectionEngine {
     const hitType = topHit?.type;
 
     if (hitId && hitType) {
+      const previousDamage = this.getSelectionDamage();
       if (!shiftKey) {
-        this.clearSelection();
+        this.clearSelection(false);
       }
 
       if (this.selectedIds.has(hitId)) {
@@ -687,12 +1050,15 @@ export class SelectionEngine {
         this.selectedElements.push({ type: hitType, id: hitId });
       }
       this.notifySelectionChange();
-      this.drawingEngine.redraw();
+      const damage = this.unionDamage(previousDamage, this.getSelectionDamage());
+      this.scheduleSelectionRedraw(damage);
       return true;
     }
 
     if (!shiftKey) {
-      this.clearSelection();
+      const damage = this.getSelectionDamage();
+      this.clearSelection(false);
+      if (damage) this.scheduleSelectionRedraw(damage);
     }
     return false;
   }
@@ -700,7 +1066,6 @@ export class SelectionEngine {
   /** Same stack as rendering: layer first, then text / shape / stroke / image. */
   hitTest(x: number, y: number): SelectedElement | null {
     const shapeHits = new Set(this.shapeManager.findShapesNearPoint(x, y, 5));
-    const strokeHits = new Set(this.drawingEngine.findStrokesNearPoint(x, y, 5));
     const contains = (item: { x: number; y: number; width: number; height?: number; rotation?: number }) => {
       const h = item.height || 100, cx = item.x + item.width / 2, cy = item.y + h / 2;
       const angle = -(item.rotation ?? 0) * Math.PI / 180, dx = x - cx, dy = y - cy;
@@ -731,12 +1096,21 @@ export class SelectionEngine {
         }
       }
 
-      if (strokeHits.size > 0) {
-        const strokes = this.drawingEngine.getStrokes();
-        for (let i = strokes.length - 1; i >= 0; i--) {
-          const item = strokes[i];
-          if (onLayer(item) && strokeHits.has(item.id)) {
-            return { type: 'stroke', id: item.id };
+      const hitStrokeId = typeof (this.drawingEngine as any).findTopmostStrokeNearPoint === 'function'
+        ? (this.drawingEngine as any).findTopmostStrokeNearPoint(x, y, 5, layer.id)
+        : null;
+      if (hitStrokeId) {
+        return { type: 'stroke', id: hitStrokeId };
+      }
+      if (typeof (this.drawingEngine as any).findTopmostStrokeNearPoint !== 'function' && typeof this.drawingEngine.findStrokesNearPoint === 'function') {
+        const strokeHits = new Set(this.drawingEngine.findStrokesNearPoint(x, y, 5));
+        if (strokeHits.size > 0) {
+          const strokes = this.drawingEngine.getStrokes();
+          for (let i = strokes.length - 1; i >= 0; i--) {
+            const item = strokes[i];
+            if (onLayer(item) && strokeHits.has(item.id)) {
+              return { type: 'stroke', id: item.id };
+            }
           }
         }
       }
@@ -875,7 +1249,7 @@ export class SelectionEngine {
   }
 
   /** Replace the current selection with editable objects whose centers are enclosed. */
-  selectWithinLoop(points: StrokePoint[]): number {
+  selectWithinLoop(points: StrokePoint[], repaint = true): number {
     if (points.length < 3) return 0;
     let loopMinX = Infinity, loopMaxX = -Infinity, loopMinY = Infinity, loopMaxY = -Infinity;
     for (const p of points) {
@@ -896,6 +1270,7 @@ export class SelectionEngine {
     };
 
     for (const stroke of this.drawingEngine.getStrokes()) {
+      if (!this.layerManager.isEditable(stroke.layerId)) continue;
       const b = typeof this.drawingEngine.getStrokeBounds === 'function'
         ? this.drawingEngine.getStrokeBounds(stroke)
         : null;
@@ -918,7 +1293,7 @@ export class SelectionEngine {
     this.selectedElements = enclosed;
     this.selectedIds = new Set(enclosed.map(element => element.id));
     this.notifySelectionChange();
-    this.drawingEngine.redraw();
+    if (repaint) this.drawingEngine.redraw();
     return enclosed.length;
   }
 
@@ -1098,35 +1473,28 @@ export class SelectionEngine {
         if (img) {
           this.originalPositions.set(el.id, { x: img.x, y: img.y, width: img.width, height: img.height, rotation: img.rotation });
         }
-      } else {
-        const stroke = this.getStroke(el.id);
-        if (stroke) {
-          // Deep copy points
-          this.originalPositions.set(el.id, stroke.points.map(p => ({ ...p })));
-          this.originalInkClips.set(el.id, stroke.inkClip ? structuredClone(stroke.inkClip) : undefined);
-        }
       }
+      // Stroke geometry stays canonical during the gesture. The renderer draws
+      // retained paths through currentDragTransform, and finishDrag commits the
+      // final points once. This avoids O(points) mutation and bounds
+      // invalidation on every pointer frame.
     }
     this.drawingEngine.beginSelectionDrag?.(this.selectedElements);
   }
 
-  getCurrentDragTransform(): {
-    mode: string;
-    dx: number;
-    dy: number;
-    scaleX?: number;
-    scaleY?: number;
-    transX?: number;
-    transY?: number;
-    cos?: number;
-    sin?: number;
-    center?: { x: number; y: number };
-  } | null {
+  getCurrentDragTransform(): DragTransform | null {
     return this.currentDragTransform;
   }
 
   dragTo(x: number, y: number): void {
     if (!this.isDragging) return;
+    this.invalidateCollectiveBoundingBox();
+    // A pointerup without movement (or a first raw update at the exact start
+    // point) has no preview to paint. Keep the pending pointerdown selection
+    // damage instead of replaying the page just to draw an identity transform.
+    if (!this.currentDragTransform && x === this.dragStartX && y === this.dragStartY) return;
+    // The drag repaint covers the pending pointerdown selection damage.
+    this.cancelPendingSelectionRedraw();
 
     if (this.dragMode === 'move') {
       const dx = x - this.dragStartX;
@@ -1134,11 +1502,11 @@ export class SelectionEngine {
       this.currentDragTransform = { mode: 'move', dx, dy };
 
       for (const el of this.selectedElements) {
+        if (el.type === 'stroke') continue;
         const orig = this.originalPositions.get(el.id);
         if (!orig) continue;
         const object = this.getObject(el);
         if (object) {
-          if (el.type === 'stroke' && !(object as any).type) (object as any).type = 'stroke';
           applyGroupedTranslation(object, orig, dx, dy);
         }
       }
@@ -1156,37 +1524,26 @@ export class SelectionEngine {
         this.currentDragTransform = { mode: 'rotate', dx, dy, cos, sin, center };
 
         for (const el of this.selectedElements) {
+          if (el.type === 'stroke') continue;
           const origPos = this.originalPositions.get(el.id);
           if (!origPos) continue;
 
-          if (el.type === 'stroke') {
-            const stroke = this.getStroke(el.id);
-            if (stroke && Array.isArray(origPos)) {
-              for (let i = 0; i < stroke.points.length; i++) {
-                const ox = origPos[i].x - center.x;
-                const oy = origPos[i].y - center.y;
-                stroke.points[i].x = center.x + ox * cos - oy * sin;
-                stroke.points[i].y = center.y + ox * sin + oy * cos;
-              }
-            }
-          } else {
-            const object = this.getObject(el) as (MixedPlacementObject & { rotation?: number }) | undefined;
-            if (object && typeof origPos === 'object' && !Array.isArray(origPos)) {
-              if (this.selectedElements.length === 1) {
-                object.rotation = ((origPos.rotation ?? 0) + delta + 360) % 360;
-              } else {
-                const objW = origPos.width ?? 100;
-                const objH = origPos.height ?? 40;
-                const origObjCx = origPos.x + objW / 2;
-                const origObjCy = origPos.y + objH / 2;
-                const ox = origObjCx - center.x;
-                const oy = origObjCy - center.y;
-                const newObjCx = center.x + ox * cos - oy * sin;
-                const newObjCy = center.y + ox * sin + oy * cos;
-                object.x = newObjCx - objW / 2;
-                object.y = newObjCy - objH / 2;
-                object.rotation = ((origPos.rotation ?? 0) + delta + 360) % 360;
-              }
+          const object = this.getObject(el) as (MixedPlacementObject & { rotation?: number }) | undefined;
+          if (object && typeof origPos === 'object' && !Array.isArray(origPos)) {
+            if (this.selectedElements.length === 1) {
+              object.rotation = ((origPos.rotation ?? 0) + delta + 360) % 360;
+            } else {
+              const objW = origPos.width ?? 100;
+              const objH = origPos.height ?? 40;
+              const origObjCx = origPos.x + objW / 2;
+              const origObjCy = origPos.y + objH / 2;
+              const ox = origObjCx - center.x;
+              const oy = origObjCy - center.y;
+              const newObjCx = center.x + ox * cos - oy * sin;
+              const newObjCy = center.y + ox * sin + oy * cos;
+              object.x = newObjCx - objW / 2;
+              object.y = newObjCy - objH / 2;
+              object.rotation = ((origPos.rotation ?? 0) + delta + 360) % 360;
             }
           }
         }
@@ -1245,33 +1602,22 @@ export class SelectionEngine {
       this.currentDragTransform = { mode: 'scale', dx, dy, scaleX, scaleY, transX, transY };
 
       for (const el of this.selectedElements) {
+        if (el.type === 'stroke') continue;
         const origPos = this.originalPositions.get(el.id);
         if (!origPos) continue;
 
-        if (el.type === 'stroke') {
-          const stroke = this.getStroke(el.id);
-          if (stroke && Array.isArray(origPos)) {
-            for (let i = 0; i < stroke.points.length; i++) {
-              stroke.points[i].x = transX + (origPos[i].x - transX) * scaleX;
-              stroke.points[i].y = transY + (origPos[i].y - transY) * scaleY;
-            }
-            const originalClip = this.originalInkClips.get(el.id);
-            stroke.inkClip = originalClip?.map(polygon => polygon.map(ring => ring.map(([clipX, clipY]) => [clipX * scaleX, clipY * scaleY])));
-          }
-        } else {
-          const object = this.getObject(el) as (MixedPlacementObject & { rotation?: number }) | undefined;
-          if (object && typeof origPos === 'object' && !Array.isArray(origPos)) {
-            const relX = origPos.x - transX;
-            const relY = origPos.y - transY;
-            const newX = transX + relX * scaleX;
-            const newY = transY + relY * scaleY;
-            const newW = Math.max(10, (origPos.width ?? 100) * Math.abs(scaleX));
-            const newH = origPos.height ? Math.max(10, origPos.height * Math.abs(scaleY)) : undefined;
-            object.x = scaleX >= 0 ? newX : newX - newW;
-            object.y = scaleY >= 0 ? newY : newY - (newH ?? 0);
-            object.width = newW;
-            if (newH !== undefined) object.height = newH;
-          }
+        const object = this.getObject(el) as (MixedPlacementObject & { rotation?: number }) | undefined;
+        if (object && typeof origPos === 'object' && !Array.isArray(origPos)) {
+          const relX = origPos.x - transX;
+          const relY = origPos.y - transY;
+          const newX = transX + relX * scaleX;
+          const newY = transY + relY * scaleY;
+          const newW = Math.max(10, (origPos.width ?? 100) * Math.abs(scaleX));
+          const newH = origPos.height ? Math.max(10, origPos.height * Math.abs(scaleY)) : undefined;
+          object.x = scaleX >= 0 ? newX : newX - newW;
+          object.y = scaleY >= 0 ? newY : newY - (newH ?? 0);
+          object.width = newW;
+          if (newH !== undefined) object.height = newH;
         }
       }
     }
@@ -1281,21 +1627,65 @@ export class SelectionEngine {
 
   finishDrag(x: number, y: number): boolean {
     if (!this.isDragging) return false;
+    const pendingSelectDamage = this.pendingSelectRedraw;
+    this.cancelPendingSelectionRedraw();
+    const transform = this.currentDragTransform;
+    const elements = [...this.selectedElements];
+    const dx = x - this.dragStartX;
+    const dy = y - this.dragStartY;
+    const isClick = Math.abs(dx) < 1 && Math.abs(dy) < 1;
+
+    // Capture the union of the drag-start boxes and the preview boxes before
+    // clearing drag state. A full 1,200-stroke replay costs tens of
+    // milliseconds; repainting only the damaged page region keeps the pointerup
+    // task short while producing identical pixels. The margin covers selection
+    // handles and the rotation stem, which live outside the element box.
+    let damage: EraseBounds | null = null;
+    let damageComplete = !isClick;
+    if (!isClick) {
+      const margin = 48 / Math.max(0.05, this.viewport.getState().scale);
+      const include = (box: BoundingBox | null | undefined) => {
+        if (!box) { damageComplete = false; return; }
+        const next = {
+          left: box.x - margin,
+          top: box.y - margin,
+          right: box.x + box.width + margin,
+          bottom: box.y + box.height + margin,
+        };
+        damage = damage ? {
+          left: Math.min(damage.left, next.left),
+          top: Math.min(damage.top, next.top),
+          right: Math.max(damage.right, next.right),
+          bottom: Math.max(damage.bottom, next.bottom),
+        } : next;
+      };
+      for (const el of elements) include(this.originalElementBoxes.get(el.id));
+      for (const el of elements) include(this.getBoundingBox(el));
+    }
+
     this.isDragging = false;
     this.currentDragTransform = null;
     this.originalElementBoxes.clear();
+    this.invalidateCollectiveBoundingBox();
     this.drawingEngine.endSelectionDrag?.();
 
-    const dx = x - this.dragStartX;
-    const dy = y - this.dragStartY;
-    if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return false;
+    if (isClick) {
+      // Clear the preview transform even when the gesture was a click. The only
+      // pixels that can differ from the pre-gesture frame are the old/new
+      // selection bounds (plus a sub-pixel preview), so avoid a full replay.
+      const damage = this.unionDamage(pendingSelectDamage, this.getSelectionDamage());
+      if (damage) this.drawingEngine.redraw(damage);
+      return false;
+    }
+    const dirty = damageComplete ? damage ?? undefined : undefined;
 
-    const elements = [...this.selectedElements];
     const origMap = new Map(this.originalPositions);
     const originalInkClips = new Map(this.originalInkClips);
     const finalInkClips = new Map<string, Stroke['inkClip']>();
 
-    // Create deep copy of new state to save in history
+    // Create deep copy of new state to save in history. Stroke points were not
+    // mutated during the gesture, so their canonical values are still the
+    // drag-start originals and can be captured exactly once here.
     const finalMap = new Map();
     for (const el of elements) {
       if (el.type === 'shape') {
@@ -1316,11 +1706,35 @@ export class SelectionEngine {
       } else {
         const stroke = this.getStroke(el.id);
         if (stroke) {
-          finalMap.set(el.id, stroke.points.map(p => ({ ...p })));
-          finalInkClips.set(el.id, stroke.inkClip ? structuredClone(stroke.inkClip) : undefined);
+          const originalPoints = stroke.points.map(point => ({ ...point }));
+          origMap.set(el.id, originalPoints);
+          originalInkClips.set(el.id, stroke.inkClip ? structuredClone(stroke.inkClip) : undefined);
+          finalMap.set(el.id, this.transformStrokePoints(originalPoints, transform));
+          finalInkClips.set(el.id, this.transformStrokeClip(stroke.inkClip, transform));
         }
       }
     }
+
+    const applyStroke = (el: SelectedElement, state: StrokePoint[], clip: Stroke['inkClip']) => {
+      const stroke = this.getStroke(el.id);
+      if (!stroke) return;
+      // Replace whole arrays instead of editing samples in place. Committed ink
+      // can then share its numeric arrays with the persistence/history snapshot,
+      // making the first autosave O(strokes) instead of O(strokes * points).
+      stroke.points = state;
+      stroke.inkClip = clip;
+      this.drawingEngine.invalidateStrokeGeometry?.(el.id);
+      this.drawingEngine.primeStrokeSnapshot?.(el.id);
+    };
+
+    // Apply the final canonical geometry before the already-executed history
+    // entry publishes its scene mutation/snapshot.
+    for (const el of elements) {
+      if (el.type !== 'stroke') continue;
+      const finalState = finalMap.get(el.id);
+      if (finalState) applyStroke(el, finalState, finalInkClips.get(el.id));
+    }
+    this.drawingEngine.redraw(dirty);
 
     this.historyManager.pushExecuted({
       description: this.dragMode === 'move' ? 'Move elements' : 'Resize element',
@@ -1356,17 +1770,10 @@ export class SelectionEngine {
               image.rotation = finalState.rotation;
             }
           } else {
-            const stroke = this.getStroke(el.id);
-            if (stroke) {
-              for (let i = 0; i < stroke.points.length; i++) {
-                stroke.points[i].x = finalState[i].x;
-                stroke.points[i].y = finalState[i].y;
-              }
-              stroke.inkClip = finalInkClips.get(el.id) ? structuredClone(finalInkClips.get(el.id)) : undefined;
-            }
+            applyStroke(el, finalState, finalInkClips.get(el.id));
           }
         }
-        this.drawingEngine.redraw();
+        this.drawingEngine.redraw(dirty);
       },
       undo: () => {
         for (const el of elements) {
@@ -1400,22 +1807,47 @@ export class SelectionEngine {
               image.rotation = orig.rotation;
             }
           } else {
-            const stroke = this.getStroke(el.id);
-            if (stroke) {
-              for (let i = 0; i < stroke.points.length; i++) {
-                stroke.points[i].x = orig[i].x;
-                stroke.points[i].y = orig[i].y;
-              }
-              const originalClip = originalInkClips.get(el.id);
-              stroke.inkClip = originalClip ? structuredClone(originalClip) : undefined;
-            }
+            applyStroke(el, orig, originalInkClips.get(el.id));
           }
         }
-        this.drawingEngine.redraw();
+        this.drawingEngine.redraw(dirty);
       }
     });
 
     return true;
+  }
+
+  private transformStrokePoints(points: StrokePoint[], transform: DragTransform | null): StrokePoint[] {
+    if (!transform) return points.map(point => ({ ...point }));
+    if (transform.mode === 'move') {
+      return points.map(point => ({ ...point, x: point.x + transform.dx, y: point.y + transform.dy }));
+    }
+    if (transform.mode === 'rotate' && transform.center && transform.cos !== undefined && transform.sin !== undefined) {
+      const { center, cos, sin } = transform;
+      return points.map(point => {
+        const ox = point.x - center.x;
+        const oy = point.y - center.y;
+        return { ...point, x: center.x + ox * cos - oy * sin, y: center.y + ox * sin + oy * cos };
+      });
+    }
+    if (transform.mode === 'scale' && transform.scaleX !== undefined && transform.scaleY !== undefined
+      && transform.transX !== undefined && transform.transY !== undefined) {
+      const { scaleX, scaleY, transX, transY } = transform;
+      return points.map(point => ({
+        ...point,
+        x: transX + (point.x - transX) * scaleX,
+        y: transY + (point.y - transY) * scaleY,
+      }));
+    }
+    return points.map(point => ({ ...point }));
+  }
+
+  private transformStrokeClip(clip: Stroke['inkClip'], transform: DragTransform | null): Stroke['inkClip'] {
+    if (!clip) return undefined;
+    if (transform?.mode === 'scale' && transform.scaleX !== undefined && transform.scaleY !== undefined) {
+      return clip.map(polygon => polygon.map(ring => ring.map(([clipX, clipY]) => [clipX * transform.scaleX!, clipY * transform.scaleY!])));
+    }
+    return structuredClone(clip);
   }
 
   // ---- Rendering Selection Bounding Boxes ----
@@ -1450,18 +1882,11 @@ export class SelectionEngine {
     ctx.lineWidth = 1.5 / scale;
     ctx.setLineDash([5 / scale, 5 / scale]);
 
-    for (const el of this.selectedElements) {
-      const box = this.getBoundingBox(el);
+    if (this.selectedElements.length > 1) {
+      const box = this.getCollectiveBoundingBox();
       if (box) {
-        const rotation = this.getObjectRotation(el) * Math.PI / 180;
-        const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
-        ctx.save();
-        ctx.translate(center.x, center.y);
-        ctx.rotate(rotation);
-        ctx.translate(-center.x, -center.y);
         ctx.strokeRect(box.x - 4, box.y - 4, box.width + 8, box.height + 8);
 
-        // Draw 8 resize handles
         ctx.fillStyle = '#ffffff';
         ctx.setLineDash([]);
         const handleSize = 8 / scale;
@@ -1485,7 +1910,6 @@ export class SelectionEngine {
           ctx.fillRect(c.x - h2, c.y - h2, handleSize, handleSize);
         }
 
-        // Draw rotation handle (circle above top-center)
         ctx.beginPath();
         ctx.moveTo(midX, box.y - 4);
         ctx.lineTo(midX, box.y - 32 / scale);
@@ -1495,10 +1919,60 @@ export class SelectionEngine {
         ctx.arc(midX, box.y - 32 / scale, 5 / scale, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
+      }
+    } else {
+      for (const el of this.selectedElements) {
+        const box = this.getBoundingBox(el);
+        if (box) {
+          const rotation = this.getObjectRotation(el) * Math.PI / 180;
+          const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+          ctx.save();
+          ctx.translate(center.x, center.y);
+          ctx.rotate(rotation);
+          ctx.translate(-center.x, -center.y);
+          ctx.strokeRect(box.x - 4, box.y - 4, box.width + 8, box.height + 8);
 
-        ctx.restore();
+          // Draw 8 resize handles
+          ctx.fillStyle = '#ffffff';
+          ctx.setLineDash([]);
+          const handleSize = 8 / scale;
+          const h2 = handleSize / 2;
+          const midX = box.x + box.width / 2;
+          const midY = box.y + box.height / 2;
+
+          const handles = [
+            { x: box.x - 4, y: box.y - 4 },
+            { x: midX, y: box.y - 4 },
+            { x: box.x + box.width + 4, y: box.y - 4 },
+            { x: box.x - 4, y: midY },
+            { x: box.x + box.width + 4, y: midY },
+            { x: box.x - 4, y: box.y + box.height + 4 },
+            { x: midX, y: box.y + box.height + 4 },
+            { x: box.x + box.width + 4, y: box.y + box.height + 4 }
+          ];
+
+          for (const c of handles) {
+            ctx.strokeRect(c.x - h2, c.y - h2, handleSize, handleSize);
+            ctx.fillRect(c.x - h2, c.y - h2, handleSize, handleSize);
+          }
+
+          // Draw rotation handle (circle above top-center)
+          ctx.beginPath();
+          ctx.moveTo(midX, box.y - 4);
+          ctx.lineTo(midX, box.y - 32 / scale);
+          ctx.stroke();
+
+          ctx.beginPath();
+          ctx.arc(midX, box.y - 32 / scale, 5 / scale, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+
+          ctx.restore();
+        }
       }
     }
+
+
 
     ctx.restore();
   }
@@ -1606,7 +2080,7 @@ export class SelectionEngine {
 
   private getBoundingBox(el: SelectedElement): BoundingBox | null {
     if (el.type === 'shape') {
-      const shape = this.shapeManager.getShapes().find(s => s.id === el.id);
+      const shape = (typeof this.shapeManager.getShape === 'function' ? this.shapeManager.getShape(el.id) : undefined) ?? this.shapeManager.getShapes().find(s => s.id === el.id);
       if (!shape) return null;
       return { x: shape.x, y: shape.y, width: shape.width, height: shape.height };
     } else if (el.type === 'text') {
@@ -1614,7 +2088,7 @@ export class SelectionEngine {
       if (!text) return null;
       return { x: text.x, y: text.y, width: text.width, height: text.height || 100 };
     } else if (el.type === 'image') {
-      const img = this.imageManager.getImages().find(i => i.id === el.id);
+      const img = (typeof this.imageManager.getImage === 'function' ? this.imageManager.getImage(el.id) : undefined) ?? this.imageManager.getImages().find(i => i.id === el.id);
       if (!img) return null;
       return { x: img.x, y: img.y, width: img.width, height: img.height };
     } else {
@@ -1665,6 +2139,11 @@ export class SelectionEngine {
 
       const stroke = this.getStroke(el.id);
       if (!stroke || stroke.points.length === 0) return null;
+
+      if (typeof (this.drawingEngine as any).getStrokePointBounds === 'function') {
+        const ptBounds = (this.drawingEngine as any).getStrokePointBounds(stroke);
+        if (ptBounds) return ptBounds;
+      }
 
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       for (const p of stroke.points) {
