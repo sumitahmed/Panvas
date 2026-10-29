@@ -281,9 +281,16 @@ export class SelectionEngine {
    * rotation stem. Selection changes can then repaint only the damaged region
    * instead of replaying the whole page just to move a handle.
    */
+  private getViewportScale(): number {
+    if (typeof this.viewport?.getState === 'function') {
+      return this.viewport.getState()?.scale ?? 1;
+    }
+    return (this.viewport as any)?.scale ?? 1;
+  }
+
   private getSelectionDamage(): EraseBounds | null {
     if (this.selectedElements.length === 0) return null;
-    const scale = Math.max(0.05, this.viewport.getState().scale);
+    const scale = Math.max(0.05, this.getViewportScale());
     const padding = 40 / scale;
 
     if (this.selectedElements.length > 1) {
@@ -856,12 +863,13 @@ export class SelectionEngine {
   getHandleAt(x: number, y: number): { id: string, handle: Exclude<ResizeHandle, null> } | null {
     if (this.usesStickyDomControls()) return null;
     if (this.selectedElements.length === 0) return null;
-    const scale = this.viewport.getState().scale;
+    const scale = this.getViewportScale();
     const handleSize = 12 / scale;
     const h2 = handleSize / 2;
     const padding = 36 / scale;
 
-    if (this.selectedElements.length > 1) {
+    const allStrokes = this.selectedElements.every(el => el.type === 'stroke');
+    if (this.selectedElements.length > 1 && allStrokes) {
       const box = this.getCollectiveBoundingBox();
       if (box && !(
         x < box.x - padding ||
@@ -1643,7 +1651,7 @@ export class SelectionEngine {
     let damage: EraseBounds | null = null;
     let damageComplete = !isClick;
     if (!isClick) {
-      const margin = 48 / Math.max(0.05, this.viewport.getState().scale);
+      const margin = 48 / Math.max(0.05, this.getViewportScale());
       const include = (box: BoundingBox | null | undefined) => {
         if (!box) { damageComplete = false; return; }
         const next = {
@@ -1874,15 +1882,15 @@ export class SelectionEngine {
     if (this.usesStickyDomControls()) return;
 
     ctx.save();
-    this.viewport.applyTransform(ctx);
+    this.viewport?.applyTransform?.(ctx);
 
-    const scale = this.viewport.getState().scale;
+    const scale = this.getViewportScale();
 
     ctx.strokeStyle = '#3b82f6'; // Panvas blue
     ctx.lineWidth = 1.5 / scale;
     ctx.setLineDash([5 / scale, 5 / scale]);
 
-    if (this.selectedElements.length > 1) {
+    if (this.selectedElements.length > 1 && this.selectedElements.every(el => el.type === 'stroke')) {
       const box = this.getCollectiveBoundingBox();
       if (box) {
         ctx.strokeRect(box.x - 4, box.y - 4, box.width + 8, box.height + 8);

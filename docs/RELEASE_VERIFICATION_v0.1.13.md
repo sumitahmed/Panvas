@@ -27,9 +27,10 @@ The owner verified the drawing performance, selection responsiveness, and cloud-
     - `tests/cloud-sync-production-ui.test.mjs`: 5/5 passed.
 
 - **Public Assets & Cryptographic Checksums:**
-  - `Panvas-0.1.13-Setup.exe` (284,275,816 bytes, SHA-256: `2a64d3d54a53e5291dd39508e1f5625e3e02772a92c61f2bdbc5747cda87693d`)
-  - `Panvas-0.1.13-Portable.exe` (283,960,327 bytes, SHA-256: `d0b837e68d1aba6caecbeef269dfa105c7c5bd7cc5b20667c9cff2b2bce44ccd`)
-  - `Panvas-0.1.13-Web.zip` (38,823,166 bytes, SHA-256: `2a4567025f13e6024f332ed80c6a96a0a240d5c8e7f876ab4f3ad9097f5af3f1`)
+  - `Panvas-0.1.13-Setup.exe` (284,275,306 bytes, SHA-256: `ac37faae0c32d58da4ab4d54746aedcb28f7027638411f010285628261cfaa1a`)
+  - `Panvas-0.1.13-Portable.exe` (283,960,327 bytes, SHA-256: `7b15b6266fbc120eb7e727d49869263047531409b61d6beee293a28c56163b94`)
+  - `Panvas-0.1.13-Web.zip` (38,823,166 bytes, SHA-256: `f5a21718adb87c542c4d1da481fda866d0faf730ea9c0d89ec584acdc341964c`)
   - Manifest `SHA256SUMS.txt` published on GitHub Releases.
 
 - **Notes & Limitations:** Windows installer and portable executables are unsigned open-source binaries and may trigger Windows SmartScreen. Existing storage and application data are preserved across upgrades.
+

@@ -70,7 +70,7 @@ Panvas bridges structured notebooks and infinite canvases into a single, distrac
 - **SHA-256 Checksum Verification**: Verify the downloaded installer against the official checksum published in `SHA256SUMS.txt`:
   ```powershell
   Get-FileHash Panvas-0.1.13-Setup.exe -Algorithm SHA256
-  # SHA-256: 2a64d3d54a53e5291dd39508e1f5625e3e02772a92c61f2bdbc5747cda87693d
+  # SHA-256: ac37faae0c32d58da4ab4d54746aedcb28f7027638411f010285628261cfaa1a
   ```
   *The v0.1.13 installer and portable EXE are unsigned and may trigger SmartScreen. Check the [published SHA-256 manifest](https://github.com/sumitahmed/Panvas/releases/download/v0.1.13/SHA256SUMS.txt) before running either file.*
 
