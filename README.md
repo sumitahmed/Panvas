@@ -7,7 +7,7 @@
 > **Local-first visual workspace for notes, handwriting, PDFs, and spatial thinking.**
 
 <p align="center">
-  <a href="https://github.com/sumitahmed/Panvas/releases/download/v0.1.13/Panvas-0.1.13-Setup.exe">
+  <a href="https://github.com/sumitahmed/Panvas/releases/download/v0.1.14/Panvas-0.1.14-Setup.exe">
     <img src="https://img.shields.io/badge/Download-Windows_x64-243c4a?style=flat&logo=windows" alt="Download for Windows" />
   </a>
   <a href="https://panvas.vercel.app/app">
@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v0.1.13-blue.svg" alt="Version 0.1.13" />
+  <img src="https://img.shields.io/badge/version-v0.1.14-blue.svg" alt="Version 0.1.14" />
   <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" />
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Web-lightgrey.svg" alt="Platforms" />
   <img src="https://img.shields.io/badge/storage-Local--First-orange.svg" alt="Local First" />
@@ -66,13 +66,13 @@ Panvas bridges structured notebooks and infinite canvases into a single, distrac
 ## Download
 
 ### Windows (Desktop)
-- **Panvas v0.1.13 (64-bit)**: Download the [Windows installer](https://github.com/sumitahmed/Panvas/releases/download/v0.1.13/Panvas-0.1.13-Setup.exe) or [portable EXE](https://github.com/sumitahmed/Panvas/releases/download/v0.1.13/Panvas-0.1.13-Portable.exe) from the [v0.1.13 release](https://github.com/sumitahmed/Panvas/releases/tag/v0.1.13).
+- **Panvas v0.1.14 (64-bit)**: Download the [Windows installer](https://github.com/sumitahmed/Panvas/releases/download/v0.1.14/Panvas-0.1.14-Setup.exe) or [portable EXE](https://github.com/sumitahmed/Panvas/releases/download/v0.1.14/Panvas-0.1.14-Portable.exe) from the [v0.1.14 release](https://github.com/sumitahmed/Panvas/releases/tag/v0.1.14).
 - **SHA-256 Checksum Verification**: Verify the downloaded installer against the official checksum published in `SHA256SUMS.txt`:
   ```powershell
-  Get-FileHash Panvas-0.1.13-Setup.exe -Algorithm SHA256
-  # SHA-256: ac37faae0c32d58da4ab4d54746aedcb28f7027638411f010285628261cfaa1a
+  Get-FileHash Panvas-0.1.14-Setup.exe -Algorithm SHA256
+  # SHA-256: b3d433215fabe8055e9b69f7b422d262213da3017823a8e31edd7e7d66ea4957
   ```
-  *The v0.1.13 installer and portable EXE are unsigned and may trigger SmartScreen. Check the [published SHA-256 manifest](https://github.com/sumitahmed/Panvas/releases/download/v0.1.13/SHA256SUMS.txt) before running either file.*
+  *The v0.1.14 installer and portable EXE are unsigned and may trigger SmartScreen. Check the [published SHA-256 manifest](https://github.com/sumitahmed/Panvas/releases/download/v0.1.14/SHA256SUMS.txt) before running either file.*
 
 ### Web
 - **Browser App**: Launch [panvas.vercel.app/app](https://panvas.vercel.app/app) to use Panvas directly in Chromium, Firefox, or Safari (stored in origin-scoped IndexedDB).

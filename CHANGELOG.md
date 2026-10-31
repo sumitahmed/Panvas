@@ -2,6 +2,19 @@
 
 All notable Panvas changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.1.14] - 2026-10-31
+
+- Fixed image move ghosting: moving a pasted image now previews imperatively through the DOM overlay and commits on drop, leaving no stale copy at the original position.
+- Fixed infinite pages to behave as one continuous, content-driven document: the page grows during the live stroke toward the content bottom plus a quarter-A4 trailing margin, with a viewport-following raster overhang window instead of repeated A4 sheets.
+- Fixed page navigation while scrolling: the workspace tree now follows the visible page through fast and upward scrolls (passive activation commits against the store instead of a stale in-component reference).
+- Fixed freeform lasso selection: the drawn polygon is the visible, movable boundary, dragging inside the region moves the selection, and a rectangular lasso is available as a toolbar option.
+- Added text alignment controls (left/center/right/justify) to the text formatting strip.
+- Raised maximum zoom from 400% to 800% with canvas backing-scale budgets intact, and added aspect-ratio-preserving corner resize for shapes and images.
+- Smoothed the stylus cursor overlay by caching the container rect at most once per frame (removes per-event layout thrash at 120–240 Hz).
+- Pasted images render above text and pasted notes no longer apply a backdrop blur.
+- Fixed silent page drag-reorder no-ops on quick drags by computing drop position from event geometry.
+- Made straight-line, scribble-erase, circle-select, and rough-shape gestures zoom-consistent via screen-scale normalization, and added bounded incremental checkpoints for out-of-order stylus sample recovery.
+
 ## [0.1.13] - 2026-10-29
 
 - Fluid live handwriting: enabled immediate synchronous inking for solid pen strokes, eliminated synchronous style queries on pen down, and extended buffer retention across pauses to eliminate GC churn.
