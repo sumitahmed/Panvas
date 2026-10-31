@@ -228,10 +228,10 @@ test('index.html includes Google Identity Services script tag', async () => {
 test('presentCloudError returns actionable message for popup_failed_to_open', () => {
   const err = new CloudOperationError('connection', { stage: 'gis_popup', reason: 'popup_failed_to_open' });
   const presentation = presentCloudError(err);
-  assert.equal(presentation.message, 'The sign-in popup was blocked. Please allow popups for Panvas and try again.');
+  assert.equal(presentation.message, 'The sign-in popup was blocked by an ad blocker or browser extension. Please pause AdBlock or allow popups for Panvas and try again.');
 
   const candidatePresentation = presentCloudError({ reason: 'popup_failed_to_open' });
-  assert.equal(candidatePresentation.message, 'The sign-in popup was blocked. Please allow popups for Panvas and try again.');
+  assert.equal(candidatePresentation.message, 'The sign-in popup was blocked by an ad blocker or browser extension. Please pause AdBlock or allow popups for Panvas and try again.');
 });
 
 test('presentCloudError returns clear message for popup_closed_by_user', () => {

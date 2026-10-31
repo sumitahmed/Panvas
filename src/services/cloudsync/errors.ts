@@ -104,7 +104,7 @@ export function presentCloudError(error: unknown, fallbackStage = 'sync'): Cloud
   if (error instanceof CloudOperationError) {
     let message = PUBLIC_MESSAGES[error.code];
     if (error.diagnostic.reason === 'popup_failed_to_open') {
-      message = 'The sign-in popup was blocked. Please allow popups for Panvas and try again.';
+      message = 'The sign-in popup was blocked by an ad blocker or browser extension. Please pause AdBlock or allow popups for Panvas and try again.';
     } else if (error.diagnostic.reason === 'popup_closed_by_user') {
       message = 'Sign-in was cancelled because the popup was closed. Please try again.';
     }
@@ -140,7 +140,7 @@ export function presentCloudError(error: unknown, fallbackStage = 'sync'): Cloud
   };
   let message = PUBLIC_MESSAGES[code];
   if (diagnostic.reason === 'popup_failed_to_open') {
-    message = 'The sign-in popup was blocked. Please allow popups for Panvas and try again.';
+    message = 'The sign-in popup was blocked by an ad blocker or browser extension. Please pause AdBlock or allow popups for Panvas and try again.';
   } else if (diagnostic.reason === 'popup_closed_by_user') {
     message = 'Sign-in was cancelled because the popup was closed. Please try again.';
   }
