@@ -409,12 +409,17 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
     if (provider !== 'googledrive') return false;
     invalidateSync();
     const assertCurrent = syncAuthority.capture();
+
+    // Launch provider connection immediately in the synchronous user gesture
+    // so Google Identity Services retains user activation and is not blocked by popup blockers.
+    const connectionPromise = googleDriveProvider.connect();
+
     set(state => ({ statusByProvider: { ...state.statusByProvider, googledrive: 'connecting' }, lastError: null, lastDiagnostic: null }));
     try {
       await v2SyncRunner.whenIdle();
       assertCurrent();
       googleDriveProvider.clearCaches();
-      const connection = await googleDriveProvider.connect();
+      const connection = await connectionPromise;
       const localIds = await localWorkspaceIds();
       assertCurrent();
       if (CLOUD_SYNC_V2_ENABLED) {

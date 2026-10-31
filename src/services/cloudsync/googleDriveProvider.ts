@@ -147,16 +147,19 @@ export class GoogleDriveSyncProvider implements CloudSyncProvider {
     return result.value;
   }
 
-  async connect(): Promise<ProviderConnectionInfo> {
+  connect(): Promise<ProviderConnectionInfo> {
     if (typeof window !== 'undefined' && window.panvas?.cloudsync?.connect) {
-      const result = await window.panvas.cloudsync.connect('googledrive');
-      if (!result.success || !result.connection) throw new CloudOperationError(result.errorCode ?? 'connection', result.diagnostic ?? { stage: 'authorization', reason: 'connection_failed' });
-      this.adoptConnection(result.connection);
-      return result.connection;
+      return (async () => {
+        const result = await window.panvas.cloudsync.connect('googledrive');
+        if (!result.success || !result.connection) throw new CloudOperationError(result.errorCode ?? 'connection', result.diagnostic ?? { stage: 'authorization', reason: 'connection_failed' });
+        this.adoptConnection(result.connection);
+        return result.connection;
+      })();
     }
-    const connection = await connectBrowserGoogle();
-    this.adoptConnection(connection);
-    return connection;
+    return connectBrowserGoogle().then(connection => {
+      this.adoptConnection(connection);
+      return connection;
+    });
   }
 
   async disconnect(): Promise<void> {

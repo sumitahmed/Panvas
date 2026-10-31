@@ -101,7 +101,15 @@ export interface CloudErrorPresentation {
 export function publicCloudMessage(code: CloudErrorCode): string { return PUBLIC_MESSAGES[code]; }
 
 export function presentCloudError(error: unknown, fallbackStage = 'sync'): CloudErrorPresentation {
-  if (error instanceof CloudOperationError) return { code: error.code, message: PUBLIC_MESSAGES[error.code], status: statusFor(error.code), diagnostic: error.diagnostic };
+  if (error instanceof CloudOperationError) {
+    let message = PUBLIC_MESSAGES[error.code];
+    if (error.diagnostic.reason === 'popup_failed_to_open') {
+      message = 'The sign-in popup was blocked. Please allow popups for Panvas and try again.';
+    } else if (error.diagnostic.reason === 'popup_closed_by_user') {
+      message = 'Sign-in was cancelled because the popup was closed. Please try again.';
+    }
+    return { code: error.code, message, status: statusFor(error.code), diagnostic: error.diagnostic };
+  }
   const candidate = error as { name?: string; status?: number; reason?: string; stage?: string; message?: string; workspaceId?: string; entityKind?: SyncEntityKind; entityType?: SyncEntityKind; entityId?: string; operation?: string; schemaVersion?: string | number; parentId?: string | null; errorClass?: string; throwingFunction?: string; errorMessage?: string };
   const name = safeAtom(candidate?.name, 'Error');
   const status = typeof candidate?.status === 'number' ? candidate.status : undefined;
@@ -130,7 +138,13 @@ export function presentCloudError(error: unknown, fallbackStage = 'sync'): Cloud
     ...(candidate?.throwingFunction ? { throwingFunction: safeAtom(candidate.throwingFunction, 'unknown') } : {}),
     ...(candidate?.errorMessage ? { errorMessage: safeAtom(candidate.errorMessage, 'unknown') } : {}),
   };
-  return { code, message: PUBLIC_MESSAGES[code], status: statusFor(code), diagnostic };
+  let message = PUBLIC_MESSAGES[code];
+  if (diagnostic.reason === 'popup_failed_to_open') {
+    message = 'The sign-in popup was blocked. Please allow popups for Panvas and try again.';
+  } else if (diagnostic.reason === 'popup_closed_by_user') {
+    message = 'Sign-in was cancelled because the popup was closed. Please try again.';
+  }
+  return { code, message, status: statusFor(code), diagnostic };
 }
 
 export interface CloudApplyFailureContext {

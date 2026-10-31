@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { fetchAccount, requestBrowserGoogleAccessToken } from '../src/services/cloudsync/browserGoogleAuth.ts';
-import { CloudOperationError, sanitizeCloudDiagnostic } from '../src/services/cloudsync/errors.ts';
+import { CloudOperationError, sanitizeCloudDiagnostic, presentCloudError } from '../src/services/cloudsync/errors.ts';
+import { connectBrowserGoogle } from '../src/services/cloudsync/browserGoogleAuth.ts';
 
 test('requestBrowserGoogleAccessToken captures and sanitizes Google Identity Services error details', async () => {
   const fakeClientId = '486992017517-uog6ucb24pkidgp5tcg1icuif4a3sprc.apps.googleusercontent.com';
@@ -223,5 +224,21 @@ test('index.html includes Google Identity Services script tag', async () => {
     /<script\s+src="https:\/\/accounts\.google\.com\/gsi\/client"\s+async\s+defer><\/script>/,
   );
 });
+
+test('presentCloudError returns actionable message for popup_failed_to_open', () => {
+  const err = new CloudOperationError('connection', { stage: 'gis_popup', reason: 'popup_failed_to_open' });
+  const presentation = presentCloudError(err);
+  assert.equal(presentation.message, 'The sign-in popup was blocked. Please allow popups for Panvas and try again.');
+
+  const candidatePresentation = presentCloudError({ reason: 'popup_failed_to_open' });
+  assert.equal(candidatePresentation.message, 'The sign-in popup was blocked. Please allow popups for Panvas and try again.');
+});
+
+test('presentCloudError returns clear message for popup_closed_by_user', () => {
+  const err = new CloudOperationError('connection', { stage: 'gis_token', reason: 'popup_closed_by_user' });
+  const presentation = presentCloudError(err);
+  assert.equal(presentation.message, 'Sign-in was cancelled because the popup was closed. Please try again.');
+});
+
 
 

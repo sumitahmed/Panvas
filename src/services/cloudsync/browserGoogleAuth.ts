@@ -152,41 +152,51 @@ export function requestBrowserGoogleAccessToken(
   });
 }
 
-export async function connectBrowserGoogle(options?: { prompt?: string }): Promise<ProviderConnectionInfo> {
+export function connectBrowserGoogle(options?: { prompt?: string }): Promise<ProviderConnectionInfo> {
   const clientId = webClientId();
-  if (!clientId) throw new CloudOperationError('configuration', { stage: 'configuration', reason: 'missing_web_client_id', retryable: false });
-  await preloadGis();
-  const tokenResponse = await requestBrowserGoogleAccessToken(clientId, undefined, { prompt: options?.prompt ?? 'consent select_account' });
-  let account;
-  try {
-    account = await fetchAccount(tokenResponse.access_token);
-  } catch (err) {
-    if (err instanceof CloudOperationError) throw err;
-    throw new CloudOperationError('connection', {
-      stage: 'account_identity',
-      reason: 'userinfo_fetch_failed',
-      errorMessage: err instanceof Error ? err.message : undefined,
-      retryable: true,
-    });
+  if (!clientId) {
+    return Promise.reject(new CloudOperationError('configuration', { stage: 'configuration', reason: 'missing_web_client_id', retryable: false }));
   }
-  const previous = getBrowserGoogleConnection();
-  const isSame = previous?.accountIdentifier === account.id;
-  const connection: ProviderConnectionInfo = {
-    provider: 'googledrive',
-    accountIdentifier: account.id,
-    displayName: account.name || (isSame ? previous?.displayName : undefined),
-    email: account.email || (isSame ? previous?.email : undefined),
-    connectedAt: isSame && previous ? previous.connectedAt : Date.now(),
-  };
-  current = { accessToken: tokenResponse.access_token, expiresAt: Date.now() + Math.max(60, Number(tokenResponse.expires_in ?? 3600) - 60) * 1000, connection };
-  try {
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(BROWSER_CONNECTION_STORAGE_KEY, JSON.stringify(connection));
+
+  // Initiate token request synchronously if GIS is already loaded to preserve
+  // transient user activation and prevent browser popup blocking.
+  const oauth2 = (globalThis as any).google?.accounts?.oauth2;
+  const tokenPromise = oauth2
+    ? requestBrowserGoogleAccessToken(clientId, oauth2, { prompt: options?.prompt ?? 'consent select_account' })
+    : preloadGis().then(() => requestBrowserGoogleAccessToken(clientId, undefined, { prompt: options?.prompt ?? 'consent select_account' }));
+
+  return tokenPromise.then(async (tokenResponse) => {
+    let account;
+    try {
+      account = await fetchAccount(tokenResponse.access_token);
+    } catch (err) {
+      if (err instanceof CloudOperationError) throw err;
+      throw new CloudOperationError('connection', {
+        stage: 'account_identity',
+        reason: 'userinfo_fetch_failed',
+        errorMessage: err instanceof Error ? err.message : undefined,
+        retryable: true,
+      });
     }
-  } catch {
-    // Local storage may be restricted in private browsing
-  }
-  return connection;
+    const previous = getBrowserGoogleConnection();
+    const isSame = previous?.accountIdentifier === account.id;
+    const connection: ProviderConnectionInfo = {
+      provider: 'googledrive',
+      accountIdentifier: account.id,
+      displayName: account.name || (isSame ? previous?.displayName : undefined),
+      email: account.email || (isSame ? previous?.email : undefined),
+      connectedAt: isSame && previous ? previous.connectedAt : Date.now(),
+    };
+    current = { accessToken: tokenResponse.access_token, expiresAt: Date.now() + Math.max(60, Number(tokenResponse.expires_in ?? 3600) - 60) * 1000, connection };
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(BROWSER_CONNECTION_STORAGE_KEY, JSON.stringify(connection));
+      }
+    } catch {
+      // Local storage may be restricted in private browsing
+    }
+    return connection;
+  });
 }
 
 export async function getBrowserGoogleToken(): Promise<string | null> {
