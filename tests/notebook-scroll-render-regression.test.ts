@@ -144,6 +144,23 @@ test('passive scroll activation publishes once and skips last-opened persistence
   assert.ok(renderer.includes('if (useWorkspaceStore.getState().activePageId !== targetPageId) setActivePage(targetPageId, recordOpen);'));
   assert.ok(!renderer.includes('setActivePage(dominantPage.id);'));
 
+  // The passive handoff must survive observer-effect re-runs (zoom, page
+  // properties, container size): its timer/pending refs are component-scoped
+  // and are cleared only by the unmount-only cleanup, never by a dep cleanup.
+  assert.ok(renderer.includes('const runPassiveActivation = () => {'));
+  assert.ok(renderer.includes('schedulePassiveActivation(dominantPage.id);'));
+  assert.ok(!/}, \[currentSectionPages, setActivePage, layoutConfig\.positions, viewport\.scale, containerSize\.height, notebookEngine, syncSaveGestureActive\]\);[\s\S]*?pendingPassiveActivationRef\.current = null;[\s\S]*?^\s*}, \[/m.test(renderer));
+  const observerEffect = renderer.slice(renderer.indexOf('Real-time visible page detection'), renderer.indexOf('// Scroll to active page when activePageId changes'));
+  assert.doesNotMatch(observerEffect, /passiveActivationTimerRef\.current = null;/);
+  assert.doesNotMatch(observerEffect, /pendingPassiveActivationRef\.current = null;/);
+  // The scroll-to-page effect must ignore re-runs that do not change the
+  // active page, so a zoom after scrolling cannot snap the viewport back.
+  assert.match(renderer, /if \(layoutActivePageIdRef\.current === activePageId\) return;/);
+  assert.match(renderer, /if \(activePageId === lastNavigatedPageIdRef\.current\) return;/);
+  // The observer claims pages through the pending handoff target, so scrolling
+  // back to the original page supersedes an in-flight handoff.
+  assert.match(renderer, /pendingPassiveActivationRef\.current \?\? \(currentActivePageIdRef\.current \|\| ''\)/);
+
   // The scaled multi-page wrapper must not carry a filter; page roots keep
   // their own paper shadow and remain the only shadow source.
   assert.ok(!css.includes('.panvas-notebook-workspace .notebook-viewport > div > div'));

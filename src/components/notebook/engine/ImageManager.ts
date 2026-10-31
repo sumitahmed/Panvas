@@ -49,6 +49,67 @@ export class ImageManager {
     return this.images;
   }
 
+  /** Object URL for a decoded image asset, for DOM-level rendering (the image
+   *  overlay must stack above text DOM, which the raster canvas cannot). */
+  getObjectUrl(fileId: string): string | undefined {
+    return this.objectUrls.get(fileId);
+  }
+
+  // ---- DOM overlay lifecycle ----
+  // The overlay is the visually authoritative on-screen representation (it
+  // stacks above text DOM). During selection drags the raster canvas repaints
+  // the moved image per frame while React state is intentionally quiet, so the
+  // overlay is synced imperatively: hidden during resize/rotate previews and
+  // translated during move previews, then reconciled at commit.
+
+  private overlayElements = new Map<string, HTMLElement>();
+
+  registerOverlayElement(imageId: string, element: HTMLElement | null): void {
+    if (element) this.overlayElements.set(imageId, element);
+    else this.overlayElements.delete(imageId);
+  }
+
+  private overlayRotationRadians(imageId: string): number {
+    const object = this.getImage(imageId);
+    return ((object?.rotation || 0) * Math.PI) / 180;
+  }
+
+  /** Move-preview: translate the overlay by the live drag delta. */
+  previewImageOverlay(imageId: string, dx: number, dy: number): void {
+    const element = this.overlayElements.get(imageId);
+    if (!element) return;
+    element.style.visibility = 'visible';
+    element.style.transform = `translate3d(${dx}px, ${dy}px, 0) rotate(${this.overlayRotationRadians(imageId)}rad)`;
+  }
+
+  /** Resize/rotate preview: the overlay cannot express the changing geometry,
+   *  so hide it and let the raster canvas carry the preview. */
+  hideImageOverlay(imageId: string): void {
+    const element = this.overlayElements.get(imageId);
+    if (element) element.style.visibility = 'hidden';
+  }
+
+  /** Commit: snap the overlay to the object's committed geometry and restore it. */
+  commitImageOverlay(imageId: string): void {
+    const element = this.overlayElements.get(imageId);
+    const object = this.getImage(imageId);
+    if (!element || !object) return;
+    element.style.visibility = 'visible';
+    element.style.left = `${object.x}px`;
+    element.style.top = `${object.y}px`;
+    element.style.width = `${object.width}px`;
+    element.style.height = `${object.height ?? 0}px`;
+    element.style.transform = `rotate(${this.overlayRotationRadians(imageId)}rad)`;
+  }
+
+  clearImageOverlayPreview(imageId: string): void {
+    const element = this.overlayElements.get(imageId);
+    if (element) {
+      element.style.visibility = 'visible';
+      element.style.transform = `rotate(${this.overlayRotationRadians(imageId)}rad)`;
+    }
+  }
+
   getImage(id: string): ImageObject | undefined {
     return this.images.find(image => image.id === id);
   }
@@ -240,5 +301,6 @@ export class ImageManager {
     gate0Profiler.resource('decodedImages', -this.imageCache.size);
     this.objectUrls.clear();
     this.imageCache.clear();
+    this.overlayElements.clear();
   }
 }

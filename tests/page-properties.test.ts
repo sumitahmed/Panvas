@@ -481,3 +481,30 @@ test('applying page defaults to notebook propagates template, line color, margin
   assert.match(panelSource, /<NoteSpaceControl properties=\{properties\} onChange=\{onUpdateProperties\} \/>/);
   assert.match(panelSource, /executeBatchApply\(applicableUpdates\)/);
 });
+
+test('infinite pages grow from content with a quarter-page trailing margin, never from scrolling', async () => {
+  const { documentExtent, positionedContentBottom } = await import('../src/components/notebook/documentFlowGeometry.ts');
+  const { createEmptyDrawingData } = await import('../src/components/notebook/engine/drawingTypes.ts');
+  const properties = { ...createEmptyDrawingData().properties, pageSize: 'Infinite' as const, infiniteWidth: 794 };
+  const baseHeight = resolvePageDimensions(properties).height;
+  // No content: exactly one base page (the quarter margin no longer rounds past it).
+  assert.equal(documentExtent(properties, 0), baseHeight);
+  // Content bottom + one-quarter base-page-height trailing margin, 256-aligned.
+  const contentBottom = positionedContentBottom([
+    { id: 's', type: 'stroke', tool: 'pen', color: '#000', thickness: 4, opacity: 1, createdAt: 1, points: [{ x: 10, y: 900, pressure: .5, t: 0 }, { x: 60, y: 1000, pressure: .5, t: 8 }] },
+    { id: 'i', type: 'image', x: 40, y: 1500, width: 120, height: 90, rotation: 0, createdAt: 2, fileId: 'f' },
+  ] as any);
+  assert.equal(contentBottom, 1500 + 90);
+  const expected = Math.ceil((contentBottom + baseHeight / 4) / 256) * 256;
+  assert.equal(documentExtent(properties, 0, contentBottom), expected);
+  // The trailing margin is a quarter of the base page, not a full page.
+  const fullPageExtent = Math.ceil((contentBottom + baseHeight) / 256) * 256;
+  assert.ok(expected < fullPageExtent, 'trailing space must be smaller than a full trailing page');
+  // Growth is additive and 256-aligned: repeated additions never run away.
+  const bigger = documentExtent(properties, 0, contentBottom + 10);
+  assert.ok(bigger >= expected && bigger - expected <= 256 + 10);
+  // The viewport scroll handler must not own layoutExtent growth anymore.
+  const pageView = await readFile(new URL('../src/components/notebook/NotebookPageView.tsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(pageView, /layoutExtent: Math\.ceil\(\(absoluteBottom/);
+  assert.match(pageView, /positionedContentBottom\(\[\.\.\.notebookEngine\.drawing\.getStrokes\(\)/);
+});

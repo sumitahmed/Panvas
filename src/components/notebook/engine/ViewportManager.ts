@@ -110,9 +110,10 @@ export class ViewportManager {
     return this.snapshot;
   }
 
-  /** Set zoom level (1 = 100%). Clamped to [0.25, 4]. */
+  /** Set zoom level (1 = 100%). Clamped to [0.25, 8]. The canvas backing budget
+   *  (resolveCanvasBackingScale) bounds raster detail at high zoom. */
   setZoom(scale: number): void {
-    this.state.scale = Math.max(0.25, Math.min(4, scale));
+    this.state.scale = Math.max(0.25, Math.min(8, scale));
     this.notify();
   }
 
@@ -176,7 +177,7 @@ export class ViewportManager {
   zoomBy(factor: number, originX: number, originY: number): void {
     const oldZoom = this.state.scale;
     let newZoom = this.state.scale * factor;
-    newZoom = Math.max(0.25, Math.min(4.0, newZoom));
+    newZoom = Math.max(0.25, Math.min(8.0, newZoom));
     if (newZoom === oldZoom) return;
     this.state.scale = newZoom;
     this.notify();

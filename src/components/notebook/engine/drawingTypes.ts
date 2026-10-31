@@ -234,7 +234,11 @@ export interface ToolState {
   stabilization: number; // 0-100
   shapeFillEnabled: boolean;
   lineStyle?: LineStyle;
+  /** Selection drag shape while the select tool is active. */
+  selectionShape: SelectionShape;
 }
+
+export type SelectionShape = 'freeform' | 'rectangle';
 
 /** Default tool state. */
 export const DEFAULT_TOOL_STATE: ToolState = {
@@ -259,6 +263,7 @@ export const DEFAULT_TOOL_STATE: ToolState = {
   rulerEnabled: false,
   stabilization: 50,
   shapeFillEnabled: false,
+  selectionShape: 'freeform',
 };
 
 // ---- Unified History ----

@@ -10,9 +10,13 @@ export interface ScribbleAnalysis {
  * Recognize a deliberate scratch gesture without consuming ordinary writing.
  * A scribble must be quick, travel a meaningful distance, and reverse repeatedly
  * along its dominant axis. The caller still requires intersections with existing ink.
+ * `screenScale` converts page-space samples to CSS pixels so span/length
+ * thresholds describe the gesture the user actually drew, independent of zoom.
  */
-export function analyzeScribble(points: StrokePoint[]): ScribbleAnalysis {
+export function analyzeScribble(points: StrokePoint[], screenScale = 1): ScribbleAnalysis {
+  const scale = Number.isFinite(screenScale) && screenScale > 0 ? screenScale : 1;
   if (points.length < 10) return { isScribble: false, reversals: 0, pathLength: 0 };
+  if (scale !== 1) points = points.map(point => ({ ...point, x: point.x * scale, y: point.y * scale }));
 
   let minX = points[0].x;
   let maxX = points[0].x;

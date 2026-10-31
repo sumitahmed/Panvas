@@ -81,8 +81,12 @@ export class WetInkSurface {
       right: Math.min(this.canvas.width, Math.ceil(Math.max(...corners.map(p => p.x)) + 2)),
       bottom: Math.min(this.canvas.height, Math.ceil(Math.max(...corners.map(p => p.y)) + 2)) };
   }
-  render(stroke: Stroke): { primitives: number; dirtyPixels: number; rebuilt: boolean } {
-    const rebuilt = this.geometry.update(stroke.points);
+  render(stroke: Stroke, revisedFrom = Infinity): { primitives: number; dirtyPixels: number; rebuilt: boolean } {
+    const geometryChanged = this.geometry.update(stroke.points, true, revisedFrom);
+    // An in-place revision of already-traced primitives must re-derive the
+    // prefix raster through the clear-and-retrace path: re-tracing over
+    // existing fill is not idempotent for antialiased edges.
+    const rebuilt = geometryChanged || revisedFrom < this.stable;
     if (rebuilt) {
       if (this.bounds) {
         this.prefixCtx.resetTransform();
@@ -97,7 +101,8 @@ export class WetInkSurface {
     const n = stroke.points.length;
     if (!n) return { primitives: 0, dirtyPixels: 0, rebuilt };
     const nextStable = this.geometry.stableEnd(stroke);
-    const changed = this.geometry.bounds(stroke, this.stable, n)!;
+    const changed = this.geometry.bounds(stroke, this.stable, n);
+    if (!changed) return { primitives: 0, dirtyPixels: 0, rebuilt };
     const dirty = this.pixels(this.oldTail ? unionInkBounds(this.oldTail, changed) : changed);
     this.bounds = unionInkBounds(this.bounds, changed);
     const primitives = n - this.stable;

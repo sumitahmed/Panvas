@@ -271,6 +271,13 @@ test('notebook stroke coordinates remain logical and identical across backing zo
   const at400 = viewport.canvasToPage(logicalPoint.x, logicalPoint.y);
   assert.deepEqual(at400, at100);
   assert.deepEqual(at400, logicalPoint);
+  // The zoom ceiling is 800% and every entry point shares one clamp.
+  viewport.setZoom(16);
+  assert.equal(viewport.getState().scale, 8);
+  viewport.setZoom(6);
+  assert.equal(viewport.getState().scale, 6);
+  viewport.zoomBy(10, 0, 0);
+  assert.equal(viewport.getState().scale, 8, 'zoomBy shares the 800% ceiling');
 });
 
 function point(x: number, y = 20): StrokePoint {
@@ -946,8 +953,9 @@ function createLassoHarness(shapes: Shape[], strokes: Stroke[] = [], images: Ima
     imageManager as any,
     layers,
   );
+  const toolManager = { state: { mode: 'select', selectionShape: 'freeform' } as any, getState: function () { return this.state; } };
   const input = new InputManager(
-    {} as any,
+    toolManager as any,
     viewport as any,
     drawing as any,
     { setHistoryChangeCallback: () => {}, setRulerManager: () => {} } as any,
@@ -979,8 +987,140 @@ function createLassoHarness(shapes: Shape[], strokes: Stroke[] = [], images: Ima
     });
   };
 
-  return { selection, history, lassoFrames, pointer, getRedraws: () => redraws };
+  return { selection, history, lassoFrames, pointer, tools: toolManager as any, getRedraws: () => redraws };
 }
+
+test('selection handles are hit-tested exactly where they are drawn', () => {
+  const shape = selectionShape('handle-alignment', 100, 100, 120, 60);
+  const harness = createLassoHarness([shape]);
+  harness.selection.selectElement(shape.id, 'shape');
+  // Handles anchor on the dashed frame, 4 page units beyond the logical box.
+  const frameCorners: Array<{ handle: string; x: number; y: number }> = [
+    { handle: 'tl', x: shape.x - 4, y: shape.y - 4 },
+    { handle: 'tr', x: shape.x + shape.width + 4, y: shape.y - 4 },
+    { handle: 'bl', x: shape.x - 4, y: shape.y + shape.height + 4 },
+    { handle: 'br', x: shape.x + shape.width + 4, y: shape.y + shape.height + 4 },
+    { handle: 'tc', x: shape.x + shape.width / 2, y: shape.y - 4 },
+    { handle: 'bc', x: shape.x + shape.width / 2, y: shape.y + shape.height + 4 },
+  ];
+  for (const corner of frameCorners) {
+    const hit = harness.selection.getHandleAt(corner.x, corner.y);
+    assert.ok(hit, `${corner.handle} handle must be grabbable at its drawn center`);
+    assert.equal(hit!.handle, corner.handle);
+  }
+  const rotateHit = harness.selection.getHandleAt(shape.x + shape.width / 2, shape.y - 32);
+  assert.equal(rotateHit?.handle, 'rotate', 'rotation handle stays at its drawn position');
+});
+
+test('line shapes frame their visual ink bounds, never a degenerate endpoint rect', () => {
+  const horizontalLine = {
+    id: 'hline', type: 'shape' as const, shapeType: 'line' as const,
+    x: 10, y: 100, width: 190, height: 0, strokeWidth: 2, color: '#20242a', opacity: 1, rotation: 0, createdAt: 1,
+  };
+  const harness = createLassoHarness([horizontalLine as any]);
+  harness.selection.selectElement(horizontalLine.id, 'shape');
+  // Ink bounds: radius 1 around the endpoints. Frame: ±4. Distinct top/bottom handles.
+  const left = 10 - 1 - 4, top = 100 - 1 - 4, bottom = 100 + 1 + 4;
+  const topHit = harness.selection.getHandleAt(left, top);
+  // The frame is thinner than the 12-unit handle squares, so handles overlap
+  // near the middle; probe below the middle-left square for the bottom handle.
+  const bottomHit = harness.selection.getHandleAt(left, bottom + 1.5);
+  assert.equal(topHit?.handle, 'tl');
+  assert.equal(bottomHit?.handle, 'bl', 'horizontal line must expose distinct top/bottom handles');
+  // A freeform loop enclosing the line selects exactly one logical element.
+  harness.pointer('startSelection', left - 10, top - 10);
+  harness.pointer('continueSelection', left + 220, top - 10);
+  harness.pointer('continueSelection', left + 220, bottom + 10);
+  harness.pointer('continueSelection', left - 10, bottom + 10);
+  harness.pointer('finishSelection', left - 10, top - 10);
+  assert.deepEqual(
+    new Set(harness.selection.getSelectedElements().map(element => element.id)),
+    new Set(['hline']),
+  );
+});
+
+test('freeform lasso retains the drawn boundary; transforms and new selections clear it', () => {
+  const harness = createLassoHarness([
+    selectionShape('outline-target', 60, 60, 20, 20),
+    selectionShape('outline-far', 400, 300, 20, 20),
+  ]);
+  // Irregular freeform loop (not a rectangle).
+  harness.pointer('startSelection', 20, 20);
+  harness.pointer('continueSelection', 150, 25);
+  harness.pointer('continueSelection', 170, 90);
+  harness.pointer('continueSelection', 100, 120);
+  harness.pointer('continueSelection', 30, 95);
+  harness.pointer('finishSelection', 20, 20);
+  assert.deepEqual(
+    new Set(harness.selection.getSelectedElements().map(element => element.id)),
+    new Set(['outline-target']),
+  );
+  const outline = harness.selection.getSelectionOutline();
+  assert.ok(outline && outline.length >= 5, 'the drawn freeform boundary is retained after selection');
+  assert.ok(Math.abs(outline[2].x - 170) < 1e-6 && Math.abs(outline[2].y - 90) < 1e-6,
+    'the retained outline matches the drawn polygon, not a bounding square');
+  // A move keeps the boundary: the renderer translates it by the live preview
+  // delta (currentDragTransform), and the commit bakes that delta into the
+  // stored polygon so the next interaction starts from the moved region.
+  harness.selection.startDrag(70, 70); // region centre, clear of the resize handles
+  harness.selection.dragTo(110, 95);
+  const duringPreview = harness.selection.getSelectionOutline();
+  const previewTransform = harness.selection.getMovePreviewDelta();
+  assert.ok(previewTransform && Math.abs(previewTransform.dx - 40) < 1e-6 && Math.abs(previewTransform.dy - 25) < 1e-6,
+    'the move preview exposes its delta for the outline renderer');
+  assert.ok(duringPreview && Math.abs(duringPreview[2].x - 170) < 1e-6, 'stored polygon stays canonical during preview');
+  harness.selection.finishDrag(110, 95);
+  const baked = harness.selection.getSelectionOutline();
+  assert.ok(baked && Math.abs(baked[2].x - 210) < 1e-6 && Math.abs(baked[2].y - 115) < 1e-6,
+    `commit bakes the move into the retained outline (${JSON.stringify(baked?.[2])})`);
+  // Resize invalidates the polygon: the frame takes over. After the baked move
+  // the element sits at (100,85,20,20), so its br handle is at (124,109).
+  harness.selection.startDrag(124, 109);
+  assert.equal(harness.selection.getSelectionOutline(), null, 'resize/rotate invalidates the drawn region');
+  harness.selection.finishDrag(154, 139);
+  // A rectangle selection must not reuse the freeform visualization.
+  (harness.tools as any).state.selectionShape = 'rectangle';
+  harness.pointer('startSelection', 300, 250);
+  harness.pointer('continueSelection', 500, 400);
+  harness.pointer('finishSelection', 500, 400);
+  assert.deepEqual(
+    new Set(harness.selection.getSelectedElements().map(element => element.id)),
+    new Set(['outline-far']),
+  );
+  assert.equal(harness.selection.getSelectionOutline(), null, 'rectangle mode shows only the transform frame');
+  // Clearing the selection clears any boundary.
+  harness.selection.selectWithinLoop([[10, 10], [200, 10], [200, 200], [10, 200]].map(([x, y], t) => ({ x, y, pressure: .5, t })), false, [{ x: 5, y: 5, pressure: .5, t: 0 }, { x: 205, y: 205, pressure: .5, t: 1 }, { x: 5, y: 205, pressure: .5, t: 2 }]);
+  assert.ok(harness.selection.getSelectionOutline());
+  harness.selection.clearSelection();
+  assert.equal(harness.selection.getSelectionOutline(), null);
+});
+
+test('rectangular lasso selects enclosed content and Shift constrains to a square', () => {
+  const harness = createLassoHarness([
+    selectionShape('rect-target', 40, 40, 20, 20),
+    selectionShape('rect-outside', 400, 300, 20, 20),
+  ]);
+  (harness.tools as any).state.selectionShape = 'rectangle';
+  harness.pointer('startSelection', 10, 10);
+  harness.pointer('continueSelection', 90, 90);
+  assert.equal(harness.lassoFrames.at(-1)?.length, 5, 'rectangle preview is a closed 4-corner polygon');
+  harness.pointer('finishSelection', 90, 90);
+  assert.deepEqual(
+    new Set(harness.selection.getSelectedElements().map(element => element.id)),
+    new Set(['rect-target']),
+  );
+  // Shift square constraint: 100x30 drag becomes a 100x100 square.
+  harness.selection.clearSelection();
+  let square: Array<{ x: number; y: number }> = [];
+  const original = harness.selection.selectWithinLoop.bind(harness.selection);
+  (harness.selection as any).selectWithinLoop = (points: any[], repaint?: boolean) => { square = points; return original(points, repaint); };
+  harness.pointer('startSelection', 10, 10, true);
+  harness.pointer('continueSelection', 110, 40, true);
+  harness.pointer('finishSelection', 110, 40, true);
+  (harness.selection as any).selectWithinLoop = original;
+  assert.equal(square.length, 5);
+  assert.ok(Math.abs((square[2].x - square[0].x) - (square[2].y - square[0].y)) < 1e-6, 'Shift constrains the rectangle to a square');
+});
 
 test('freehand lasso drag selects multiple enclosed objects', () => {
   const harness = createLassoHarness([
@@ -1085,7 +1225,30 @@ test('rotated resize converts pointer movement into object-local axes', () => {
   harness.selection.startDrag(handle.x, handle.y);
   harness.selection.dragTo(handle.x, handle.y + 30);
   assert.ok(shape.width > 100, 'world-down movement grows local width at 90 degrees');
-  assert.equal(shape.height, 40);
+  // Corner handles preserve the original aspect ratio (2:1 here).
+  assert.ok(Math.abs(shape.height - shape.width * 0.5) < 1e-6, `corner resize preserves aspect ratio (${shape.width}x${shape.height})`);
+});
+
+test('side-handle resize keeps free single-axis scaling while corners preserve ratio', () => {
+  const shape = selectionShape('side-resize', 20, 20, 80, 40);
+  const harness = createLassoHarness([shape]);
+  harness.selection.selectElement(shape.id, 'shape');
+  // Right-middle handle: free horizontal resize.
+  harness.selection.startDrag(shape.x + shape.width + 4, shape.y + shape.height / 2);
+  harness.selection.dragTo(shape.x + shape.width + 44, shape.y + shape.height / 2);
+  assert.equal(shape.width, 120, 'side handle resizes width freely');
+  assert.equal(shape.height, 40, 'side handle must not change height');
+  // Bottom-middle handle: free vertical resize.
+  harness.selection.startDrag(shape.x + shape.width / 2, shape.y + shape.height + 4);
+  harness.selection.dragTo(shape.x + shape.width / 2, shape.y + shape.height + 24);
+  assert.equal(shape.height, 60, 'top/bottom handle resizes height freely');
+  assert.equal(shape.width, 120, 'top/bottom handle must not change width');
+  // Corner handle: ratio locked to the original 80x40 (2:1).
+  const ratioWidth = shape.width;
+  harness.selection.startDrag(shape.x + shape.width + 4, shape.y + shape.height + 4);
+  harness.selection.dragTo(shape.x + shape.width + 44, shape.y + shape.height + 24);
+  assert.ok(Math.abs(shape.height - shape.width * 0.5) < 1e-6, 'corner resize preserves the original ratio');
+  assert.ok(shape.width > ratioWidth);
 });
 
 test('resizing clipped ink scales its ruler-protected region and undo restores it', () => {

@@ -725,7 +725,8 @@
     0 12px 26px rgba(var(--text-primary), 0.15),
     0 2px 6px rgba(var(--text-primary), 0.08),
     inset 0 1px 0 rgba(var(--bg-elevated), 0.6);
-  backdrop-filter: blur(8px);
+  /* No backdrop blur: the paste treatment must not frost canvas content
+     (e.g. a newly pasted image sitting behind the text block). */
 }
 
 .panvas-pasted-note .ProseMirror > :first-child,
@@ -746,7 +747,7 @@
     0 8px 18px rgba(var(--text-primary), 0.11),
     0 2px 5px rgba(var(--text-primary), 0.06),
     inset 0 1px 0 rgba(var(--bg-elevated), 0.48);
-  backdrop-filter: blur(8px);
+  /* No backdrop blur: same rule as .panvas-pasted-note above. */
 }
 
 /* TipTap CodeBlock & Syntax Highlighting */

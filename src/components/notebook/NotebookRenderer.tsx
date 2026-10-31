@@ -647,7 +647,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     const targetBaseScale = pendingScale !== undefined && pendingScale !== renderedScale
       ? pendingScale
       : renderedScale;
-    const newScale = Math.max(0.25, Math.min(4.0, targetBaseScale * factor));
+    const newScale = Math.max(0.25, Math.min(8.0, targetBaseScale * factor));
     if (newScale === targetBaseScale) return false;
 
     const w = layoutConfig.totalWidth * renderedScale;
@@ -690,7 +690,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   const handlePanelZoom = useCallback((zoomFactor: number) => {
     const container = containerRef.current;
     if (!container) return;
-    const clampedZoom = Math.max(0.25, Math.min(4.0, viewport.scale * zoomFactor));
+    const clampedZoom = Math.max(0.25, Math.min(8.0, viewport.scale * zoomFactor));
     const factor = clampedZoom / viewport.scale;
     if (factor === 1) return;
     applyZoom(factor, container.clientWidth / 2, container.clientHeight / 2);
@@ -1407,6 +1407,11 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   currentActivePageIdRef.current = activePageId;
   const isNavigatingRef = useRef<boolean>(false);
   const lastNavigatedPageIdRef = useRef<string>('');
+  const currentSectionPagesRef = useRef(currentSectionPages);
+  currentSectionPagesRef.current = currentSectionPages;
+  // The activePageId this layout effect last observed, so re-runs driven by
+  // zoom/positions/section data are not mistaken for navigation requests.
+  const layoutActivePageIdRef = useRef<string | null>(null);
 
   const flushOwnedPageDrawing = useCallback((pageId: string) => {
     // Complete the outgoing gesture before consulting Stage C's revision-keyed capture.
@@ -1575,6 +1580,44 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
 
   handleActivatePageRef.current = handleActivatePage;
 
+  // Passive scroll coalesces its focus transfer until motion settles. The armed
+  // timer deliberately lives at component scope: the observer effect re-runs on
+  // zoom, page-property, and container changes, and tearing the pending handoff
+  // down there silently cancelled the active-page commit (the viewport then
+  // snapped back to the originally selected page on the next effect pass).
+  const runPassiveActivation = () => {
+    passiveActivationTimerRef.current = null;
+    const pendingPageId = pendingPassiveActivationRef.current;
+    if (!pendingPageId) return;
+    // Never transfer focus mid-gesture: a pen-down on the outgoing page must
+    // finish before the engine can hand ownership to the dominant page.
+    if (drawingGestureActiveRef.current || isNavigatingRef.current) {
+      passiveActivationTimerRef.current = setTimeout(runPassiveActivation, 220);
+      return;
+    }
+    pendingPassiveActivationRef.current = null;
+    // Compare against the store, not currentActivePageIdRef: the observer's
+    // claim already wrote the pending page into that ref, and comparing here
+    // skipped the commit whenever no render intervened between the claim and
+    // this timer — intermediate pages then never became active.
+    if (pendingPageId === useWorkspaceStore.getState().activePageId) return;
+    const dominantPage = currentSectionPagesRef.current.find(page => page.id === pendingPageId);
+    if (!dominantPage || dominantPage.type === 'pdf') return;
+    currentActivePageIdRef.current = dominantPage.id;
+    startTransition(() => {
+      if (useWorkspaceStore.getState().activePageId !== dominantPage.id) setActivePage(dominantPage.id, false);
+      handleActivatePageRef.current(dominantPage.id, false);
+    });
+  };
+  const armPassiveActivation = () => {
+    if (passiveActivationTimerRef.current !== null) clearTimeout(passiveActivationTimerRef.current);
+    passiveActivationTimerRef.current = setTimeout(runPassiveActivation, 140);
+  };
+  const schedulePassiveActivation = (dominantPageId: string) => {
+    pendingPassiveActivationRef.current = dominantPageId;
+    armPassiveActivation();
+  };
+
   const [residentIds, setResidentIds] = useState(() => residentPageIds(
     layoutConfig.positions, 0, containerSize.height / viewport.scale,
   ));
@@ -1609,36 +1652,9 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       setResidentIds(next);
     };
 
-    // Focus has to follow the dominant page. `focusedPageId` decides which page
-    // owns the live engine canvas and the interactive FloatingTextEditor nodes;
-    // every other page renders a `pointer-events-none` StaticTextPreview over a
-    // `pointer-events-none` canvas, so it has no interactive text DOM at all.
-    // Run that transfer once scrolling settles instead of at every intermediate
-    // boundary. Pointer activation and direct navigation cancel this pending
-    // handoff synchronously through handleActivatePage.
-    const runPassiveActivation = () => {
-      passiveActivationTimerRef.current = null;
-      const pendingPageId = pendingPassiveActivationRef.current;
-      pendingPassiveActivationRef.current = null;
-      if (!pendingPageId) return;
-      if (pendingPageId === currentActivePageIdRef.current) return;
-      const dominantPage = currentSectionPages.find(page => page.id === pendingPageId);
-      if (!dominantPage || dominantPage.type === 'pdf') return;
-      currentActivePageIdRef.current = dominantPage.id;
-      startTransition(() => {
-        if (useWorkspaceStore.getState().activePageId !== dominantPage.id) setActivePage(dominantPage.id, false);
-        handleActivatePageRef.current(dominantPage.id, false);
-      });
-    };
-    const armPassiveActivation = () => {
-      if (passiveActivationTimerRef.current !== null) clearTimeout(passiveActivationTimerRef.current);
-      passiveActivationTimerRef.current = setTimeout(runPassiveActivation, 140);
-    };
-    const schedulePassiveActivation = (dominantPage: (typeof currentSectionPages)[number]) => {
-      pendingPassiveActivationRef.current = dominantPage.id;
-      armPassiveActivation();
-    };
-
+    // Focus has to follow the dominant page once scrolling settles. The handoff
+    // itself lives at component scope (schedulePassiveActivation above) so an
+    // effect re-run from zoom or page-property changes cannot cancel it.
     const observeScroll = () => {
       const scrollStartedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
       let geometryReads = 0;
@@ -1648,8 +1664,11 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       const top = container.scrollTop / scale;
       const height = container.clientHeight / scale;
       updateResidency(top, height);
+      // The newest scroll-derived claim wins: a pending handoff target counts as
+      // current even if a render reset the ref from the (stale) store value.
+      const claimedPageId = pendingPassiveActivationRef.current ?? (currentActivePageIdRef.current || '');
       const dominantId = dominantPageId(layoutConfig.positions, top + height / 2,
-        currentActivePageIdRef.current || '', 24 / scale);
+        claimedPageId, 24 / scale);
       const dominantPage = currentSectionPages.find(page => page.id === dominantId);
 
       if (isNavigatingRef.current || pageGeometryTransitionRef.current) return;
@@ -1663,7 +1682,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       if (textEditor?.view.dom.isConnected && (textEditor.isFocused || textEditor.view.dom.contains(document.activeElement)
         || editingControl?.dataset.documentEditor === textId)) return;
 
-      if (dominantPage && dominantPage.id !== currentActivePageIdRef.current) {
+      if (dominantPage && dominantPage.id !== claimedPageId) {
         if (dominantPage.type === 'pdf') {
           // Never allow passive scroll over a PDF preview in NotebookRenderer to hijack activePageId!
           return;
@@ -1677,7 +1696,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         // Coalesce the handoff itself until motion settles: committing a focus
         // transfer at every intermediate boundary rerenders the notebook subtree
         // while the user is still scrolling past those pages.
-        schedulePassiveActivation(dominantPage);
+        schedulePassiveActivation(dominantPage.id);
       }
       if (scrollStartedAt) gate0Profiler.event('notebook-scroll-handler', performance.now() - scrollStartedAt, {
         pages: currentSectionPages.length,
@@ -1743,10 +1762,9 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       if (scrollRafId !== null) {
         cancelAnimationFrame(scrollRafId);
       }
-      if (passiveActivationTimerRef.current !== null) {
-        clearTimeout(passiveActivationTimerRef.current);
-        passiveActivationTimerRef.current = null;
-      }
+      // The passive-activation timer and pending handoff deliberately survive
+      // this cleanup: they are component-scoped and cleared only on unmount,
+      // so a zoom or property change cannot cancel a scheduled page handoff.
       if (scrollSaveReleaseTimer !== null) {
         clearTimeout(scrollSaveReleaseTimer);
         scrollSaveReleaseTimer = null;
@@ -1755,7 +1773,6 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         scrollGestureActiveRef.current = false;
         syncSaveGestureActive();
       }
-      pendingPassiveActivationRef.current = null;
       flushPendingPosition();
     };
   }, [currentSectionPages, setActivePage, layoutConfig.positions, viewport.scale, containerSize.height, notebookEngine, syncSaveGestureActive]);
@@ -1763,7 +1780,15 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   // Scroll to active page when activePageId changes from sidebar/navigator clicks
   useLayoutEffect(() => {
     if (!sectionAppearanceReady) return;
-    if (!activePageId || activePageId === lastNavigatedPageIdRef.current) return;
+    if (!activePageId) return;
+    // Re-runs driven by zoom, layout, or section data are not navigation: the
+    // viewport must stay where the user put it. Record every observed page
+    // change BEFORE the claimed-navigation skip — a passive commit that skips
+    // here still changes the active page, and a later sidebar/navigator click
+    // on the previously active page must navigate to it.
+    if (layoutActivePageIdRef.current === activePageId) return;
+    layoutActivePageIdRef.current = activePageId;
+    if (activePageId === lastNavigatedPageIdRef.current) return;
 
     if (drawingGestureActiveRef.current) {
       pendingActivationPageIdRef.current = activePageId;
@@ -2306,11 +2331,33 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   }, [notebookEngine]);
 
   const handlePasteFromClipboard = useCallback(async (e?: React.ClipboardEvent | ClipboardEvent) => {
+    // 0. A genuine image payload always becomes a standalone canvas image —
+    // even when a text editor is focused. Deferring to native paste here made
+    // editors consume image clipboards as base64 text (data URLs landing in
+    // code blocks instead of an image object on the canvas).
+    if (e && 'clipboardData' in e && e.clipboardData) {
+      let imageFile: File | null = null;
+      const items = Array.from(e.clipboardData.items || []);
+      const imageItem = items.find(item => item.type.startsWith('image/'));
+      if (imageItem) imageFile = imageItem.getAsFile();
+      if (!imageFile && e.clipboardData.files && e.clipboardData.files.length > 0) {
+        imageFile = Array.from(e.clipboardData.files).find(f => f.type.startsWith('image/')) ?? null;
+      }
+      if (imageFile) {
+        const nativeEvent = 'nativeEvent' in e ? e.nativeEvent : e;
+        if (handledPasteEvents.current.has(nativeEvent)) return;
+        handledPasteEvents.current.add(nativeEvent);
+        e.preventDefault();
+        await importImage(imageFile);
+        return;
+      }
+    }
+
     // 1. If inside a native input / TipTap text editor, let it paste natively
     const pasteTarget = e?.target instanceof HTMLElement ? e.target : null;
     const isTextEditing = (
       Boolean(pasteTarget?.isContentEditable) ||
-      document.activeElement instanceof HTMLInputElement || 
+      document.activeElement instanceof HTMLInputElement ||
       document.activeElement instanceof HTMLTextAreaElement ||
       !!(document.activeElement as HTMLElement)?.isContentEditable
     );
@@ -2326,25 +2373,6 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
 
     // 2. Check ClipboardEvent items if provided (e.g. from onPaste or window paste event)
     if (e && 'clipboardData' in e && e.clipboardData) {
-      // a. Image from OS clipboard (check both items and files)
-      let imageFile: File | null = null;
-      const items = Array.from(e.clipboardData.items || []);
-      const imageItem = items.find(item => item.type.startsWith('image/'));
-      if (imageItem) {
-        imageFile = imageItem.getAsFile();
-      }
-      if (!imageFile && e.clipboardData.files && e.clipboardData.files.length > 0) {
-        const file = Array.from(e.clipboardData.files).find(f => f.type.startsWith('image/'));
-        if (file) {
-          imageFile = file;
-        }
-      }
-      if (imageFile) {
-        e.preventDefault();
-        await importImage(imageFile);
-        return;
-      }
-
       const textData = e.clipboardData.getData('text/plain');
       const htmlData = e.clipboardData.getData('text/html');
 

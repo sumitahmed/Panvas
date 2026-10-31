@@ -7,11 +7,15 @@ export interface CircleGestureAnalysis {
   height: number;
 }
 
-/** Recognize a deliberate closed loop while rejecting taps, open curves, and slow traces. */
-export function analyzeCircleGesture(points: StrokePoint[]): CircleGestureAnalysis {
+/** Recognize a deliberate closed loop while rejecting taps, open curves, and slow traces.
+ * `screenScale` converts page-space samples to CSS pixels so size thresholds stay
+ * zoom-invariant; aspect and closure ratios are scale-independent. */
+export function analyzeCircleGesture(points: StrokePoint[], screenScale = 1): CircleGestureAnalysis {
+  const scale = Number.isFinite(screenScale) && screenScale > 0 ? screenScale : 1;
   if (points.length < 12) {
     return { isCircle: false, closureDistance: Infinity, width: 0, height: 0 };
   }
+  if (scale !== 1) points = points.map(point => ({ ...point, x: point.x * scale, y: point.y * scale }));
 
   let minX = points[0].x;
   let maxX = points[0].x;

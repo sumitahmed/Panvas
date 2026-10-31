@@ -12,14 +12,18 @@ export function unionInkBounds(a: InkBounds | null, b: InkBounds): InkBounds {
 export class PenGeometry {
   points: StrokePoint[] = [];
   readonly distances: number[] = [];
-  update(points: StrokePoint[], measureDistances = true): boolean {
-    const reset = this.points !== points || points.length < this.distances.length;
-    if (reset) this.distances.length = 0;
+  /** `revisedFrom` marks geometry revised in place (incremental refilter): cached
+   * distances are still a valid prefix up to that index and are recomputed beyond it. */
+  update(points: StrokePoint[], measureDistances = true, revisedFrom = Infinity): boolean {
+    const identityChanged = this.points !== points;
+    if (identityChanged) this.distances.length = 0;
+    else if (points.length < this.distances.length) this.distances.length = points.length;
+    else if (revisedFrom < this.distances.length) this.distances.length = revisedFrom;
     this.points = points;
     for (let i = this.distances.length; measureDistances && i < points.length; i++) {
       this.distances.push(i ? this.distances[i - 1] + Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y) : 0);
     }
-    return reset;
+    return identityChanged;
   }
   width(stroke: Stroke, i: number): number {
     const point = this.points[i];

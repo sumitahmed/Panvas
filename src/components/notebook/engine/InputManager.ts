@@ -66,6 +66,14 @@ export class InputManager {
   private lastClickPointerType = '';
   private strokeStartTime: number = 0;
   private currentPoints: StrokePoint[] = [];
+
+  /** Lowest page-space y of the in-flight stroke, for live document-extent
+   *  growth on infinite pages. -Infinity when no stroke is in flight. */
+  getLiveStrokeBottom(): number {
+    let bottom = -Infinity;
+    for (const point of this.currentPoints) bottom = Math.max(bottom, point.y);
+    return bottom;
+  }
   private inkInputFilter = new InkInputFilter();
   private inkCenterline = new InkCenterline();
   private inkScreenScale = 1;
@@ -81,6 +89,20 @@ export class InputManager {
   private inkSamples: InkSamples | null = null;
   private inkOwner: { canvas: HTMLCanvasElement | null; pageId: string | null } | null = null;
   private inkRawPoints: StrokePoint[] = [];
+  /** Filter/centerline state per processed dispatch batch, so an out-of-order
+   * coalesced sample can be refiltered incrementally instead of revising the
+   * whole displayed stroke. Checkpoints strictly precede their sample count. */
+  private inkFilterCheckpoints: {
+    samples: number;
+    rawPoints: number;
+    filteredPoints: number;
+    filter: ReturnType<InkInputFilter['checkpoint']>;
+    centerline: ReturnType<InkCenterline['checkpoint']>;
+    rulerSnapped: boolean;
+  }[] = [];
+  private static readonly INK_CHECKPOINT_LIMIT = 96;
+  /** Geometry revision start for the next renderLiveStroke call. */
+  private liveRevisionFrom = Infinity;
   private inkTrace: HandwritingTrace | null = null;
   private gate0InkGesture: Gate0Record | null = null;
   private gate0EraserGesture: Gate0Record | null = null;
@@ -91,6 +113,8 @@ export class InputManager {
   // selectWithinLoop() implementation.
   private selectionDragMode: 'none' | 'transform' | 'lasso' = 'none';
   private lassoPoints: StrokePoint[] = [];
+  private lassoShape: 'freeform' | 'rectangle' = 'freeform';
+  private lassoStartPoint: StrokePoint | null = null;
   private selectionRafId: number | null = null;
   private pendingSelectionPoint: StrokePoint | null = null;
 
@@ -279,6 +303,7 @@ export class InputManager {
     this.drawingEngine?.endLasso?.();
     this.selectionDragMode = 'none';
     this.lassoPoints = [];
+    this.lassoStartPoint = null;
     this.laserManager.clear();
     this.canvas = null;
     releaseNavigation?.();
@@ -539,6 +564,7 @@ export class InputManager {
     this.clearTransientTextDomPositions();
     this.selectionDragMode = 'none';
     this.lassoPoints = [];
+    this.lassoStartPoint = null;
     this.rulerDragMode = null;
     this.laserPointerActive = false;
     this.laserManager.clear();
@@ -656,11 +682,21 @@ export class InputManager {
     this.isDrawing = true;
     this.strokeModeAtStart = 'select';
     this.lassoPoints = [];
+    this.lassoStartPoint = null;
+    this.lassoShape = 'freeform';
 
     // getHandleAt() and selectAt() preserve the existing handle, active-bounds,
     // click-to-select, and Shift+click behavior. Only a genuine empty-canvas hit starts
     // lasso collection. Toolbar/React selection notifications are coalesced to
     // the next frame so dense-page hit testing and drag setup stay in one task.
+    // A freeform region is itself a move handle: dragging from inside the drawn
+    // selection (or on its outline) moves the selected content. Shift keeps the
+    // add-to-selection behavior, and resize/rotate handles are checked first.
+    if (!e.shiftKey && this.selectionEngine.shouldDragFreeformRegion(point.x, point.y)) {
+      this.selectionDragMode = 'transform';
+      this.selectionEngine.startDrag(point.x, point.y);
+      return;
+    }
     const selectGesture = () => {
       const handleHit = this.selectionEngine.getHandleAt(point.x, point.y);
       const hit = Boolean(handleHit)
@@ -680,15 +716,40 @@ export class InputManager {
     }
 
     this.selectionDragMode = 'lasso';
+    this.lassoShape = this.toolManager.getState().selectionShape === 'rectangle' ? 'rectangle' : 'freeform';
+    this.lassoStartPoint = point;
     this.lassoPoints = [point];
     this.drawingEngine.startLasso?.();
     this.drawingEngine.renderLasso(this.lassoPoints);
   }
 
+  /** Rectangular lasso preview/selection polygon; Shift constrains to a square. */
+  private rectangleLassoLoop(current: StrokePoint, shiftKey: boolean): StrokePoint[] {
+    const start = this.lassoStartPoint ?? current;
+    let x1 = current.x, y1 = current.y;
+    if (shiftKey) {
+      const dx = current.x - start.x, dy = current.y - start.y;
+      const size = Math.max(Math.abs(dx), Math.abs(dy));
+      x1 = start.x + Math.sign(dx || 1) * size;
+      y1 = start.y + Math.sign(dy || 1) * size;
+    }
+    return [
+      { ...start },
+      { x: x1, y: start.y, pressure: current.pressure, t: current.t },
+      { x: x1, y: y1, pressure: current.pressure, t: current.t },
+      { x: start.x, y: y1, pressure: current.pressure, t: current.t },
+      { ...start },
+    ];
+  }
+
   private continueSelection(e: PointerEvent): void {
     const point = this.getCanvasPoint(e);
     if (this.selectionDragMode === 'lasso') {
-      this.lassoPoints.push(point);
+      if (this.lassoShape === 'rectangle') {
+        this.lassoPoints = this.rectangleLassoLoop(point, e.shiftKey);
+      } else {
+        this.lassoPoints.push(point);
+      }
       this.drawingEngine.renderLasso(this.lassoPoints);
       return;
     }
@@ -725,13 +786,24 @@ export class InputManager {
     const point = this.getCanvasPoint(e);
 
     if (this.selectionDragMode === 'lasso') {
-      this.lassoPoints.push(point);
+      if (this.lassoShape === 'rectangle') {
+        this.lassoPoints = this.rectangleLassoLoop(point, e.shiftKey);
+      } else {
+        this.lassoPoints.push(point);
+      }
       const completedLoop = this.lassoPoints;
       this.lassoPoints = [];
+      this.lassoStartPoint = null;
       this.selectionDragMode = 'none';
       this.drawingEngine.endLasso?.();
       if (completedLoop.length >= 3) {
-        this.selectionEngine.selectWithinLoop(completedLoop, false);
+        // Freeform selections keep their drawn boundary as the visible region;
+        // rectangle selections are fully represented by the transform frame.
+        this.selectionEngine.selectWithinLoop(
+          completedLoop,
+          false,
+          this.lassoShape === 'freeform' ? completedLoop : null,
+        );
       }
       // selectWithinLoop intentionally does not redraw when nothing is enclosed; always
       // redraw here so the transient lasso disappears for both hit and miss outcomes.
@@ -970,6 +1042,8 @@ export class InputManager {
     this.inkInputFilter.reset();
     this.inkCenterline.reset();
     this.inkRulerSnapped = false;
+    this.inkFilterCheckpoints.length = 0;
+    this.liveRevisionFrom = Infinity;
     const origin = this.viewport.pageToCanvas(0, 0), axis = this.viewport.pageToCanvas(1, 0);
     this.inkScreenScale = this.cachedCanvasRect && this.cachedCssWidth && this.cachedCssHeight
       ? Math.hypot((axis.x - origin.x) * this.cachedCanvasRect.width / this.cachedCssWidth,
@@ -988,6 +1062,7 @@ export class InputManager {
       this.strokeContextAtStart.strokePattern,
       this.strokeContextAtStart.inkFamily,
       firstPoint,
+      this.consumeLiveRevisionFrom(),
     );
     if (this.strokeContextAtStart.recognitionEligible) {
       this.notifyStrokeLifecycle({
@@ -1016,6 +1091,7 @@ export class InputManager {
       strokeContext.strokePattern,
       strokeContext.inkFamily,
       latestRawPoint,
+      this.consumeLiveRevisionFrom(),
     );
     gate0Profiler.increment(this.gate0InkGesture, 'liveRenderInvocations');
     gate0Profiler.sample(this.gate0InkGesture, 'currentStrokePointCount', this.currentPoints.length);
@@ -1030,6 +1106,13 @@ export class InputManager {
 
   private traceInkTiming(name: string, start: number): void {
     if (this.inkTrace) (this.inkTrace.timings[name] ??= []).push(performance.now() - start);
+  }
+
+  /** Consume the geometry-revision start produced by the last acceptInkSamples. */
+  private consumeLiveRevisionFrom(): number {
+    const value = this.liveRevisionFrom;
+    this.liveRevisionFrom = Infinity;
+    return value;
   }
 
   private acceptInkSamples(e: PointerEvent): boolean {
@@ -1053,15 +1136,50 @@ export class InputManager {
     if (!result.added) return false;
     // A delayed dispatch can contribute unique older history. Refilter in chronological
     // order rather than dropping that history or inserting a backwards segment.
+    // The refilter restarts from the newest checkpoint at or before the insertion
+    // point: earlier filtered geometry is final and must not move on screen, so
+    // the visual revision is confined to the tail instead of the whole stroke.
+    let fromIndex = oldLength;
+    let revisedFrom = Infinity;
     if (result.rebuild) {
-      this.inkInputFilter.reset();
-      this.inkCenterline.reset();
-      this.inkRulerSnapped = false;
-      this.currentPoints = [];
-      this.inkRawPoints = [];
+      const insertedAt = Number.isFinite(result.insertedAt) ? result.insertedAt : 0;
+      const checkpoints = this.inkFilterCheckpoints;
+      let cpIndex = -1;
+      for (let c = checkpoints.length - 1; c >= 0; c--) {
+        if (checkpoints[c].samples <= insertedAt) { cpIndex = c; break; }
+      }
+      if (cpIndex >= 0) {
+        const checkpoint = checkpoints[cpIndex];
+        checkpoints.length = cpIndex;
+        this.inkInputFilter.restore(checkpoint.filter);
+        this.inkCenterline.restore(checkpoint.centerline);
+        this.inkRulerSnapped = checkpoint.rulerSnapped;
+        this.currentPoints.length = checkpoint.filteredPoints;
+        this.inkRawPoints.length = checkpoint.rawPoints;
+        fromIndex = checkpoint.samples;
+        revisedFrom = checkpoint.filteredPoints;
+      } else {
+        this.inkInputFilter.reset();
+        this.inkCenterline.reset();
+        this.inkRulerSnapped = false;
+        this.currentPoints = [];
+        this.inkRawPoints = [];
+        fromIndex = 0;
+        revisedFrom = 0;
+      }
     }
     const context = this.strokeContextAtStart!;
-    for (let i = result.rebuild ? 0 : oldLength; i < stream.samples.length; i++) {
+    if (this.inkFilterCheckpoints.length >= InputManager.INK_CHECKPOINT_LIMIT) this.inkFilterCheckpoints.shift();
+    this.inkFilterCheckpoints.push({
+      samples: fromIndex,
+      rawPoints: this.inkRawPoints.length,
+      filteredPoints: this.currentPoints.length,
+      filter: this.inkInputFilter.checkpoint(),
+      centerline: this.inkCenterline.checkpoint(),
+      rulerSnapped: this.inkRulerSnapped,
+    });
+    this.liveRevisionFrom = revisedFrom;
+    for (let i = fromIndex; i < stream.samples.length; i++) {
       const sample = stream.samples[i];
       const rulerSnap = this.rulerManager.snapPointToEdge(this.getCanvasPoint(sample));
       const raw = rulerSnap.point;
@@ -1099,6 +1217,8 @@ export class InputManager {
     this.inkSamples = null;
     this.inkOwner = null;
     this.inkRawPoints = [];
+    this.inkFilterCheckpoints.length = 0;
+    this.liveRevisionFrom = Infinity;
   }
 
   private finishDrawing(e: PointerEvent): void {
@@ -1147,7 +1267,7 @@ export class InputManager {
         && gestureMode === 'draw'
         && toolState.scribbleToErase
         && (strokeContext.tool === 'pen' || strokeContext.tool === 'pencil')
-        && analyzeScribble(this.inkRawPoints).isScribble
+        && analyzeScribble(this.inkRawPoints, this.inkScreenScale).isScribble
       ) {
         const targets = findScribbleTargets(
           this.inkRawPoints,
@@ -1166,7 +1286,7 @@ export class InputManager {
         && gestureMode === 'draw'
         && toolState.circleToSelect
         && (strokeContext.tool === 'pen' || strokeContext.tool === 'pencil')
-        && analyzeCircleGesture(this.inkRawPoints).isCircle
+        && analyzeCircleGesture(this.inkRawPoints, this.inkScreenScale).isCircle
         && this.selectionEngine.selectWithinLoop(this.inkRawPoints) > 0
       ) {
         this.currentPoints = [];
@@ -1175,14 +1295,14 @@ export class InputManager {
       }
 
       const recognizedLine = !strokeContext.recognitionEligible && gestureMode === 'draw' && toolState.straightLineRecognition
-        ? recognizeStraightLine(this.inkRawPoints, toolState.snapRecognizedLines)
+        ? recognizeStraightLine(this.inkRawPoints, toolState.snapRecognizedLines, this.inkScreenScale)
         : null;
       const recognizedShape = !recognizedLine?.isLine
         && gestureMode === 'draw'
         && !strokeContext.recognitionEligible
         && toolState.roughShapeRecognition
         && (strokeContext.tool === 'pen' || strokeContext.tool === 'pencil')
-        ? recognizeRoughShape(this.inkRawPoints, toolState.snapRecognizedShapes)
+        ? recognizeRoughShape(this.inkRawPoints, toolState.snapRecognizedShapes, this.inkScreenScale)
         : null;
 
       if (recognizedShape?.isShape && recognizedShape.shapeType) {

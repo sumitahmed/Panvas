@@ -1154,7 +1154,27 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
             <LassoSelect size={14} className="text-panvas-accent-blue" aria-hidden="true" />
             Lasso Select
           </span>
-          <span>Click an object, or drag a freeform boundary</span>
+          <div className="flex items-center gap-0.5 rounded-md bg-panvas-bg-secondary p-0.5" role="group" aria-label="Selection shape">
+            <button
+              type="button"
+              onClick={() => engine.tools.setSelectionShape('freeform')}
+              aria-pressed={(toolState.selectionShape ?? 'freeform') === 'freeform'}
+              title="Freeform lasso (hold Shift while dragging a rectangle for a square)"
+              className={`flex h-6 items-center gap-1 rounded px-2 text-2xs font-medium transition-colors focus-ring ${(toolState.selectionShape ?? 'freeform') === 'freeform' ? 'bg-panvas-bg-primary text-panvas-text-primary shadow-sm' : 'text-panvas-text-tertiary hover:text-panvas-text-secondary'}`}
+            >
+              <LassoSelect size={12} aria-hidden="true" /> Freeform
+            </button>
+            <button
+              type="button"
+              onClick={() => engine.tools.setSelectionShape('rectangle')}
+              aria-pressed={toolState.selectionShape === 'rectangle'}
+              title="Rectangular selection — hold Shift for a square"
+              className={`flex h-6 items-center gap-1 rounded px-2 text-2xs font-medium transition-colors focus-ring ${toolState.selectionShape === 'rectangle' ? 'bg-panvas-bg-primary text-panvas-text-primary shadow-sm' : 'text-panvas-text-tertiary hover:text-panvas-text-secondary'}`}
+            >
+              <Square size={12} aria-hidden="true" /> Rectangle
+            </button>
+          </div>
+          <span>{toolState.selectionShape === 'rectangle' ? 'Drag a rectangle around content' : 'Click an object, or drag a freeform boundary'}</span>
         </div>
       )}
 
@@ -1385,7 +1405,7 @@ function TextFormattingStrip({ editor, engine, enabled }: { editor: Editor | nul
   // Mounting it on editor focus moves the paper under the pointer mid-selection.
   if (!enabled) return null;
   const canFormat = Boolean(resolvedEditor?.isInitialized && resolvedEditor.isEditable && resolvedEditor.view.dom.isConnected);
-  const active = (mark: string) => canFormat && Boolean(resolvedEditor?.isActive(mark));
+  const active = (mark: string | { textAlign: string }) => canFormat && Boolean(resolvedEditor?.isActive(mark as any));
   const restoreFocus = () => { if (resolvedEditor && !resolvedEditor.isDestroyed && resolvedEditor.isEditable) resolvedEditor.view.focus(); };
   const open = (menu: 'aa' | 'textStyle' | 'highlight') => {
     if (menu !== 'highlight' && (!canFormat || !resolvedEditor)) return;
@@ -1416,6 +1436,12 @@ function TextFormattingStrip({ editor, engine, enabled }: { editor: Editor | nul
     <ToolButton disabled={!canFormat} icon={<Underline size={15} />} active={active('underline')} onClick={() => apply(c => c.toggleUnderline())} tooltip="Underline (Ctrl+U)" />
     <ToolButton disabled={!canFormat} icon={<Strikethrough size={15} />} active={active('strike')} onClick={() => apply(c => c.toggleStrike())} tooltip="Strikethrough" />
     <ToolButton disabled={!canFormat} icon={<Link2 size={15} />} active={active('link')} onClick={() => { if (canFormat && resolvedEditor) requestDocumentationLink(resolvedEditor); }} tooltip="Edit link (Ctrl+K)" />
+    <div aria-hidden="true" className="mx-0.5 h-6 w-px bg-panvas-border-subtle" />
+    <ToolButton disabled={!canFormat} icon={<AlignLeft size={15} />} active={active({ textAlign: 'left' })} onClick={() => apply(c => c.setTextAlign('left'))} tooltip="Align left" />
+    <ToolButton disabled={!canFormat} icon={<AlignCenter size={15} />} active={active({ textAlign: 'center' })} onClick={() => apply(c => c.setTextAlign('center'))} tooltip="Align center" />
+    <ToolButton disabled={!canFormat} icon={<AlignRight size={15} />} active={active({ textAlign: 'right' })} onClick={() => apply(c => c.setTextAlign('right'))} tooltip="Align right" />
+    <ToolButton disabled={!canFormat} icon={<AlignJustify size={15} />} active={active({ textAlign: 'justify' })} onClick={() => apply(c => c.setTextAlign('justify'))} tooltip="Justify" />
+    <div aria-hidden="true" className="mx-0.5 h-6 w-px bg-panvas-border-subtle" />
     <button disabled={!canFormat} ref={textColorRef} type="button" aria-label="Text color" title={formattingColorIsMixed(resolvedEditor, 'textStyle') ? 'Text color (mixed)' : 'Text color'} aria-haspopup="menu" aria-expanded={openMenu === 'textStyle'} className={colorButton} onMouseDown={event => event.preventDefault()} onClick={() => open('textStyle')}>
       <Type size={15} /><span aria-hidden="true" className="h-0.5 w-4 rounded" style={{ backgroundColor: formattingColorValue(textColor, '#20242a') }} />
     </button>

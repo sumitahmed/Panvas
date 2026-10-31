@@ -2,7 +2,7 @@
   "name": "panvas",
   "private": true,
   "license": "MIT",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "Panvas - A local-first visual workspace for notes, handwriting, PDFs and technical documents",
   "main": "dist-electron/main.js",
   "type": "module",

@@ -28,7 +28,10 @@ export function documentExtent(properties: PagePropertySet, bodyBottom: number, 
   const { height } = resolveBasePageDimensions(properties);
   const notes = resolvePageNoteSpace(properties);
   const bottom = Math.max(bodyBottom + documentInsets(properties), annotationBottom + documentInsets(properties));
-  if (properties.pageSize === 'Infinite') return Math.max(height, Math.ceil((bottom + 384) / 256) * 256);
+  // Trailing blank space beyond the latest content is about one quarter of the
+  // base page height (a quarter A4 sheet in page units) — room to keep working
+  // without several screens of empty page, derived from real page dimensions.
+  if (properties.pageSize === 'Infinite') return Math.max(height, Math.ceil((bottom + height / 4) / 256) * 256);
   const stride = documentSheetStride(properties);
   const surfaceBottom = notes.top + Math.max(bodyBottom + documentInsets(properties) + notes.bottom, annotationBottom + documentInsets(properties));
   const sheets = Math.max(1, Math.ceil((surfaceBottom + DOCUMENT_SHEET_GAP) / stride));

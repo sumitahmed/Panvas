@@ -32,7 +32,7 @@ export class InkSamples {
   }
 
   consume(event: InkDispatch) {
-    const result = { added: 0, rebuild: false, coalesced: 0, duplicates: 0, stationaryUp: 0, rejectedOwner: 0, invalid: 0, raw: [] as InkSample[] };
+    const result = { added: 0, rebuild: false, coalesced: 0, duplicates: 0, stationaryUp: 0, rejectedOwner: 0, invalid: 0, insertedAt: Infinity, raw: [] as InkSample[] };
     if (!this.owns(event)) { result.rejectedOwner++; return result; }
     const history = event.getCoalescedEvents?.() ?? [];
     result.coalesced = history.length;
@@ -65,6 +65,7 @@ export class InkSamples {
         }
         this.samples.splice(low, 0, sample);
         result.rebuild = true;
+        result.insertedAt = Math.min(result.insertedAt, low);
       }
       result.added++;
     }

@@ -17,6 +17,7 @@ import { LayerManager } from './LayerManager.ts';
 import { generateId } from '../../../lib/utils/id.ts';
 import { isPointInsideLoop } from './circleSelectGesture.ts';
 import { applyGroupedTranslation, reorderQueueWithinLayers, type MixedPlacementObject, type ZOrderAction } from './mixedPlacement.ts';
+import { buildLineStyleGeometry } from './lineStyleGeometry.ts';
 // Keep this engine import relative: the focused Node interaction suite runs
 // without Vite's `@` alias resolver.
 import { createHandwritingConversionCommand } from '../../../services/recognition/conversion.ts';
@@ -24,6 +25,40 @@ import { getEligibleSelectedHandwritingStrokes } from '../../../services/recogni
 import { validateElementSnapshot } from '../../../services/elements/LocalElementRepository.ts';
 
 type ResizeHandle = 'tl' | 'tc' | 'tr' | 'ml' | 'mr' | 'bl' | 'bc' | 'br' | 'rotate' | null;
+
+// The dashed selection frame is the logical box expanded by this many page
+// units. Handle rendering and handle hit-testing MUST derive from the same
+// frame, or the visible handle and its grab area drift apart.
+const SELECTION_FRAME_EXPANSION = 4;
+
+/** The dashed selection frame drawn around an element's logical box. */
+function selectionFrameFor(box: BoundingBox): BoundingBox {
+  return {
+    x: box.x - SELECTION_FRAME_EXPANSION,
+    y: box.y - SELECTION_FRAME_EXPANSION,
+    width: box.width + SELECTION_FRAME_EXPANSION * 2,
+    height: box.height + SELECTION_FRAME_EXPANSION * 2,
+  };
+}
+
+/** Exact handle centers on the selection frame — shared by render and hit-test. */
+function handleAnchorsFor(box: BoundingBox): { handle: Exclude<ResizeHandle, null>; x: number; y: number }[] {
+  const frame = selectionFrameFor(box);
+  const midX = frame.x + frame.width / 2;
+  const midY = frame.y + frame.height / 2;
+  const right = frame.x + frame.width;
+  const bottom = frame.y + frame.height;
+  return [
+    { handle: 'tl', x: frame.x, y: frame.y },
+    { handle: 'tc', x: midX, y: frame.y },
+    { handle: 'tr', x: right, y: frame.y },
+    { handle: 'ml', x: frame.x, y: midY },
+    { handle: 'mr', x: right, y: midY },
+    { handle: 'bl', x: frame.x, y: bottom },
+    { handle: 'bc', x: midX, y: bottom },
+    { handle: 'br', x: right, y: bottom },
+  ];
+}
 type DragTransform = {
   mode: string;
   dx: number;
@@ -71,6 +106,11 @@ export class SelectionEngine {
 
   // Drag state
   private isDragging = false;
+  /** The actual freeform region the user drew, kept so the completed selection
+   *  shows the real boundary instead of only the rectangular transform frame.
+   *  Ephemeral: cleared when the selection changes or a transform begins (the
+   *  region no longer represents moved/resized content). */
+  private selectionOutline: StrokePoint[] | null = null;
   private dragMode: 'move' | Exclude<ResizeHandle, null> = 'move';
   private dragStartX = 0;
   private dragStartY = 0;
@@ -262,8 +302,12 @@ export class SelectionEngine {
   clearSelection(repaint = true): void {
     const damage = (repaint && this.selectedElements.length > 0) ? this.getSelectionDamage() : null;
     this.drawingEngine.endSelectionDrag?.();
+    for (const el of this.selectedElements) {
+      if (el.type === 'image') this.imageManager.commitImageOverlay?.(el.id);
+    }
     this.selectedIds.clear();
     this.selectedElements = [];
+    this.selectionOutline = null;
     this.invalidateCollectiveBoundingBox();
     this.textManager.setActiveTextId?.(undefined);
     this.notifySelectionChange();
@@ -292,6 +336,22 @@ export class SelectionEngine {
     if (this.selectedElements.length === 0) return null;
     const scale = Math.max(0.05, this.getViewportScale());
     const padding = 40 / scale;
+
+    // The drawn freeform region can extend past every selected box; repaint it
+    // too (including its live move-preview offset).
+    let outlineDamage: EraseBounds | null = null;
+    if (this.selectionOutline && this.selectionOutline.length >= 3) {
+      const previewDx = this.isDragging && this.currentDragTransform?.mode === 'move' ? this.currentDragTransform.dx : 0;
+      const previewDy = this.isDragging && this.currentDragTransform?.mode === 'move' ? this.currentDragTransform.dy : 0;
+      let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+      for (const point of this.selectionOutline) {
+        left = Math.min(left, point.x + previewDx);
+        top = Math.min(top, point.y + previewDy);
+        right = Math.max(right, point.x + previewDx);
+        bottom = Math.max(bottom, point.y + previewDy);
+      }
+      outlineDamage = { left: left - padding, top: top - padding, right: right + padding, bottom: bottom + padding };
+    }
 
     if (this.selectedElements.length > 1) {
       const group = this.getCollectiveBoundingBox();
@@ -359,7 +419,7 @@ export class SelectionEngine {
         bottom = Math.max(bottom, py);
       }
     }
-    return Number.isFinite(left) ? { left, top, right, bottom } : null;
+    return Number.isFinite(left) ? this.unionDamage({ left, top, right, bottom }, outlineDamage) : outlineDamage;
   }
 
   private unionDamage(a: EraseBounds | null, b: EraseBounds | null): EraseBounds | null {
@@ -387,6 +447,7 @@ export class SelectionEngine {
       prevDamage = this.getSelectionDamage();
       this.clearSelection(false);
     }
+    this.selectionOutline = null;
     if (!this.selectedIds.has(id)) {
       this.selectedIds.add(id);
       this.selectedElements.push({ type, id });
@@ -887,16 +948,7 @@ export class SelectionEngine {
           return { id: 'collective', handle: 'rotate' };
         }
 
-        const handles: { handle: Exclude<ResizeHandle, null>; x: number; y: number }[] = [
-          { handle: 'tl', x: box.x, y: box.y },
-          { handle: 'tc', x: midX, y: box.y },
-          { handle: 'tr', x: box.x + box.width, y: box.y },
-          { handle: 'ml', x: box.x, y: midY },
-          { handle: 'mr', x: box.x + box.width, y: midY },
-          { handle: 'bl', x: box.x, y: box.y + box.height },
-          { handle: 'bc', x: midX, y: box.y + box.height },
-          { handle: 'br', x: box.x + box.width, y: box.y + box.height },
-        ];
+        const handles = handleAnchorsFor(box);
 
         for (const h of handles) {
           if (x >= h.x - h2 && x <= h.x + h2 && y >= h.y - h2 && y <= h.y + h2) {
@@ -910,7 +962,7 @@ export class SelectionEngine {
       for (let i = this.selectedElements.length - 1; i >= 0; i--) {
         const el = this.selectedElements[i];
         if (el.type === 'stroke') continue;
-        const box = this.getBoundingBox(el);
+        const box = this.getSelectionBox(el);
         if (!box) continue;
 
         if (
@@ -940,16 +992,7 @@ export class SelectionEngine {
           return { id: el.id, handle: 'rotate' };
         }
 
-        const handles: { handle: Exclude<ResizeHandle, null>; x: number; y: number }[] = [
-          { handle: 'tl', x: box.x, y: box.y },
-          { handle: 'tc', x: midX, y: box.y },
-          { handle: 'tr', x: box.x + box.width, y: box.y },
-          { handle: 'ml', x: box.x, y: midY },
-          { handle: 'mr', x: box.x + box.width, y: midY },
-          { handle: 'bl', x: box.x, y: box.y + box.height },
-          { handle: 'bc', x: midX, y: box.y + box.height },
-          { handle: 'br', x: box.x + box.width, y: box.y + box.height },
-        ];
+        const handles = handleAnchorsFor(box);
 
         for (const h of handles) {
           const pt = transform(h.x, h.y);
@@ -965,7 +1008,7 @@ export class SelectionEngine {
     // Check backwards (top-most elements first) for single element
     for (let i = this.selectedElements.length - 1; i >= 0; i--) {
       const el = this.selectedElements[i];
-      const box = this.getBoundingBox(el);
+      const box = this.getSelectionBox(el);
       if (!box) continue;
 
       if (
@@ -995,16 +1038,7 @@ export class SelectionEngine {
         return { id: el.id, handle: 'rotate' };
       }
 
-      const handles: { handle: Exclude<ResizeHandle, null>; x: number; y: number }[] = [
-        { handle: 'tl', x: box.x, y: box.y },
-        { handle: 'tc', x: midX, y: box.y },
-        { handle: 'tr', x: box.x + box.width, y: box.y },
-        { handle: 'ml', x: box.x, y: midY },
-        { handle: 'mr', x: box.x + box.width, y: midY },
-        { handle: 'bl', x: box.x, y: box.y + box.height },
-        { handle: 'bc', x: midX, y: box.y + box.height },
-        { handle: 'br', x: box.x + box.width, y: box.y + box.height },
-      ];
+      const handles = handleAnchorsFor(box);
 
       for (const h of handles) {
         const pt = transform(h.x, h.y);
@@ -1257,7 +1291,29 @@ export class SelectionEngine {
   }
 
   /** Replace the current selection with editable objects whose centers are enclosed. */
-  selectWithinLoop(points: StrokePoint[], repaint = true): number {
+  /** The completed freeform selection boundary, when the selection came from a
+   *  freeform lasso drag; null for rectangle, gesture, and click selections. */
+  getSelectionOutline(): StrokePoint[] | null {
+    return this.selectionOutline;
+  }
+
+  /** Live move-preview delta used by the selection renderer to translate the
+   *  freeform outline with the content during a drag. */
+  getMovePreviewDelta(): { dx: number; dy: number } | null {
+    return this.isDragging && this.currentDragTransform?.mode === 'move'
+      ? { dx: this.currentDragTransform.dx, dy: this.currentDragTransform.dy }
+      : null;
+  }
+
+  /** True when the pointer lands inside the active freeform region: the drawn
+   *  selection itself starts a move, not just its bounding rectangle. */
+  shouldDragFreeformRegion(x: number, y: number): boolean {
+    if (this.selectedElements.length === 0 || !this.selectionOutline || this.selectionOutline.length < 3) return false;
+    if (this.usesStickyDomControls()) return false;
+    return isPointInsideLoop(x, y, this.selectionOutline);
+  }
+
+  selectWithinLoop(points: StrokePoint[], repaint = true, outline: StrokePoint[] | null = null): number {
     if (points.length < 3) return 0;
     let loopMinX = Infinity, loopMaxX = -Infinity, loopMinY = Infinity, loopMaxY = -Infinity;
     for (const p of points) {
@@ -1300,6 +1356,7 @@ export class SelectionEngine {
     if (enclosed.length === 0) return 0;
     this.selectedElements = enclosed;
     this.selectedIds = new Set(enclosed.map(element => element.id));
+    this.selectionOutline = outline && outline.length >= 3 ? outline : null;
     this.notifySelectionChange();
     if (repaint) this.drawingEngine.redraw();
     return enclosed.length;
@@ -1450,6 +1507,10 @@ export class SelectionEngine {
 
     const handleHit = this.getHandleAt(x, y);
     this.dragMode = handleHit ? handleHit.handle : 'move';
+    // A move keeps the drawn region (it translates with the content during the
+    // preview and is baked at commit). Resize/rotate change the geometry the
+    // polygon described, so the region is invalidated for those transforms.
+    if (this.dragMode !== 'move') this.selectionOutline = null;
     if (this.dragMode !== 'move') {
       if (this.selectedElements.length === 1) {
         this.originalBox = this.getBoundingBox(this.selectedElements[0]);
@@ -1517,8 +1578,16 @@ export class SelectionEngine {
         if (object) {
           applyGroupedTranslation(object, orig, dx, dy);
         }
+        if (el.type === 'image') {
+          // Keep the DOM image overlay locked to the moving raster preview so
+          // no stale copy of the image remains at its previous position.
+          this.imageManager.previewImageOverlay?.(el.id, dx, dy);
+        }
       }
     } else if (this.originalBox) {
+      for (const el of this.selectedElements) {
+        if (el.type === 'image') this.imageManager.hideImageOverlay?.(el.id);
+      }
       const dx = x - this.dragStartX;
       const dy = y - this.dragStartY;
       const box = this.originalBox;
@@ -1573,20 +1642,24 @@ export class SelectionEngine {
       let transX = box.x;
       let transY = box.y;
 
+      // Corner handles preserve the original aspect ratio; the opposite corner
+      // (already the transform origin below) stays fixed. Side handles keep
+      // their free single-axis resize.
+      const cornerResize = this.dragMode === 'br' || this.dragMode === 'bl' || this.dragMode === 'tr' || this.dragMode === 'tl';
       if (this.dragMode === 'br') {
         scaleX = (box.width + dx) / box.width;
-        scaleY = (box.height + dy) / box.height;
+        scaleY = cornerResize ? scaleX : (box.height + dy) / box.height;
       } else if (this.dragMode === 'bl') {
         scaleX = (box.width - dx) / box.width;
-        scaleY = (box.height + dy) / box.height;
+        scaleY = cornerResize ? scaleX : (box.height + dy) / box.height;
         transX = box.x + box.width;
       } else if (this.dragMode === 'tr') {
         scaleX = (box.width + dx) / box.width;
-        scaleY = (box.height - dy) / box.height;
+        scaleY = cornerResize ? scaleX : (box.height - dy) / box.height;
         transY = box.y + box.height;
       } else if (this.dragMode === 'tl') {
         scaleX = (box.width - dx) / box.width;
-        scaleY = (box.height - dy) / box.height;
+        scaleY = cornerResize ? scaleX : (box.height - dy) / box.height;
         transX = box.x + box.width;
         transY = box.y + box.height;
       } else if (this.dragMode === 'mr') {
@@ -1634,6 +1707,15 @@ export class SelectionEngine {
   }
 
   finishDrag(x: number, y: number): boolean {
+    for (const el of this.selectedElements) {
+      if (el.type === 'image') this.imageManager.commitImageOverlay?.(el.id);
+    }
+    // Bake the committed move into the drawn region so the polygon stays
+    // aligned with the content it selected. Resize/rotate already cleared it.
+    if (this.dragMode === 'move' && this.selectionOutline) {
+      const dx = x - this.dragStartX, dy = y - this.dragStartY;
+      this.selectionOutline = this.selectionOutline.map(point => ({ ...point, x: point.x + dx, y: point.y + dy }));
+    }
     if (!this.isDragging) return false;
     const pendingSelectDamage = this.pendingSelectRedraw;
     this.cancelPendingSelectionRedraw();
@@ -1890,28 +1972,35 @@ export class SelectionEngine {
     ctx.lineWidth = 1.5 / scale;
     ctx.setLineDash([5 / scale, 5 / scale]);
 
+    // The actual region the user drew with the freeform lasso. It is the
+    // PRIMARY visible boundary of a freeform selection: it translates with the
+    // live move preview, and the ordinary rectangular frame is suppressed so
+    // the two never compete. Handles and the rotation stem remain usable.
+    const freeformOutline = this.selectionOutline && this.selectionOutline.length >= 3 ? this.selectionOutline : null;
+    const previewDx = freeformOutline && this.isDragging && this.currentDragTransform?.mode === 'move' ? this.currentDragTransform.dx : 0;
+    const previewDy = freeformOutline && this.isDragging && this.currentDragTransform?.mode === 'move' ? this.currentDragTransform.dy : 0;
+    if (freeformOutline) {
+      ctx.beginPath();
+      ctx.moveTo(freeformOutline[0].x + previewDx, freeformOutline[0].y + previewDy);
+      for (let i = 1; i < freeformOutline.length; i++) ctx.lineTo(freeformOutline[i].x + previewDx, freeformOutline[i].y + previewDy);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.setLineDash([5 / scale, 5 / scale]);
+    }
+
     if (this.selectedElements.length > 1 && this.selectedElements.every(el => el.type === 'stroke')) {
       const box = this.getCollectiveBoundingBox();
       if (box) {
-        ctx.strokeRect(box.x - 4, box.y - 4, box.width + 8, box.height + 8);
+        const frame = selectionFrameFor(box);
+        if (!freeformOutline) ctx.strokeRect(frame.x, frame.y, frame.width, frame.height);
 
         ctx.fillStyle = '#ffffff';
         ctx.setLineDash([]);
         const handleSize = 8 / scale;
         const h2 = handleSize / 2;
         const midX = box.x + box.width / 2;
-        const midY = box.y + box.height / 2;
 
-        const handles = [
-          { x: box.x - 4, y: box.y - 4 },
-          { x: midX, y: box.y - 4 },
-          { x: box.x + box.width + 4, y: box.y - 4 },
-          { x: box.x - 4, y: midY },
-          { x: box.x + box.width + 4, y: midY },
-          { x: box.x - 4, y: box.y + box.height + 4 },
-          { x: midX, y: box.y + box.height + 4 },
-          { x: box.x + box.width + 4, y: box.y + box.height + 4 }
-        ];
+        const handles = handleAnchorsFor(box);
 
         for (const c of handles) {
           ctx.strokeRect(c.x - h2, c.y - h2, handleSize, handleSize);
@@ -1919,7 +2008,7 @@ export class SelectionEngine {
         }
 
         ctx.beginPath();
-        ctx.moveTo(midX, box.y - 4);
+        ctx.moveTo(midX, frame.y);
         ctx.lineTo(midX, box.y - 32 / scale);
         ctx.stroke();
 
@@ -1930,7 +2019,7 @@ export class SelectionEngine {
       }
     } else {
       for (const el of this.selectedElements) {
-        const box = this.getBoundingBox(el);
+        const box = this.getSelectionBox(el);
         if (box) {
           const rotation = this.getObjectRotation(el) * Math.PI / 180;
           const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
@@ -1938,26 +2027,17 @@ export class SelectionEngine {
           ctx.translate(center.x, center.y);
           ctx.rotate(rotation);
           ctx.translate(-center.x, -center.y);
-          ctx.strokeRect(box.x - 4, box.y - 4, box.width + 8, box.height + 8);
+          const frame = selectionFrameFor(box);
+          if (!freeformOutline) ctx.strokeRect(frame.x, frame.y, frame.width, frame.height);
 
-          // Draw 8 resize handles
+          // Draw 8 resize handles on the same frame the hit-test uses
           ctx.fillStyle = '#ffffff';
           ctx.setLineDash([]);
           const handleSize = 8 / scale;
           const h2 = handleSize / 2;
           const midX = box.x + box.width / 2;
-          const midY = box.y + box.height / 2;
 
-          const handles = [
-            { x: box.x - 4, y: box.y - 4 },
-            { x: midX, y: box.y - 4 },
-            { x: box.x + box.width + 4, y: box.y - 4 },
-            { x: box.x - 4, y: midY },
-            { x: box.x + box.width + 4, y: midY },
-            { x: box.x - 4, y: box.y + box.height + 4 },
-            { x: midX, y: box.y + box.height + 4 },
-            { x: box.x + box.width + 4, y: box.y + box.height + 4 }
-          ];
+          const handles = handleAnchorsFor(box);
 
           for (const c of handles) {
             ctx.strokeRect(c.x - h2, c.y - h2, handleSize, handleSize);
@@ -1966,7 +2046,7 @@ export class SelectionEngine {
 
           // Draw rotation handle (circle above top-center)
           ctx.beginPath();
-          ctx.moveTo(midX, box.y - 4);
+          ctx.moveTo(midX, frame.y);
           ctx.lineTo(midX, box.y - 32 / scale);
           ctx.stroke();
 
@@ -2073,7 +2153,12 @@ export class SelectionEngine {
     const widthDelta = affectsRight ? dx : affectsLeft ? -dx : 0;
     const heightDelta = affectsBottom ? dy : affectsTop ? -dy : 0;
     const width = Math.max(minimum, original.width + widthDelta);
-    const height = Math.max(minimum, (original.height ?? 40) + heightDelta);
+    // Corner handles preserve the original aspect ratio (the half-shift center
+    // update below already anchors the opposite corner); side handles stay free.
+    const cornerResize = (affectsLeft || affectsRight) && (affectsTop || affectsBottom);
+    const height = cornerResize && original.width > 0
+      ? Math.max(minimum, width * ((original.height ?? 40) / original.width))
+      : Math.max(minimum, (original.height ?? 40) + heightDelta);
     const appliedWidthDelta = width - original.width;
     const appliedHeightDelta = height - (original.height ?? 40);
     const localShiftX = affectsRight ? appliedWidthDelta / 2 : affectsLeft ? -appliedWidthDelta / 2 : 0;
@@ -2084,6 +2169,24 @@ export class SelectionEngine {
     object.y = centerY - height / 2;
     object.width = width;
     object.height = height;
+  }
+
+  /**
+   * The box the selection UI should frame and anchor handles on. Line and arrow
+   * shapes use their visual ink bounds (stroke width, endpoint styles, arrow
+   * heads) so horizontal/vertical lines never produce a degenerate zero-height
+   * or zero-width handle strip. Resize math keeps operating on the logical
+   * endpoint rectangle via getBoundingBox.
+   */
+  private getSelectionBox(el: SelectedElement): BoundingBox | null {
+    if (el.type === 'shape') {
+      const shape = (typeof this.shapeManager.getShape === 'function' ? this.shapeManager.getShape(el.id) : undefined) ?? this.shapeManager.getShapes().find(s => s.id === el.id);
+      if (shape && (shape.shapeType === 'line' || shape.shapeType === 'arrow')) {
+        const bounds = buildLineStyleGeometry(shape).bounds;
+        return { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
+      }
+    }
+    return this.getBoundingBox(el);
   }
 
   private getBoundingBox(el: SelectedElement): BoundingBox | null {

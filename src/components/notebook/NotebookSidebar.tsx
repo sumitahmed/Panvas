@@ -142,11 +142,15 @@ export function NotebookSidebar() {
     if (draggedIndex === null || draggedIndex === index) return;
 
     setDragTargetIndex(index);
-    
-    // Determine if hovering over top or bottom half
+    setDragTargetPosition(thumbnailDropHalf(e));
+  };
+
+  // Drop position comes from the event's own geometry: a quick flick can
+  // release before React commits the dragover state, and a stale value would
+  // shift the insert point by one slot.
+  const thumbnailDropHalf = (e: React.DragEvent): 'top' | 'bottom' => {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const y = e.clientY - rect.top;
-    setDragTargetPosition(y < rect.height / 2 ? 'top' : 'bottom');
+    return e.clientY - rect.top < rect.height / 2 ? 'top' : 'bottom';
   };
 
   const handleDragLeave = (e: React.DragEvent) => {
@@ -172,23 +176,25 @@ export function NotebookSidebar() {
       return;
     }
 
+    const targetPosition = thumbnailDropHalf(e);
+
     const newPages = [...currentPages];
     const [draggedItem] = newPages.splice(draggedIndex, 1);
-    
+
     // Calculate new index
-    let insertIndex = dragTargetPosition === 'top' ? index : index + 1;
+    let insertIndex = targetPosition === 'top' ? index : index + 1;
     // Adjust if dragging down since we removed an item before it
-    if (draggedIndex < index && dragTargetPosition === 'top') {
+    if (draggedIndex < index && targetPosition === 'top') {
       insertIndex -= 1;
     }
 
     newPages.splice(insertIndex, 0, draggedItem);
-    
+
     // Perform reorder
     if (reorderPages) {
       await reorderPages(newPages.map(p => p.id));
     }
-    
+
     resetDragState(e);
   };
 

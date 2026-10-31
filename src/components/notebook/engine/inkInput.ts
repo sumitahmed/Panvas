@@ -10,6 +10,14 @@ export function mapPointerPressure(pointerType: string, pressure: number, enable
  * Physical samples are retained by InputManager; only the visible centerline is
  * filtered. Parameters use CSS pixels and seconds, independent of page zoom/DPR.
  * Pressure/timestamps pass through unchanged. No prediction or lift-time snap. */
+export interface InkInputFilterCheckpoint {
+  previous: StrokePoint | null;
+  x: number;
+  y: number;
+  velocityX: number;
+  velocityY: number;
+}
+
 export class InkInputFilter {
   private previous: StrokePoint | null = null;
   private x = 0;
@@ -20,6 +28,19 @@ export class InkInputFilter {
   reset(): void {
     this.previous = null;
     this.velocityX = this.velocityY = 0;
+  }
+
+  /** Snapshot the filter state so an incremental refilter can resume here. */
+  checkpoint(): InkInputFilterCheckpoint {
+    return { previous: this.previous ? { ...this.previous } : null, x: this.x, y: this.y, velocityX: this.velocityX, velocityY: this.velocityY };
+  }
+
+  restore(state: InkInputFilterCheckpoint): void {
+    this.previous = state.previous ? { ...state.previous } : null;
+    this.x = state.x;
+    this.y = state.y;
+    this.velocityX = state.velocityX;
+    this.velocityY = state.velocityY;
   }
 
   push(raw: StrokePoint, stabilization: number, screenScale = 1): StrokePoint {

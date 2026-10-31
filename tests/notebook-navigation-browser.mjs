@@ -263,13 +263,28 @@ try {
   page.on('pageerror', error => errors.push(error.message));
   await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/notebook-navigation.html`);
   await page.waitForFunction(() => window.navigationReady?.() && window.navigationEngine?.()?.drawing.getCanvasElement());
-  for (const kind of ['hand', 'middle', 'pen']) await runCase(page, `desktop ${kind} pan`, async () => {
-    await prepare(page, 0, kind === 'middle' ? 'select' : 'hand');
+  for (const kind of ['hand', 'pen']) await runCase(page, `desktop ${kind} pan`, async () => {
+    await prepare(page, 0, 'hand');
     const pan = await driver(page, kind);
     await pan.moveTo(1);
     await assertHeld(page, 0, 1);
     await pan.end();
     await assertReleased(page, 1);
+  });
+  // Middle-click panning is deliberately delegated to Chromium's native
+  // autoscroll (see the viewport pan effect in NotebookRenderer), so the engine
+  // must NOT engage its own navigation gesture for it. Native autoscroll does
+  // not exist in headless Chromium, so the testable contract here is the
+  // non-hijack guarantee: the middle press reaches the scroll container
+  // unclaimed and engine navigation stays off.
+  await runCase(page, 'desktop middle press is not hijacked', async () => {
+    await prepare(page, 0, 'select');
+    const pan = await driver(page, 'middle');
+    await pan.moveTo(1);
+    await pan.end();
+    const state = await snapshot(page);
+    assert.equal(state.navigationActive, false, 'middle-click must not engage engine panning');
+    assert.equal(state.counts.mount, 0, 'middle-click must not drive page activation');
   });
   await context.close();
   assert.deepEqual(errors, []);

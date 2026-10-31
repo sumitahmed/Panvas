@@ -153,9 +153,18 @@ function geometryFor(bounds: Bounds, snapEqualSides: boolean): Pick<RoughShapeRe
  * Recognize only large, deliberate, single-turn closed loops. Ellipses must stay close
  * to an ellipse fitted to their bounds; rectangles must track all four edges and visit
  * all four corners. This intentionally leaves small, open, self-crossing, and irregular
- * handwriting strokes untouched.
+ * handwriting strokes untouched. `screenScale` converts page-space samples to CSS
+ * pixels so span thresholds stay zoom-invariant; returned geometry is page-space.
  */
-export function recognizeRoughShape(points: StrokePoint[], snapEqualSides: boolean): RoughShapeRecognition {
+export function recognizeRoughShape(points: StrokePoint[], snapEqualSides: boolean, screenScale = 1): RoughShapeRecognition {
+  const scale = Number.isFinite(screenScale) && screenScale > 0 ? screenScale : 1;
+  const scaled = scale === 1 ? points : points.map(point => ({ ...point, x: point.x * scale, y: point.y * scale }));
+  const result = recognizeRoughShapeInScreenSpace(scaled, snapEqualSides);
+  if (scale === 1 || !result.isShape) return result;
+  return { ...result, x: result.x / scale, y: result.y / scale, width: result.width / scale, height: result.height / scale };
+}
+
+function recognizeRoughShapeInScreenSpace(points: StrokePoint[], snapEqualSides: boolean): RoughShapeRecognition {
   if (points.length < MIN_POINT_COUNT || points.some(point => !Number.isFinite(point.x) || !Number.isFinite(point.y))) {
     return rejected();
   }

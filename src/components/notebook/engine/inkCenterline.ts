@@ -4,6 +4,15 @@ import type { StrokePoint } from './drawingTypes.ts';
  * Store the sampled curve in the existing page-space polyline representation so
  * wet/dry ink, erasing, selection, persistence and exports share identical points.
  * This does not reinterpret saved strokes or add a second input filter. */
+export interface InkCenterlineCheckpoint {
+  previous: StrokePoint | null;
+  directionX: number;
+  directionY: number;
+  tangentX: number;
+  tangentY: number;
+  previousLength: number;
+}
+
 export class InkCenterline {
   private previous: StrokePoint | null = null;
   private directionX = 0;
@@ -13,6 +22,21 @@ export class InkCenterline {
   private previousLength = 0;
 
   reset(): void { this.previous = null; this.previousLength = 0; }
+
+  /** Snapshot the interpolation state so an incremental refilter can resume here. */
+  checkpoint(): InkCenterlineCheckpoint {
+    return { previous: this.previous ? { ...this.previous } : null, directionX: this.directionX, directionY: this.directionY,
+      tangentX: this.tangentX, tangentY: this.tangentY, previousLength: this.previousLength };
+  }
+
+  restore(state: InkCenterlineCheckpoint): void {
+    this.previous = state.previous ? { ...state.previous } : null;
+    this.directionX = state.directionX;
+    this.directionY = state.directionY;
+    this.tangentX = state.tangentX;
+    this.tangentY = state.tangentY;
+    this.previousLength = state.previousLength;
+  }
 
   append(point: StrokePoint, output: StrokePoint[], screenScale = 1): void {
     const a = this.previous;

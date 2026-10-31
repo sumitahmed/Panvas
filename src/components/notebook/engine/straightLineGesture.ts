@@ -19,8 +19,21 @@ function rejected(points: StrokePoint[], length = 0, maxDeviation = 0, efficienc
 /**
  * Recognize deliberate straight ink using endpoint distance, path efficiency, and
  * perpendicular deviation. Optional snapping is limited to 0/45/90-degree increments.
+ * `screenScale` converts page-space samples to CSS pixels so the fixed thresholds
+ * describe the gesture the user actually drew, independent of page zoom.
  */
-export function recognizeStraightLine(points: StrokePoint[], snapToAngles: boolean): StraightLineRecognition {
+export function recognizeStraightLine(points: StrokePoint[], snapToAngles: boolean, screenScale = 1): StraightLineRecognition {
+  const scale = Number.isFinite(screenScale) && screenScale > 0 ? screenScale : 1;
+  const scaled = scale === 1 ? points : points.map(point => ({ ...point, x: point.x * scale, y: point.y * scale }));
+  const result = recognizeStraightLineInScreenSpace(scaled, snapToAngles);
+  if (scale === 1 || !result.isLine) return result;
+  return {
+    ...result,
+    points: result.points.map(point => ({ ...point, x: point.x / scale, y: point.y / scale })),
+  };
+}
+
+function recognizeStraightLineInScreenSpace(points: StrokePoint[], snapToAngles: boolean): StraightLineRecognition {
   if (points.length < 4) return rejected(points);
 
   const start = points[0];

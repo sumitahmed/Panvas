@@ -256,9 +256,27 @@ export class StylusCursorOverlayController {
   private isVisible = false;
   private isPenDown = false;
   private latestCoords = { x: -1000, y: -1000 };
+  // Pen input reaches 120–240 Hz through pointermove AND pointerrawupdate; a
+  // getBoundingClientRect per event forces layout between ink-pipeline DOM
+  // writes and makes the overlay stutter. Cache the container rect and refresh
+  // it at most once per frame.
+  private containerRect: DOMRect | null = null;
+  private containerRectAt = -Infinity;
 
   constructor(options: StylusCursorOverlayOptions) {
     this.options = options;
+  }
+
+  private isInsideContainer(clientX: number, clientY: number, forceRefresh = false): boolean {
+    const container = this.options.getContainer();
+    if (!container || typeof container.getBoundingClientRect !== 'function') return false;
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    if (forceRefresh || this.containerRect === null || now - this.containerRectAt >= 16) {
+      this.containerRect = container.getBoundingClientRect();
+      this.containerRectAt = now;
+    }
+    const rect = this.containerRect;
+    return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
   }
 
   private applyPosition(): void {
@@ -294,8 +312,7 @@ export class StylusCursorOverlayController {
     }
 
     this.latestCoords = { x: e.clientX, y: e.clientY };
-    const container = this.options.getContainer();
-    const inContainer = isPointInsideElement(container, e.clientX, e.clientY);
+    const inContainer = this.isInsideContainer(e.clientX, e.clientY);
 
     const targetEl = resolveEventTargetElement(e.target, e.clientX, e.clientY);
     const isOverUI = isInteractiveUIElement(targetEl);
@@ -327,7 +344,7 @@ export class StylusCursorOverlayController {
     }
 
     const container = this.options.getContainer();
-    const inContainer = isPointInsideElement(container, e.clientX, e.clientY);
+    const inContainer = this.isInsideContainer(e.clientX, e.clientY, true);
 
     if (inContainer) {
       this.isPenDown = true;
@@ -344,8 +361,7 @@ export class StylusCursorOverlayController {
     }
 
     this.isPenDown = false;
-    const container = this.options.getContainer();
-    const inContainer = isPointInsideElement(container, e.clientX, e.clientY);
+    const inContainer = this.isInsideContainer(e.clientX, e.clientY, true);
 
     const targetEl = resolveEventTargetElement(e.target, e.clientX, e.clientY);
     if (!inContainer || isInteractiveUIElement(targetEl)) {

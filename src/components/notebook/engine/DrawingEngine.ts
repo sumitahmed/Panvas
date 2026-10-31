@@ -121,6 +121,7 @@ export class DrawingEngine {
   private spareWetInkTimer: ReturnType<typeof setTimeout> | null = null;
   private liveFrame: number | null = null;
   private pendingInk: Stroke | null = null;
+  private pendingLiveRevisionFrom = Infinity;
   private lastLiveInk: Stroke | null = null;
   private liveTrace: HandwritingTrace | null = null;
   private frameQueuedAt = 0;
@@ -1812,10 +1813,11 @@ export class DrawingEngine {
 
   /** One presentation per frame; all accepted geometry remains in points. */
   renderLiveStroke(points: StrokePoint[], tool: DrawingToolId, color: string, thickness: number,
-    opacity: number, pattern: StrokePattern = 'solid', inkFamily?: InkFamily, _liveTip?: StrokePoint): void {
+    opacity: number, pattern: StrokePattern = 'solid', inkFamily?: InkFamily, _liveTip?: StrokePoint, revisedFrom = Infinity): void {
     if (!this.ctx || !this.canvas) return;
     this.pendingInk = { id: '__live__', type: 'stroke', points, tool, color, thickness, opacity,
       pattern, inkFamily, centerline: 'polyline', createdAt: 0 };
+    this.pendingLiveRevisionFrom = revisedFrom;
     this.lastLiveInk = this.pendingInk;
     const ctx = this.layerCanvases.get(this.layerManager.getActiveLayerId()) ?? this.ctx;
     const isFastWetInk = tool === 'pen' && pattern === 'solid' && Boolean(ctx.canvas.parentElement);
@@ -1849,6 +1851,8 @@ export class DrawingEngine {
     const stroke = this.pendingInk;
     if (!stroke || !this.ctx || !this.canvas) return;
     this.pendingInk = null;
+    const revisedFrom = this.pendingLiveRevisionFrom;
+    this.pendingLiveRevisionFrom = Infinity;
     const start = performance.now();
     const ctx = this.layerCanvases.get(this.layerManager.getActiveLayerId()) ?? this.ctx;
     const trace = this.liveTrace;
@@ -1869,7 +1873,7 @@ export class DrawingEngine {
           this.wetInk = new WetInkSurface(ctx, transform);
         }
       }
-      const work = this.wetInk.render(this.displayStroke(stroke));
+      const work = this.wetInk.render(this.displayStroke(stroke), revisedFrom);
       if (trace) {
         trace.counters.wetPrimitives = (trace.counters.wetPrimitives ?? 0) + work.primitives;
         trace.counters.wetDirtyPixels = (trace.counters.wetDirtyPixels ?? 0) + work.dirtyPixels;

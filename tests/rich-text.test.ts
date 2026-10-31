@@ -184,7 +184,7 @@ test('the contextual text strip and the Aa menu share one formatting surface', a
   const singleSourceCommands: Array<[string, number]> = [
     ['toggleBulletList', 1], ['toggleOrderedList', 1], ['toggleTaskList', 1],
     ['toggleBlockquote', 1], ['toggleCodeBlock', 1], ['toggleHeading', 3],
-    ['\\bsetFontFamily\\b', 1], ['\\bsetFontSize\\b', 1], ['\\bsetTextAlign\\b', 4],
+    ['\\bsetFontFamily\\b', 1], ['\\bsetFontSize\\b', 1], ['\\bsetTextAlign\\b', 8],
   ];
   for (const [command, expected] of singleSourceCommands) {
     assert.equal((toolbar.match(new RegExp(command, 'g')) ?? []).length, expected, command);
@@ -223,4 +223,21 @@ test('the PDF exporter renders bold, italic, color, size, alignment, and list ma
   assert.match(exporter, /node\.attrs\?\.textAlign/);
   assert.match(exporter, /'• '/);
   assert.match(exporter, /toggleHeading|heading/);
+});
+
+test('paragraph alignment is part of the persisted document schema, not a CSS overlay', async () => {
+  // Runtime JSON round-trips run in the browser pipeline harness; here the
+  // schema wiring itself is pinned: TextAlign must target real block nodes so
+  // the attribute is stored in the persisted TipTap JSON.
+  const extensions = await read('../src/components/notebook/tiptapExtensions.ts');
+  assert.match(extensions, /TextAlign\.configure\(\{ types: \['heading', 'paragraph', 'detailsSummary'\] \}\)/);
+  // The exporter already renders node.attrs.textAlign from the shared JSON.
+  const exporter = await read('../src/services/pdf/notebookPdfExport.ts');
+  assert.match(exporter, /node\.attrs\?\.textAlign/);
+  // The strip issues the same extension commands (shared formatting surface).
+  const toolbarSource = await read('../src/components/notebook/NotebookFloatingToolbar.tsx');
+  const strip = toolbarSource.slice(toolbarSource.indexOf('function TextFormattingStrip'));
+  for (const alignment of ['left', 'center', 'right', 'justify']) {
+    assert.match(strip, new RegExp(`setTextAlign\\('${alignment}'\\)`));
+  }
 });

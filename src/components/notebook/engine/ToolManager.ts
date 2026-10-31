@@ -5,7 +5,7 @@ import type { LineStyle } from './lineStyleGeometry.ts';
 // Single source of truth for active tool state.
 // React components read from this; engine modules consume it.
 
-import type { InkFamily, ToolState, NotebookMode, DrawingToolId, EraserMode, ShapeToolMode, StrokePattern } from './drawingTypes.ts';
+import type { InkFamily, ToolState, NotebookMode, DrawingToolId, EraserMode, ShapeToolMode, StrokePattern, SelectionShape } from './drawingTypes.ts';
 import { DEFAULT_TOOL_STATE } from './drawingTypes.ts';
 
 export type ToolStateChangeListener = (state: Readonly<ToolState>) => void;
@@ -228,6 +228,11 @@ export class ToolManager {
 
   setRulerEnabled(enabled: boolean): void {
     this.state.rulerEnabled = enabled;
+    this.notify();
+  }
+
+  setSelectionShape(shape: SelectionShape): void {
+    this.state.selectionShape = shape === 'rectangle' ? 'rectangle' : 'freeform';
     this.notify();
   }
 

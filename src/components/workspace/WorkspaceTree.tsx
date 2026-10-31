@@ -437,17 +437,22 @@ function TreeRow({ itemId, groupId, name, depth, label, icon, expanded, active =
   const [dragPosition, setDragPosition] = React.useState<DropPosition | null>(null);
   const ref = React.useRef<HTMLDivElement>(null);
 
+  // The drop position is derived from the event's own geometry, never from the
+  // hover state: a quick flick-drag can release the button before React commits
+  // the dragover update, and a stale/null position silently swallowed the drop.
+  const computeDropPosition = (e: React.DragEvent): DropPosition => {
+    if (!ref.current) return 'inside';
+    const rect = ref.current.getBoundingClientRect();
+    const y = e.clientY - rect.top;
+    if (y < rect.height * 0.25) return 'before';
+    if (y > rect.height * 0.75) return 'after';
+    return acceptsDropInside ? 'inside' : (y < rect.height / 2 ? 'before' : 'after');
+  };
+
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    if (!ref.current) return;
-    const rect = ref.current.getBoundingClientRect();
-    const y = e.clientY - rect.top;
-    let pos: DropPosition = 'inside';
-    if (y < rect.height * 0.25) pos = 'before';
-    else if (y > rect.height * 0.75) pos = 'after';
-    else pos = acceptsDropInside ? 'inside' : (y < rect.height / 2 ? 'before' : 'after');
-    setDragPosition(pos);
+    setDragPosition(computeDropPosition(e));
   };
 
   const handleDragLeave = () => setDragPosition(null);
@@ -455,13 +460,13 @@ function TreeRow({ itemId, groupId, name, depth, label, icon, expanded, active =
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    const pos = dragPosition;
+    const pos = computeDropPosition(e);
     setDragPosition(null);
     const raw = e.dataTransfer.getData('application/json');
     if (!raw && (!e.dataTransfer.files || e.dataTransfer.files.length === 0)) return;
     try {
       const data = raw ? JSON.parse(raw) : null;
-      onDropItem?.(data, pos || 'inside', e.dataTransfer.files);
+      onDropItem?.(data, pos, e.dataTransfer.files);
     } catch {}
   };
 
