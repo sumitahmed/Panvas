@@ -52,13 +52,41 @@ export function preloadGis(): Promise<void> {
   return scriptPromise;
 }
 
-async function fetchAccount(accessToken: string): Promise<{ id: string; email?: string; name?: string }> {
-  const response = await fetch('https://www.googleapis.com/drive/v3/about?fields=user(permissionId,displayName,emailAddress)', { headers: { Authorization: `Bearer ${accessToken}` } });
-  if (!response.ok) throw new CloudOperationError('connection', { stage: 'account_identity', status: response.status, reason: 'userinfo_unavailable', retryable: response.status >= 500 });
-  const value = await response.json();
-  const id = value?.user?.permissionId || value?.user?.emailAddress;
-  if (!id) throw new CloudOperationError('connection', { stage: 'account_identity', reason: 'userinfo_identity_missing', retryable: false });
-  return { id: String(id), email: value.user?.emailAddress, name: value.user?.displayName };
+export async function fetchAccount(
+  accessToken: string,
+  fetchFn: typeof fetch = globalThis.fetch.bind(globalThis),
+): Promise<{ id: string; email?: string; name?: string }> {
+  try {
+    const response = await fetchFn('https://www.googleapis.com/drive/v3/about?fields=user(permissionId,displayName,emailAddress)', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (response.ok) {
+      const value = await response.json();
+      const id = value?.user?.permissionId || value?.user?.emailAddress;
+      if (id) {
+        return { id: String(id), email: value.user?.emailAddress, name: value.user?.displayName };
+      }
+    }
+  } catch {
+    // Fall back to OpenID userinfo if Drive about is restricted or unavailable
+  }
+
+  try {
+    const response = await fetchFn('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (response.ok) {
+      const value = await response.json();
+      const id = value?.sub || value?.email;
+      if (id) {
+        return { id: String(id), email: value.email, name: value.name };
+      }
+    }
+  } catch {
+    // Both endpoints failed
+  }
+
+  throw new CloudOperationError('connection', { stage: 'account_identity', reason: 'userinfo_unavailable', retryable: true });
 }
 
 const BROWSER_CONNECTION_STORAGE_KEY = 'panvas_browser_google_connection';

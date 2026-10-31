@@ -8,6 +8,10 @@
           "value": "default-src 'self'; script-src 'self' https://accounts.google.com/gsi/client; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' https://*.supabase.co https://*.posthog.com https://huggingface.co https://*.huggingface.co https://*.hf.co https://cas-bridge.xethub.hf.co https://www.googleapis.com https://*.googleapis.com https://oauth2.googleapis.com https://openidconnect.googleapis.com https://accounts.google.com https://libraries.excalidraw.com; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-src https://accounts.google.com/gsi/; frame-ancestors 'none'; form-action 'self'"
         },
         {
+          "key": "Cross-Origin-Opener-Policy",
+          "value": "same-origin-allow-popups"
+        },
+        {
           "key": "Strict-Transport-Security",
           "value": "max-age=63072000; includeSubDomains"
         },
