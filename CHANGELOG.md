@@ -2,6 +2,14 @@
 
 All notable Panvas changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.1.15] - 2026-11-01
+
+- Fixed Google Drive Cloud Sync conflict resolution: resolving a workspace conflict with "Use this device" or "Use Google Drive" now deterministically converges local and remote manifests, clearing review items and restoring the workspace to healthy synced state.
+- Fixed dangling parent and asset relationship handling during remote workspace imports, ensuring orphaned rows cannot derail full-workspace sync cycles.
+- Hardened Google Identity Services browser authentication diagnostics and reporting: clear, actionable user-facing messages distinguish between popup blockers, user cancellation, and network timeouts.
+- Added structured local-development synchronization tracing (`syncTrace.ts`) with strict diagnostic contracts—emitting only sanitized stage names, operation codes, and anonymized workspace identifiers without exposing tokens or user payloads.
+- Verified cross-platform local-first persistence integrity and deterministic multi-device reconciliation across web and Windows desktop runtimes.
+
 ## [0.1.14] - 2026-10-31
 
 - Fixed image move ghosting: moving a pasted image now previews imperatively through the DOM overlay and commits on drop, leaving no stale copy at the original position.

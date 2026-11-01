@@ -4,10 +4,12 @@ import { copyWorkspaceGraph } from './workspaceCopy.ts';
 import type { ScannedSyncEntity } from '../engine.ts';
 import { CloudOperationError, presentCloudError, sanitizeCloudDiagnostic, type CloudErrorCode } from '../errors.ts';
 import { semanticSystemBootstrapBytes } from '../payloadSource.ts';
+import { parsePdfAnnotationStorageId } from '../../../lib/pdfAnnotationStorage.ts';
 import type { SafeCloudDiagnostic, SyncEntityKind } from '../types.ts';
 import type { SyncV2BaselineRecord, SyncV2BaselineStore, SyncV2Catalog, SyncV2ConflictResolution, SyncV2ConflictStore, SyncV2LocalAdapter, SyncV2LocalSource, SyncV2Manifest, SyncV2Profile, SyncV2Provider, SyncV2Record, SyncV2WorkspaceClassification, SyncV2WorkspaceOutcome } from './types.ts';
 import type { LegacyMigrationResult } from './legacyMigration.ts';
 import { ExactPayloadHashCache } from './exactPayloadHashCache.ts';
+import { anonymizeWorkspaceId, beginSyncTrace, endSyncTrace, traceSyncFailure, traceSyncStage } from './syncTrace.ts';
 
 const payloadHashes = new WeakMap<SyncV2LocalSource, { account: string; cache: ExactPayloadHashCache }>();
 
@@ -268,6 +270,15 @@ export async function runCloudSyncV2(input: {
   }
   const hashCache = hashes.cache;
   input = { ...input, provider: cycleProvider };
+  // Sanitized, dev-only run trace (syncTrace.ts contract: no tokens, emails,
+  // payloads or raw exception text — codes and stage names only).
+  const choices = new Set((input.resolutions ?? []).map(item => item.choice));
+  const traceOperation = choices.size === 0 ? 'auto' : choices.size > 1 ? 'mixed' : [...choices][0];
+  const traceRunId = beginSyncTrace(input.environment ? input.environment === 'desktop' ? 'desktop' : 'web' : 'unknown', traceOperation, 0);
+  const endTrace = <T,>(status: string, summary: Record<string, string | number | boolean | undefined>, value: T): T => {
+    endSyncTrace(traceRunId, status, summary);
+    return value;
+  };
   const result: SyncV2Result = { status: 'error', uploaded: 0, downloaded: 0, preservedConflicts: 0, conflicts: [], workspaceOutcomes: [] };
   const workspaceOutcomeById = new Map<string, SyncV2WorkspaceOutcome>();
   const recordWorkspaceOutcome = (workspaceId: string, classification: SyncV2WorkspaceClassification, status: SyncV2WorkspaceOutcome['status'], diagnostic?: SafeCloudDiagnostic) => {
@@ -285,7 +296,7 @@ export async function runCloudSyncV2(input: {
     input.source.beginCycle?.();
     input.onProgress?.('Checking cloud…');
     const localProfile = await input.baselines.loadProfile();
-    if (localProfile && localProfile.accountIdentifier !== input.accountIdentifier) return blocked(result, 'local-account-mismatch');
+    if (localProfile && localProfile.accountIdentifier !== input.accountIdentifier) return endTrace('blocked', { reason: 'local-account-mismatch' }, blocked(result, 'local-account-mismatch'));
 
     let [profileRead, catalogRead] = await Promise.all([input.provider.readProfile(), input.provider.readCatalog()]);
     assertCurrent();
@@ -304,7 +315,7 @@ export async function runCloudSyncV2(input: {
             operation: 'migrate',
             retryable: false,
           }));
-          return { ...result, status: 'synced-review', error: shown.message, errorCode: shown.code, diagnostic: shown.diagnostic };
+          return endTrace('synced-review', { reason: migrationResult.reason }, { ...result, status: 'synced-review', error: shown.message, errorCode: shown.code, diagnostic: shown.diagnostic });
         }
       } else if (input.environment === 'web') {
         const shown = presentCloudError(new CloudOperationError('cloud-not-initialized', {
@@ -313,25 +324,26 @@ export async function runCloudSyncV2(input: {
           operation: 'initialize-cloud',
           retryable: false,
         }));
-        return { ...result, status: 'synced-review', error: shown.message, errorCode: 'cloud-not-initialized', diagnostic: shown.diagnostic };
+        return endTrace('synced-review', { reason: 'cloud-not-initialized' }, { ...result, status: 'synced-review', error: shown.message, errorCode: 'cloud-not-initialized', diagnostic: shown.diagnostic });
       }
     }
     if (profileRead.value && !validProfile(profileRead.value)) throw v2Failure('profile-validation', 'invalid-cloud-profile', 'read-profile');
     if (catalogRead.value && !validCatalog(catalogRead.value)) throw v2Failure('catalog-validation', 'invalid-cloud-catalog', 'read-catalog');
-    if (profileRead.value && profileRead.value.accountIdentifier !== input.accountIdentifier) return blocked(result, 'remote-account-mismatch');
-    if (!profileRead.value && catalogRead.value && catalogRead.value.workspaces.length > 0) return blocked(result, 'remote-account-ambiguous');
+    if (profileRead.value && profileRead.value.accountIdentifier !== input.accountIdentifier) return endTrace('blocked', { reason: 'remote-account-mismatch' }, blocked(result, 'remote-account-mismatch'));
+    if (!profileRead.value && catalogRead.value && catalogRead.value.workspaces.length > 0) return endTrace('blocked', { reason: 'remote-account-ambiguous' }, blocked(result, 'remote-account-ambiguous'));
     const profile = profileRead.value ?? { format: 'panvas-sync-v2-profile', schemaVersion: 2, profileId: localProfile?.profileId ?? crypto.randomUUID(), accountIdentifier: input.accountIdentifier };
     if (!profileRead.value) await input.provider.writeProfile(profile, profileRead.etag);
     const sameAccountProfileReplacement = Boolean(localProfile
       && localProfile.accountIdentifier === input.accountIdentifier
       && localProfile.profileId !== profile.profileId);
-    if (localProfile && localProfile.profileId !== profile.profileId && !sameAccountProfileReplacement) return blocked(result, 'profile-id-mismatch');
+    if (localProfile && localProfile.profileId !== profile.profileId && !sameAccountProfileReplacement) return endTrace('blocked', { reason: 'profile-id-mismatch' }, blocked(result, 'profile-id-mismatch'));
 
     const catalog: SyncV2Catalog = catalogRead.value ?? { format: 'panvas-sync-v2-catalog', schemaVersion: 2, revision: 0, workspaces: [] };
     const localIds = (await input.source.listWorkspaceIds()).filter(id => id !== 'default');
     if (localIds.some(id => !safeId(id) || !id.startsWith('ws-'))) throw v2Failure('local-scan', 'invalid-workspace-id', 'list-workspaces');
     const remoteIds = catalog.workspaces.map(item => item.workspaceId);
     const workspaceIds = [...new Set([...localIds, ...remoteIds])].sort();
+    traceSyncStage(traceRunId, 'workspaces-enumerated', { workspaceCount: workspaceIds.length, localCount: localIds.length, remoteCount: remoteIds.length });
     if (sameAccountProfileReplacement) {
       // The remote profile is the canonical sync space for this verified
       // Google account. Existing baselines belong to the old local profile;
@@ -373,6 +385,8 @@ export async function runCloudSyncV2(input: {
         : initialScanned;
       if (manifestRead.value && !validManifest(manifestRead.value, workspaceId)) throw v2Failure('manifest-validation', 'invalid-manifest', 'read-manifest');
       const manifest = manifestRead.value;
+      const baselineRecords = await input.baselines.loadWorkspace(workspaceId);
+      traceSyncStage(traceRunId, 'workspace-read', { workspace: anonymizeWorkspaceId(workspaceId), manifestRevision: manifest?.revision, remoteRecords: manifest?.records.length ?? 0, localEntities: scanned.length, baselineRecords: baselineRecords.length });
       const remoteByKey = new Map((manifest?.records ?? []).map(record => [keyOf(record), record]));
       let recoveryRoot: ScannedSyncEntity | null = null;
       if (input.source.getRecoveryWorkspaceRoot && (!manifest || !remoteByKey.has(`workspace:${workspaceId}`))) {
@@ -395,7 +409,6 @@ export async function runCloudSyncV2(input: {
       const localPairs = await Promise.all(scanned.map(entity => localRecord(entity, hashCache)));
       const localByKey = new Map(localPairs.map(pair => [keyOf(pair.entity), pair]));
       const currentOwnedKeys = new Set(initialScanned.filter(entity => entity.ownership === 'current').map(keyOf));
-      const baselineRecords = await input.baselines.loadWorkspace(workspaceId);
       const baselineByKey = new Map(baselineRecords.map(record => [`${record.entityKind}:${record.entityId}`, record]));
       await cycleProvider.prepareObjects((manifest?.records ?? []).filter(record => !record.tombstone).map(record => record.hash!));
       let repairedMissingRecords = 0;
@@ -576,8 +589,16 @@ export async function runCloudSyncV2(input: {
       // A button chooses the workspace graph, including entities present on
       // only one side. It is considered only after this workspace's root
       // preflight, and cannot admit records from a quarantined workspace.
+      // "Use this device" cannot claim a workspace this device does not have:
+      // publishing tombstones for it would destroy the cloud copy, so such a
+      // workspace falls through to ordinary reconciliation (it downloads).
       const workspaceResolutions = input.resolutions?.filter(item => item.workspaceId === workspaceId) ?? [];
-      const choice = workspaceResolutions[0]?.choice;
+      const selectedChoice = workspaceResolutions[0]?.choice;
+      const deviceChoiceWithoutLocalRoot = selectedChoice === 'device' && !localByKey.has(`workspace:${workspaceId}`);
+      if (deviceChoiceWithoutLocalRoot) {
+        traceSyncStage(traceRunId, 'device-choice-skipped', { workspace: anonymizeWorkspaceId(workspaceId), reason: 'workspace-absent-locally' });
+      }
+      const choice = deviceChoiceWithoutLocalRoot ? undefined : selectedChoice;
       let hasSelectedDivergence = false;
       for (const selected of workspaceResolutions) {
         const local = localByKey.get(keyOf(selected));
@@ -592,6 +613,7 @@ export async function runCloudSyncV2(input: {
         }
       }
       if (choice && hasSelectedDivergence && manifest && workspaceResolutions.every(item => item.choice === choice)) {
+        traceSyncStage(traceRunId, 'choice-branch', { workspace: anonymizeWorkspaceId(workspaceId), choice, keys: keys.length });
         if (choice === 'both') {
           const copy = await copyWorkspaceGraph(profile.profileId, workspaceId, scanned);
           const existing = input.source.scanFreshWorkspace
@@ -619,7 +641,12 @@ export async function runCloudSyncV2(input: {
           })));
           if (!workspaceIds.includes(copy.workspaceId)) workspaceIds.push(copy.workspaceId);
         }
-        for (const key of keys) {
+        // Explicit-choice reconciliation is key-independent (per-record remote
+        // reads, integrity checks and recovery preserves), so bounded workers
+        // overlap the network round-trips instead of serializing them. The
+        // per-record failure still aborts the whole choice: a partial
+        // reconciliation must never publish.
+        await mapBounded(keys, async key => {
           const local = localByKey.get(key);
           const remote = remoteByKey.get(key);
           // Missing root metadata is integrity repair, never a deletion on
@@ -627,7 +654,7 @@ export async function runCloudSyncV2(input: {
           // root and publish it before any descendant objects.
           if (repairedWorkspaceRoot && key === `workspace:${workspaceId}`) {
             uploads.push({ record: repairedWorkspaceRoot.record, bytes: repairedWorkspaceRoot.bytes });
-            continue;
+            return;
           }
           const remoteBytes = remote && !remote.tombstone
             ? await readRemoteObjectWithExactReplica(input.provider, remote.hash!, { workspaceId, entityKind: remote.kind, entityId: remote.id }, local) : new Uint8Array();
@@ -648,7 +675,7 @@ export async function runCloudSyncV2(input: {
             uploads.push({ record, bytes: local?.entity.bytes ?? null });
           } else if (remote && (!remote.tombstone || local)) downloads.push({ record: remote, bytes: remoteBytes });
           else if (local) downloads.push({ record: { kind: local.entity.entityType, id: local.entity.entityId, parentId: local.entity.parentId, hash: null, baseHash: null, tombstone: true }, bytes: new Uint8Array() });
-        }
+        }, 6);
       } else {
 
       await mapBounded(keys, async key => {
@@ -682,7 +709,10 @@ export async function runCloudSyncV2(input: {
             result.conflicts.push({ workspaceId, kind: local.entity.entityType, id: local.entity.entityId });
             return;
           }
-          uploads.push({ record: { kind: local.entity.entityType, id: local.entity.entityId, parentId: local.entity.parentId, hash: local.hash, baseHash: base?.baseHash ?? null, tombstone: false, ...(local.entity.entityType === 'asset' ? { encoding: 'asset-envelope-v1' as const } : {}) }, bytes: local.entity.bytes });
+          // The upload must carry the record's actual tombstone state: a
+          // locally deleted record that was never published is a tombstone
+          // upload (null hash), never a live record with a null hash.
+          uploads.push({ record: { kind: local.entity.entityType, id: local.entity.entityId, parentId: local.entity.parentId, hash: local.hash, baseHash: base?.baseHash ?? null, tombstone: local.entity.tombstone, ...(local.entity.entityType === 'asset' && !local.entity.tombstone ? { encoding: 'asset-envelope-v1' as const } : {}) }, bytes: local.entity.bytes });
           return;
         }
         if (!local && remote) {
@@ -883,6 +913,7 @@ export async function runCloudSyncV2(input: {
         currentStage = 'manifest-write';
         assertCurrent();
         await input.provider.writeManifest(workspaceId, committedManifest, manifestRead.etag);
+        traceSyncStage(traceRunId, 'manifest-published', { workspace: anonymizeWorkspaceId(workspaceId), revision: committedManifest.revision });
         nextCatalog.set(workspaceId, { workspaceId, manifestRevision: committedManifest.revision });
         catalogChanged = true;
       }
@@ -894,6 +925,49 @@ export async function runCloudSyncV2(input: {
           catalogChanged = true;
         }
       }
+
+      // A published remote graph can contain a live asset whose structural
+      // parent no longer exists — a deleted page's PDF-annotation assets
+      // survive as live manifest records. Unlike content rows, an asset
+      // cannot be materialized without its canonical owner (applyBrowserRecord
+      // rejects it and the whole workspace transaction would roll back), so
+      // assets whose canonical parent resolves against neither live local
+      // state, live remote state, nor this batch are preserved for recovery
+      // and reported as a workspace review item instead of aborting.
+      const structuralKinds = new Set<SyncEntityKind>(['workspace', 'folder', 'notebook', 'notebookSection', 'notebookPage', 'canvasFile']);
+      const liveStructuralIds = new Set<string>([workspaceId]);
+      for (const local of localByKey.values()) if (!local.entity.tombstone && structuralKinds.has(local.entity.entityType)) liveStructuralIds.add(local.entity.entityId);
+      for (const remote of remoteByKey.values()) if (!remote.tombstone && structuralKinds.has(remote.kind)) liveStructuralIds.add(remote.id);
+      for (const download of downloads) if (structuralKinds.has(download.record.kind)) liveStructuralIds.add(download.record.id);
+      const applicableDownloads: Array<{ record: SyncV2Record; bytes: Uint8Array }> = [];
+      const danglingDownloads: Array<{ record: SyncV2Record; bytes: Uint8Array }> = [];
+      for (const download of downloads) {
+        if (download.record.tombstone || download.record.kind !== 'asset') { applicableDownloads.push(download); continue; }
+        const canonicalParent = parsePdfAnnotationStorageId(download.record.parentId ?? '')?.ownerPageId ?? download.record.parentId;
+        if (canonicalParent !== null && liveStructuralIds.has(canonicalParent)) applicableDownloads.push(download);
+        else danglingDownloads.push(download);
+      }
+      for (const dangling of danglingDownloads) {
+        currentEntity = dangling.record;
+        currentStage = 'dangling-parent-preserve';
+        await input.conflictStore.preserve({
+          conflictId: `dangling:${profile.profileId}:${workspaceId}:${keyOf(dangling.record)}:${dangling.record.hash ?? 'deleted'}`,
+          profileId: profile.profileId, workspaceId,
+          entityKind: dangling.record.kind, entityId: dangling.record.id, parentId: dangling.record.parentId,
+          localHash: localByKey.get(keyOf(dangling.record))?.hash ?? 'absent',
+          remoteHash: dangling.record.hash ?? 'tombstone',
+          localBytes: localByKey.get(keyOf(dangling.record))?.entity.bytes ?? new Uint8Array(),
+          remoteBytes: dangling.record.tombstone ? undefined : dangling.bytes,
+          createdAt: Date.now(), resolvedAt: Date.now(),
+        });
+      }
+      if (danglingDownloads.length) {
+        workspaceClassification = 'ambiguous';
+        traceSyncStage(traceRunId, 'dangling-parent-preserved', { workspace: anonymizeWorkspaceId(workspaceId), records: danglingDownloads.length, firstKind: danglingDownloads[0].record.kind });
+      }
+      const unappliedKeys = new Set<string>([...danglingDownloads, ...[]].map(item => keyOf(item.record)));
+      downloads.length = 0;
+      downloads.push(...applicableDownloads);
 
       for (const download of downloads.sort((a, b) => phase[a.record.kind] - phase[b.record.kind])) {
         currentEntity = download.record;
@@ -922,8 +996,30 @@ export async function runCloudSyncV2(input: {
         // must not participate in the optimistic edit check before native
         // reconstruction creates the canonical workspace directory.
         const expected = recoveryRoot ? scanned.filter(entity => entity !== recoveryRoot) : scanned;
-        await input.adapter.applyWorkspace({ workspaceId, expected, expectedHashes: new Map([...localByKey].map(([key, local]) => [key, local.hash])), downloads: downloads.map(item => ({ record: item.record, bytes: item.record.tombstone ? null : item.bytes })), allowStaleOwnershipRepair, assertCurrent });
-        result.downloaded += downloads.length;
+        const applyResult = await input.adapter.applyWorkspace({ workspaceId, expected, expectedHashes: new Map([...localByKey].map(([key, local]) => [key, local.hash])), downloads: downloads.map(item => ({ record: item.record, bytes: item.record.tombstone ? null : item.bytes })), allowStaleOwnershipRepair, assertCurrent });
+        const adapterSkipped = applyResult?.skipped ?? [];
+        for (const skipped of adapterSkipped) {
+          // The adapter could not resolve this record's parent; preserve its
+          // exact remote bytes for recovery and keep the workspace honestly
+          // in review instead of aborting the whole import.
+          const download = downloads.find(item => keyOf(item.record) === `${skipped.kind}:${skipped.id}`);
+          unappliedKeys.add(`${skipped.kind}:${skipped.id}`);
+          await input.conflictStore.preserve({
+            conflictId: `dangling:${profile.profileId}:${workspaceId}:${skipped.kind}:${skipped.id}:${download?.record.hash ?? 'deleted'}`,
+            profileId: profile.profileId, workspaceId,
+            entityKind: skipped.kind, entityId: skipped.id, parentId: download?.record.parentId ?? null,
+            localHash: localByKey.get(`${skipped.kind}:${skipped.id}`)?.hash ?? 'absent',
+            remoteHash: download?.record.hash ?? 'tombstone',
+            localBytes: localByKey.get(`${skipped.kind}:${skipped.id}`)?.entity.bytes ?? new Uint8Array(),
+            remoteBytes: download && !download.record.tombstone ? download.bytes : undefined,
+            createdAt: Date.now(), resolvedAt: Date.now(),
+          });
+        }
+        if (adapterSkipped.length) {
+          workspaceClassification = 'ambiguous';
+          traceSyncStage(traceRunId, 'adapter-records-skipped', { workspace: anonymizeWorkspaceId(workspaceId), records: adapterSkipped.length });
+        }
+        result.downloaded += downloads.length - adapterSkipped.length;
       } else for (const download of downloads) {
         currentEntity = download.record;
         assertCurrent();
@@ -936,6 +1032,9 @@ export async function runCloudSyncV2(input: {
         // upload-only runs, bless the captured upload hash, never a fresh edit.
         const applied = downloads.length && input.source.scanFreshWorkspace ? new Map((await input.source.scanFreshWorkspace(workspaceId)).map(entity => [keyOf(entity), entity])) : null;
         for (const record of committedManifest.records) {
+          // Dangling records were preserved, not applied: leave them without a
+          // baseline so a later run can retry them once the remote heals.
+          if (unappliedKeys.has(keyOf(record))) continue;
           const local = localByKey.get(keyOf(record));
           const uploaded = uploads.find(item => keyOf(item.record) === keyOf(record));
           const downloaded = downloads.find(item => keyOf(item.record) === keyOf(record));
@@ -953,6 +1052,7 @@ export async function runCloudSyncV2(input: {
           nextBaselines.set(keyOf(record), baseline);
         }
         stagedBaselines.set(workspaceId, [...nextBaselines.values()]);
+        traceSyncStage(traceRunId, 'baseline-staged', { workspace: anonymizeWorkspaceId(workspaceId), records: nextBaselines.size, downloadsApplied: downloads.length });
         // A returning device already has a verified profile. A read-only
         // workspace recovery needs no remote publication: checkpoint it now
         // so an unrelated later failure does not erase its successful baseline.
@@ -963,6 +1063,7 @@ export async function runCloudSyncV2(input: {
         }
       }
       recordWorkspaceOutcome(workspaceId, workspaceClassification, 'synced');
+      traceSyncStage(traceRunId, 'workspace-done', { workspace: anonymizeWorkspaceId(workspaceId), classification: workspaceClassification, downloads: downloads.length, uploads: uploads.length });
       } catch (error) {
         // Provider/account failures must still stop the run. Workspace-scoped
         // integrity, relationship, and local-apply failures are quarantined so
@@ -977,8 +1078,22 @@ export async function runCloudSyncV2(input: {
           'remote-workspace-root-repair-unavailable',
           'invalid-relationship',
           'local-edit-during-sync',
-        ]).has(shown.diagnostic.reason);
+        ]).has(shown.diagnostic.reason)
+          // Any local-apply failure belongs to this workspace alone. Aborting
+          // the run for it would block every other workspace's uploads and
+          // downloads behind one bad record; quarantine instead, with the
+          // workspace's outcome carrying the sanitized failure.
+          || shown.diagnostic.stage === 'local-record-apply'
+          || shown.diagnostic.stage === 'browser-record-apply'
+          || shown.diagnostic.stage === 'local-recovery-check';
         if (shown.code !== 'remote-workspace' && !workspaceScopedReason) throw error;
+        // An explicit user choice that could not be applied is an unresolved
+        // decision, not a background review item. Surface it as a conflict so
+        // the run cannot report 'synced-review' — the caller would otherwise
+        // acknowledge the choice while the remote data was never applied.
+        if (input.resolutions?.some(item => item.workspaceId === workspaceId)) {
+          result.conflicts.push({ workspaceId, kind: currentEntity?.kind ?? 'workspace', id: currentEntity?.id ?? workspaceId });
+        }
         const diagnostic = sanitizeCloudDiagnostic({ ...shown.diagnostic, workspaceId: shown.diagnostic.workspaceId ?? workspaceId, entityKind: shown.diagnostic.entityKind ?? currentEntity?.kind ?? 'workspace', entityId: shown.diagnostic.entityId ?? currentEntity?.id ?? workspaceId });
         const classification: SyncV2WorkspaceClassification = shown.code === 'conflict' ? 'conflict' : shown.code === 'remote-workspace' ? 'orphaned' : 'ambiguous';
         recordWorkspaceOutcome(workspaceId, classification, classification === 'conflict' ? 'conflict' : 'error', diagnostic);
@@ -1002,7 +1117,7 @@ export async function runCloudSyncV2(input: {
       for (const [workspaceId, records] of stagedBaselines) { assertCurrent(); await input.baselines.saveWorkspace(workspaceId, records); }
       const conflict = result.conflicts[0];
       const shown = presentCloudError(new CloudOperationError('conflict', { stage: 'record-reconciliation', reason: 'unproven-local-or-simultaneous-edit', operation: 'compare', workspaceId: conflict.workspaceId, entityKind: conflict.kind, entityId: conflict.id, retryable: false }));
-      return { ...result, status: 'conflict', error: shown.message, errorCode: shown.code, diagnostic: shown.diagnostic };
+      return endTrace('conflict', { conflicts: result.conflicts.length }, { ...result, status: 'conflict', error: shown.message, errorCode: shown.code, diagnostic: shown.diagnostic });
     }
     assertCurrent();
     currentWorkspaceId = undefined;
@@ -1029,25 +1144,29 @@ export async function runCloudSyncV2(input: {
     const postSyncLocalIds = (await input.source.listWorkspaceIds()).filter(id => id !== 'default').sort();
     const postSyncRemoteIds = [...nextCatalog.values()].map(w => w.workspaceId).sort();
     const converged = postSyncLocalIds.length === postSyncRemoteIds.length && postSyncLocalIds.every((id, idx) => id === postSyncRemoteIds[idx]);
+    traceSyncStage(traceRunId, 'convergence-check', { localWorkspaces: postSyncLocalIds.length, remoteWorkspaces: postSyncRemoteIds.length, converged });
     if (!converged && !reviewRequired && !workspaceReviewRequired) {
       const diagnostic = sanitizeCloudDiagnostic({ stage: 'convergence-check', reason: 'convergence-check-failed', operation: 'verify-convergence', retryable: false });
-      return {
+      return endTrace('error', { reason: 'convergence-check-failed' }, {
         ...result,
         status: 'error',
         errorCode: 'sync',
         diagnostic,
-      };
+      });
     }
 
-    return {
+    return endTrace(reviewRequired || workspaceReviewRequired ? 'synced-review' : 'synced', {
+      uploaded: result.uploaded, downloaded: result.downloaded, conflicts: result.conflicts.length,
+    }, {
       ...result,
       status: reviewRequired || workspaceReviewRequired ? 'synced-review' : 'synced',
       errorCode: firstWorkspaceConflict ? 'conflict' : result.errorCode,
       diagnostic: firstIssue ?? result.diagnostic,
-    };
+    });
   } catch (error) {
     const shown = presentCloudError(error, currentStage);
-    return { ...result, status: 'error', error: shown.message, errorCode: shown.code, diagnostic: sanitizeCloudDiagnostic({ ...shown.diagnostic, workspaceId: shown.diagnostic.workspaceId ?? currentWorkspaceId, entityKind: shown.diagnostic.entityKind ?? currentEntity?.kind, entityId: shown.diagnostic.entityId ?? currentEntity?.id }) };
+    traceSyncFailure(traceRunId, { ...shown.diagnostic, workspaceId: shown.diagnostic.workspaceId ?? currentWorkspaceId, entityKind: shown.diagnostic.entityKind ?? currentEntity?.kind, entityId: shown.diagnostic.entityId ?? currentEntity?.id }, shown.code);
+    return endTrace('error', { reason: shown.diagnostic.reason ?? shown.code }, { ...result, status: 'error', error: shown.message, errorCode: shown.code, diagnostic: sanitizeCloudDiagnostic({ ...shown.diagnostic, workspaceId: shown.diagnostic.workspaceId ?? currentWorkspaceId, entityKind: shown.diagnostic.entityKind ?? currentEntity?.kind, entityId: shown.diagnostic.entityId ?? currentEntity?.id }) });
   } finally {
     if (!cycleEnded) input.source.endCycle?.();
   }

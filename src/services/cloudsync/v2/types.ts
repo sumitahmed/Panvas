@@ -165,5 +165,5 @@ export interface SyncV2LocalSource {
 
 export interface SyncV2LocalAdapter {
   applyRecord(input: { workspaceId: string; record: SyncV2Record; bytes: Uint8Array | null; allowStaleOwnershipRepair?: boolean }): Promise<void>;
-  applyWorkspace?(input: { workspaceId: string; expected: ScannedSyncEntity[]; expectedHashes?: ReadonlyMap<string, string | null>; downloads: Array<{ record: SyncV2Record; bytes: Uint8Array | null }>; allowStaleOwnershipRepair?: boolean; assertCurrent?: () => void }): Promise<void>;
+  applyWorkspace?(input: { workspaceId: string; expected: ScannedSyncEntity[]; expectedHashes?: ReadonlyMap<string, string | null>; downloads: Array<{ record: SyncV2Record; bytes: Uint8Array | null }>; allowStaleOwnershipRepair?: boolean; assertCurrent?: () => void }): Promise<{ skipped?: Array<{ kind: SyncEntityKind; id: string }> } | void>;
 }

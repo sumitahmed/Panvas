@@ -60,8 +60,16 @@ export async function applyBrowserRecord(workspaceId: string, pointer: RecordPoi
     }
     // A delete is idempotent and must not require a parent that may already
     // have been deleted. Live records still require their canonical owner.
-    if (existing?.canvasFileId) await checkOwner(existing.canvasFileId);
-    if (existing?.pageId) await checkOwner(existing.pageId);
+    // Asset rows live in global tables and survive workspace loss, so an
+    // existing asset row's previous parent can be stale (its page or canvas
+    // no longer exists) even when the incoming remote asset is fully valid.
+    // That stale relationship must not block replacement: the incoming
+    // record's canonical owner is validated below, and the replaced bytes
+    // stay recoverable through the engine's recovery copy.
+    if (!asset) {
+      if (existing?.canvasFileId) await checkOwner(existing.canvasFileId);
+      if (existing?.pageId) await checkOwner(existing.pageId);
+    }
     if (!bytes) fail('payload-unavailable');
     const envelope = asset ? decodeAssetEnvelope(bytes!) : null;
     if (asset && !envelope) fail('invalid-asset-envelope');

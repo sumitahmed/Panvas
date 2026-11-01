@@ -20,6 +20,7 @@ import { GoogleDriveSyncV2Provider } from '@/services/cloudsync/v2/googleDriveV2
 import { syncV2LocalAdapter, syncV2LocalSource } from '@/services/cloudsync/v2/localAdapter';
 import { dexieSyncV2ConflictStore } from '@/services/cloudsync/v2/conflictStore';
 import { SinglePendingRunner } from '@/services/cloudsync/v2/singlePendingRunner';
+import { beginSyncTrace, endSyncTrace, traceSyncStage } from '@/services/cloudsync/v2/syncTrace';
 import { mergeWorkspaceCloudStatuses } from '@/services/cloudsync/presentation';
 import { useAuthStore } from '@/stores/authStore';
 import { SyncRunAuthority, guardSyncCalls } from '@/services/cloudsync/runAuthority';
@@ -248,25 +249,40 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
         await get().loadReviewChanges();
         current = get().reviewItems.filter(item => !quarantined.has(item.workspaceId));
       }
-      if (current.length === 0) {
-        const providerStatus = get().statusByProvider.googledrive;
-        if (providerStatus === 'conflict' || providerStatus === 'synced-review') {
-          set(state => ({
-            reviewItems: [],
-            statusByProvider: { ...state.statusByProvider, googledrive: 'synced' },
-            lastError: null,
-            lastDiagnostic: null,
-            progress: { stage: 'complete', completed: 1, total: 1, message: 'Up to date' },
-          }));
-          return true;
-        }
-        return false;
-      }
       if (choice) {
+        // Review rows are EPHEMERAL: every sync run rebuilds them from that
+        // run's conflicts. The authoritative conflict state is the per-
+        // workspace status. When the user makes an explicit choice, any
+        // workspace still marked 'conflict' must receive that choice as a
+        // workspace-level resolution even if its entity-level review row was
+        // lost between runs — otherwise the same workspace conflict is
+        // rediscovered forever and every choice reports "still present".
+        const conflictWorkspaces = Object.entries(get().workspaceStatusById)
+          .filter(([, workspaceStatus]) => workspaceStatus === 'conflict')
+          .map(([workspaceId]) => workspaceId);
+        const covered = new Set(current.map(item => item.workspaceId));
+        for (const workspaceId of conflictWorkspaces) {
+          if (covered.has(workspaceId)) continue;
+          current.push({
+            conflictId: `sync-conflict:${workspaceId}:workspace:${workspaceId}`,
+            workspaceId, entityKind: 'workspace', entityId: workspaceId,
+          });
+        }
+        if (current.length === 0) {
+          // Every review row belongs to a workspace under recovery review.
+          // An explicit choice cannot be delivered for it, and acknowledging
+          // here would report success while nothing was applied.
+          return false;
+        }
+        const choiceRunId = beginSyncTrace(typeof window !== 'undefined' && window.panvas ? 'desktop' : 'web', choice, new Set(current.map(item => item.workspaceId)).size);
+        traceSyncStage(choiceRunId, 'choice-registered', { choice, items: current.length, workspaces: new Set(current.map(item => item.workspaceId)).size, quarantined: quarantined.size });
         current.forEach(item => pendingV2ConflictResolutions.set(conflictResolutionKey(item), choice));
         await get().triggerSync();
         const status = useCloudSyncStore.getState().statusByProvider.googledrive;
-        if (status === 'synced' || status === 'synced-review') {
+        const resolved = status === 'synced' || status === 'synced-review';
+        traceSyncStage(choiceRunId, 'choice-result', { status, resolved, pendingLeft: pendingV2ConflictResolutions.size });
+        endSyncTrace(choiceRunId, resolved ? 'resolved' : 'unresolved', { status });
+        if (resolved) {
           current.forEach(item => pendingV2ConflictResolutions.delete(conflictResolutionKey(item)));
           for (const item of current) {
             await dexieSyncV2ConflictStore.resolve?.(item.conflictId);
@@ -274,26 +290,10 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
           await get().loadReviewChanges();
           return true;
         }
-        if (choice === 'device') {
-          current.forEach(item => pendingV2ConflictResolutions.delete(conflictResolutionKey(item)));
-          for (const item of current) {
-            await dexieSyncV2ConflictStore.resolve?.(item.conflictId);
-          }
-          const conflictWorkspaceIds = new Set(current.map(item => item.workspaceId));
-          set(state => ({
-            reviewItems: [],
-            statusByProvider: { ...state.statusByProvider, googledrive: 'synced' },
-            workspaceStatusById: {
-              ...state.workspaceStatusById,
-              ...Object.fromEntries([...conflictWorkspaceIds].map(id => [id, 'synced' as const])),
-            },
-            lastError: null,
-            lastDiagnostic: null,
-            progress: { stage: 'complete', completed: 1, total: 1, message: 'Up to date' },
-          }));
-          await get().loadReviewChanges();
-          return true;
-        }
+        // A failed choice — including a failed "Use this device" run — must
+        // stay a failure. Forcing the status to 'synced' here reported
+        // success while nothing was published, which is why the last-sync
+        // timestamp stayed stale while the panel claimed success.
         return false;
       }
       for (const item of current) {

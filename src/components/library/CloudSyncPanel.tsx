@@ -194,10 +194,10 @@ export function CloudSyncPanel() {
     if (isResolvingReview) return;
     setIsResolvingReview(true);
     try {
-      let resolved = await resolveReviewChanges(choice);
-      if (!resolved && choice === 'cloud') {
-        resolved = await resolveReviewChanges();
-      }
+      // A failed choice must stay a failed choice: acknowledging the review
+      // rows here would report success while the remote data was never
+      // applied. The user can retry, or use the explicit acknowledge action.
+      const resolved = await resolveReviewChanges(choice);
       if (resolved) {
         setShowReviewDetails(false);
         const label = choice === 'cloud' ? 'Google Drive version' : choice === 'device' ? 'This device version' : 'Both versions';

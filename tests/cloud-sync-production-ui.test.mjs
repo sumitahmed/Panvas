@@ -109,14 +109,14 @@ test('CloudSyncPanel reliably renders all three resolution choices whenever revi
   }
 });
 
-test('resolveReviewChanges(device) resolves unresolved conflict, transitions status to synced, and clears review state', async () => {
+test('resolveReviewChanges(device) without a working sync run stays an honest failure', async () => {
   const server = await createServer({ configFile: false, envFile: false, optimizeDeps: { noDiscovery: true },
     server: { middlewareMode: true, hmr: false }, resolve: { alias: { '@': path.resolve('src') } },
   });
   try {
     const { useCloudSyncStore } = await server.ssrLoadModule('/src/stores/cloudSyncStore.ts');
     const { dexieSyncV2ConflictStore } = await server.ssrLoadModule('/src/services/cloudsync/v2/conflictStore.ts');
-    
+
     // Set up an isolated unresolved conflict
     const testConflict = {
       conflictId: 'sync-conflict:test-ws:canvasScene:scene-1',
@@ -132,7 +132,7 @@ test('resolveReviewChanges(device) resolves unresolved conflict, transitions sta
       resolvedAt: null,
     };
     await dexieSyncV2ConflictStore.preserve(testConflict);
-    
+
     // Set initial store state with conflict
     useCloudSyncStore.setState({
       statusByProvider: { googledrive: 'conflict' },
@@ -151,20 +151,21 @@ test('resolveReviewChanges(device) resolves unresolved conflict, transitions sta
     assert.equal(store.reviewItems.length, 1);
     assert.equal(store.statusByProvider.googledrive, 'conflict');
 
-    // Execute "Use this device"
+    // "Use this device" with no provider connection cannot publish anything.
+    // It must NOT report success (the v0.1.13 fallback claimed "synced" while
+    // the upload never happened, which froze the last-synced timestamp).
     const resolved = await store.resolveReviewChanges('device');
-    assert.equal(resolved, true, 'resolveReviewChanges(device) must return true');
+    assert.equal(resolved, false, 'a choice without a working sync run must not claim success');
 
-    // Verify post-resolution state
+    // Verify the review state is retained for a genuine retry
     const after = useCloudSyncStore.getState();
-    assert.equal(after.statusByProvider.googledrive, 'synced', 'Provider status must transition to synced');
-    assert.equal(after.workspaceStatusById['test-ws'], 'synced', 'Workspace status must become synced');
-    assert.equal(after.reviewItems.length, 0, 'reviewItems must be cleared');
-    assert.equal(after.lastError, null, 'lastError must be cleared');
+    assert.equal(after.statusByProvider.googledrive, 'conflict', 'Provider status must not claim synced');
+    assert.equal(after.workspaceStatusById['test-ws'], 'conflict', 'Workspace status must not claim synced');
+    assert.equal(after.lastError, 'Conflict detected', 'lastError must remain visible');
 
-    // Verify local conflict store was marked resolved
+    // The conflict row stays unresolved so a later successful run can resolve it.
     const unresolved = await dexieSyncV2ConflictStore.listUnresolved('test-profile');
-    assert.equal(unresolved.some(item => item.conflictId === testConflict.conflictId), false, 'Conflict must be marked resolved');
+    assert.equal(unresolved.some(item => item.conflictId === testConflict.conflictId), true, 'Conflict must stay reviewable');
   } finally {
     await server.close();
   }
