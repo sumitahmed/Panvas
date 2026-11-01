@@ -1339,13 +1339,45 @@
 .panvas-app-shell[data-touch-input='true'] {
   height: var(--panvas-visual-height, 100dvh);
 }
+/* The dock floats over the document instead of squeezing the flex layout, so
+   showing or hiding it never resizes the scroll viewport and never relayouts
+   document pages. The host workspace (panvas-mobile-docked) reserves scroll
+   clearance with padding instead. */
 .panvas-mobile-tool-dock {
-  flex-shrink: 0; position: relative; z-index: 40;
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 40;
   padding: 4px 4px max(4px, env(safe-area-inset-bottom));
   border-top: 1px solid rgb(var(--border-default));
   background: rgb(var(--bg-elevated));
   padding-left: max(4px, env(safe-area-inset-left));
   padding-right: max(4px, env(safe-area-inset-right));
+  transition: transform 0.24s ease, opacity 0.24s ease;
+}
+.panvas-mobile-tool-dock[data-dock-hidden='true'] {
+  transform: translateY(110%);
+  opacity: 0;
+  pointer-events: none;
+  visibility: hidden;
+  transition: transform 0.24s ease, opacity 0.24s ease, visibility 0s linear 0.24s;
+}
+/* Reading-mode reveal handle, portaled to <body> while the dock is hidden. */
+.panvas-mobile-dock-reveal {
+  position: fixed; z-index: 39;
+  bottom: max(12px, env(safe-area-inset-bottom));
+  left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; justify-content: center;
+  width: 48px; height: 32px; border-radius: 999px;
+  border: 1px solid rgb(var(--border-default));
+  background: rgb(var(--bg-elevated));
+  color: rgb(var(--text-secondary));
+  box-shadow: 0 6px 20px #0004;
+}
+/* Scroll clearance for the floating dock: constant padding keeps scrollHeight
+   stable across dock show/hide, so the document never shifts under the finger. */
+.panvas-mobile-docked > .notebook-viewport {
+  padding-bottom: var(--panvas-tool-dock-height, 76px);
+}
+.panvas-mobile-docked .panvas-pdf-docked-viewport {
+  padding-bottom: var(--panvas-tool-dock-height, 76px);
 }
 .panvas-anchored-overlay {
   --panvas-overlay-safe-top: env(safe-area-inset-top, 0px);
@@ -1403,9 +1435,10 @@
   .panvas-mobile-document-header .panvas-page-utilities {
     border: 0; box-shadow: none; background: transparent;
   }
-  .panvas-mobile-sheet,
-  .panvas-app-shell .panvas-overlay:not(.panvas-tooltip) {
+  .panvas-mobile-sheet:not(.hidden),
+  .panvas-app-shell .panvas-overlay:not(.panvas-tooltip):not(.hidden) {
     position: fixed; inset: auto 0 var(--panvas-tool-dock-inset, var(--panvas-keyboard-inset, 0px));
+    display: flex; flex-direction: column;
     width: 100%; max-width: 100%; min-width: 0;
     max-height: min(76dvh, calc(var(--panvas-visual-height, 100dvh) - var(--panvas-tool-dock-height, 0px) - env(safe-area-inset-top, 0px) - 24px));
     overflow: auto; overscroll-behavior: contain;
@@ -1413,7 +1446,12 @@
     border-radius: 16px 16px 0 0; border: 1px solid rgb(var(--border-default));
     background: rgb(var(--bg-elevated)); box-shadow: 0 -8px 32px #0002; z-index: 100;
   }
+  /* The close button stays pinned; the content cell flexes into the remaining
+     height so long menus scroll inside the sheet and their layout rect stays
+     inside the viewport instead of overflowing behind the tool dock. */
+  .panvas-mobile-sheet > .panvas-sheet-close { flex-shrink: 0; }
   .panvas-mobile-sheet > :not(.panvas-sheet-close) {
+    flex: 1 1 auto; min-height: 0;
     width: 100%; max-width: 100%; min-width: 0; max-height: none;
   }
   .panvas-mobile-sheet button, .panvas-properties-panel button,
@@ -1443,6 +1481,38 @@
     height: calc(var(--panvas-visual-height, 100dvh) - var(--panvas-tool-dock-height, 0px) - env(safe-area-inset-top, 0px) - 24px);
     max-height: calc(var(--panvas-visual-height, 100dvh) - var(--panvas-tool-dock-height, 0px) - env(safe-area-inset-top, 0px) - 24px);
   }
+  /* Landscape phones and small touch tablets share the phone dock contract:
+     a flat full-width touch row instead of the desktop floating pill. */
+  html[data-panvas-compact-touch='true'] .panvas-mobile-tool-dock .panvas-toolbar-surface {
+    width: 100%; justify-content: space-between; padding: 0; gap: 0;
+    border: 0; border-radius: 0; background: transparent; box-shadow: none;
+  }
+  html[data-panvas-compact-touch='true'] .panvas-mobile-tool-dock .panvas-toolbar-surface > button {
+    height: 44px; width: 44px; min-width: 0; flex: 1 1 0;
+  }
+  html[data-panvas-compact-touch='true'] .panvas-mobile-tool-dock .panvas-floating-toolbar > .absolute {
+    top: auto; bottom: calc(100% + 8px); margin-top: 0;
+    max-width: calc(100vw - 16px); white-space: normal;
+  }
+  html[data-panvas-compact-touch='true'] .panvas-mobile-document-header .panvas-page-utilities {
+    border: 0; box-shadow: none; background: transparent;
+  }
+  html[data-panvas-compact-touch='true'] .panvas-mobile-sheet:not(.hidden) {
+    position: fixed; inset: auto 0 var(--panvas-tool-dock-inset, var(--panvas-keyboard-inset, 0px));
+    display: flex; flex-direction: column;
+    width: 100%; max-width: 100%; min-width: 0;
+    max-height: min(76dvh, calc(var(--panvas-visual-height, 100dvh) - var(--panvas-tool-dock-height, 0px) - env(safe-area-inset-top, 0px) - 24px));
+    overflow: auto; overscroll-behavior: contain;
+    transform: none; margin: 0; padding-bottom: max(12px, env(safe-area-inset-bottom));
+    border-radius: 16px 16px 0 0; border: 1px solid rgb(var(--border-default));
+    background: rgb(var(--bg-elevated)); box-shadow: 0 -8px 32px #0002; z-index: 100;
+  }
+  html[data-panvas-compact-touch='true'] .panvas-mobile-sheet > .panvas-sheet-close { flex-shrink: 0; }
+  html[data-panvas-compact-touch='true'] .panvas-mobile-sheet > :not(.panvas-sheet-close) {
+    flex: 1 1 auto; min-height: 0;
+    width: 100%; max-width: 100%; min-width: 0; max-height: none;
+  }
+  html[data-panvas-compact-touch='true'] .panvas-mobile-sheet button { min-height: 40px; }
   .panvas-notebook-chrome {
     position: relative; inset: auto; flex-shrink: 0; padding: 8px; gap: 8px;
     min-height: 76px; background: rgb(var(--bg-primary));

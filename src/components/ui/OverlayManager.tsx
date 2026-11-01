@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useId, useLayoutEffect, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
+import { useIsCompactTouchViewport } from '@/hooks/useIsCompactTouchViewport';
 
 interface OverlayManagerProps {
   children: React.ReactNode;
@@ -46,7 +47,10 @@ export function OverlayManager({
   zIndex = 60,
 }: OverlayManagerProps) {
   const isPhone = useIsMobileViewport();
-  const shouldUseSheet = isPhone && asSheet;
+  // Landscape phones and small touch tablets read menus as sheets too; wide
+  // screens and desktop windows keep the anchored panel.
+  const compactTouchViewport = useIsCompactTouchViewport();
+  const shouldUseSheet = (isPhone || compactTouchViewport) && asSheet;
   const overlayRef = useRef<HTMLDivElement>(null);
   const overlayId = useId();
   const parentOverlayId = useContext(ParentOverlayContext);
@@ -87,7 +91,10 @@ export function OverlayManager({
       if (boundary) viewportBottom = Math.min(viewportBottom, boundary.bottom - viewportPadding);
       const dock = document.querySelector<HTMLElement>('.panvas-mobile-tool-dock');
       if (dock && dock.getBoundingClientRect().height > 0) viewportBottom = Math.min(viewportBottom, dock.getBoundingClientRect().top - 8);
-      const maxWidth = Math.max(0, viewportRight - viewportLeft);
+      const viewportWidth = viewport?.width ?? window.innerWidth;
+      // Sheets span the visual viewport edge to edge; anchored panels clamp
+      // beside their trigger.
+      const maxWidth = shouldUseSheet ? Math.max(0, viewportWidth) : Math.max(0, viewportRight - viewportLeft);
       overlay.style.maxWidth = `${maxWidth}px`;
       const overlayRect = overlay.getBoundingClientRect();
       const content = overlay.firstElementChild as HTMLElement | null;
@@ -110,7 +117,9 @@ export function OverlayManager({
 
       // Horizontal placement
       const preferredLeft = placement.endsWith('start') ? targetRect.left + offset.x : targetRect.right - overlayRect.width + offset.x;
-      const left = Math.max(viewportLeft, Math.min(preferredLeft, viewportRight - overlayRect.width));
+      const left = shouldUseSheet
+        ? (viewport?.offsetLeft ?? 0)
+        : Math.max(viewportLeft, Math.min(preferredLeft, viewportRight - overlayRect.width));
       setPosition(previous => previous.top === top && previous.left === left && previous.maxWidth === maxWidth && previous.maxHeight === maxHeight ? previous : { top, left, maxWidth, maxHeight });
     };
 

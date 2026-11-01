@@ -3,12 +3,13 @@ import { StickyGallery } from './StickyGallery';
 import { LINE_STYLES, buildLineStyleGeometry, type LineStyle } from './engine/lineStyleGeometry';
 import type { InkFamily } from './engine/drawingTypes';
 import { INK_FAMILIES, buildInkFamilyGeometry, inkPolygonsPath } from './engine/inkFamilyGeometry';
-import React, { useState, useRef, useEffect } from 'react';
-import { 
-  Bold, Italic, Underline, Heading1, Heading2, Heading3, 
-  List, ListChecks, Quote, Code2, 
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
+import {
+  Bold, Italic, Underline, Heading1, Heading2, Heading3,
+  List, ListChecks, Quote, Code2,
   PenTool, Pencil, Highlighter, Eraser, MousePointer2, Square, Circle, ArrowRight, Minus, Slash, Type, Hand,
-  Undo2, Redo2, X, MoreHorizontal, PenTool as PenToolIcon, ChevronLeft, ChevronRight, Maximize2, Minimize2, PanelLeft, PanelRight,
+  Undo2, Redo2, X, MoreHorizontal, PenTool as PenToolIcon, ChevronLeft, ChevronRight, ChevronUp, Maximize2, Minimize2, PanelLeft, PanelRight,
   Strikethrough, AlignLeft, AlignCenter, AlignRight, AlignJustify, ListOrdered, Palette, PaintBucket, Image as ImageIcon, Ruler, StickyNote, Languages,
   CircleDot, Crosshair, LassoSelect, ScanLine, Shapes, Spline, Check, Link2
 } from 'lucide-react';
@@ -181,9 +182,12 @@ interface NotebookFloatingToolbarProps {
   availableWidth?: number | null;
   pageUtilities?: React.ReactNode;
   overflowActions?: React.ReactNode;
+  /** Keeps the mobile dock on screen while a host-owned surface (sheet,
+      inspector) is open, so it never slides away underneath one. */
+  holdDockVisible?: boolean;
 }
 
-export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = ({ editor, engine, saveKey, workspaceId, onConvertHandwriting, embedded = false, hideCollapseButton = false, fullscreenToolOnly = false, availableWidth, pageUtilities, overflowActions }) => {
+export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = ({ editor, engine, saveKey, workspaceId, onConvertHandwriting, embedded = false, hideCollapseButton = false, fullscreenToolOnly = false, availableWidth, pageUtilities, overflowActions, holdDockVisible = false }) => {
   const isPhone = useIsMobileViewport();
   const compactTools = useIsMobileViewport(1023);
   // Derive the displayed tool from the same ToolManager snapshot used by input routing.
@@ -197,11 +201,58 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
   // locally keeps selection updates out of the whole NotebookRenderer subtree.
   const hasSelectedStrokes = engine.selection.hasSelectedStrokes();
 
+  // Reading-mode dock auto-hide. Inside a mobile tool dock, hand/select are
+  // reading tools: the dock slides away after a short idle so the document owns
+  // the screen. A small handle at the bottom edge — or a tap anywhere on the
+  // document — brings it back. Drawing tools, open menus, an active selection,
+  // or a host sheet hold the dock in place. The dock itself is a positioned
+  // overlay, so this never resizes the scroll viewport or relayouts pages.
+  const [inMobileDock, setInMobileDock] = useState(false);
+  const [dockHidden, setDockHidden] = useState(false);
+  const [dockRevealTick, setDockRevealTick] = useState(0);
+  const dockElementRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const dock = containerRef.current?.closest<HTMLElement>('.panvas-mobile-tool-dock') ?? null;
+    dockElementRef.current = dock;
+    setInMobileDock(Boolean(dock));
+  }, []);
+  const revealMobileDock = useCallback(() => {
+    setDockHidden(false);
+    setDockRevealTick(tick => tick + 1);
+  }, []);
+  useEffect(() => {
+    if (!inMobileDock) return undefined;
+    const reveal = () => {
+      if (dockElementRef.current?.dataset.dockHidden !== 'true') return;
+      revealMobileDock();
+    };
+    window.addEventListener('panvas:dock-reveal', reveal);
+    return () => window.removeEventListener('panvas:dock-reveal', reveal);
+  }, [inMobileDock, revealMobileDock]);
+
   const [showPopup, setShowPopup] = useState(false);
   const [showHandwritingPalette, setShowHandwritingPalette] = useState(false);
   const [showOverflow, setShowOverflow] = useState(false);
   const [showGesturePopup, setShowGesturePopup] = useState(false);
-  
+  const dockMenusOpen = showPopup || showHandwritingPalette || showOverflow || showGesturePopup;
+  const dockIdleReading = inMobileDock
+    && (activeTool === 'hand' || activeTool === 'select')
+    && !dockMenusOpen
+    && !hasSelectedStrokes
+    && !holdDockVisible;
+  useEffect(() => {
+    if (!dockIdleReading) {
+      setDockHidden(false);
+      return undefined;
+    }
+    const timer = setTimeout(() => setDockHidden(true), 2400);
+    return () => clearTimeout(timer);
+  }, [dockIdleReading, dockRevealTick]);
+  useEffect(() => {
+    const dock = dockElementRef.current;
+    if (dock) dock.dataset.dockHidden = dockHidden ? 'true' : 'false';
+  }, [dockHidden, inMobileDock]);
+
   const { 
     notebookModeLevel, setNotebookModeLevel,
     isToolbarCollapsed, setToolbarCollapsed,
@@ -1034,7 +1085,7 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
               )}
             </button>
 
-            <OverlayManager isOpen={showOverflow} onClose={() => setShowOverflow(false)} anchorRef={overflowAnchorRef} placement={compactTools ? 'top-end' : 'bottom-end'}>
+            <OverlayManager isOpen={showOverflow} onClose={() => setShowOverflow(false)} anchorRef={overflowAnchorRef} placement={compactTools ? 'top-end' : 'bottom-end'} asSheet>
               <div
                 className="panvas-more-menu panvas-floating-surface flex w-max flex-col gap-2 p-2 max-[1023px]:gap-1 max-[1023px]:w-[min(20rem,calc(100vw-1.5rem))]"
                 role="menu"
@@ -1049,7 +1100,7 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
                 </div>}
                 {pageUtilities && (
                   <div>
-                    {isPhone && <div className="px-2 pb-1 text-xs font-medium text-panvas-text-secondary">Page actions</div>}
+                    {(isPhone || inMobileDock) && <div className="px-2 pb-1 text-xs font-medium text-panvas-text-secondary">Page actions</div>}
                     <div className="flex items-center gap-1 max-[1023px]:flex-wrap max-[1023px]:justify-start">
                       {pageUtilities}
                     </div>
@@ -1099,7 +1150,7 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
                       </button>
                     ) : (
                       <div>
-                      {isPhone && <div className="px-2 pb-1 text-xs font-medium text-panvas-text-secondary">{({ history: 'History', handwriting: 'Handwriting to text', primary: 'Writing tools', pencil: 'Pencil', select: 'Selection', hand: 'Move around the page', image: 'Insert image or sticky note', shapes: 'Shapes', ruler: 'Ruler', laser: 'Presentation pointer', format: 'Formatting' } as Record<string, string>)[groupId]}</div>}
+                      {(isPhone || inMobileDock) && <div className="px-2 pb-1 text-xs font-medium text-panvas-text-secondary">{({ history: 'History', handwriting: 'Handwriting to text', primary: 'Writing tools', pencil: 'Pencil', select: 'Selection', hand: 'Move around the page', image: 'Insert image or sticky note', shapes: 'Shapes', ruler: 'Ruler', laser: 'Presentation pointer', format: 'Formatting' } as Record<string, string>)[groupId]}</div>}
                       <div className="flex items-center justify-center gap-1 max-[1023px]:flex-wrap max-[1023px]:justify-start">
                         {groupById.get(groupId)?.items.filter(item => !(layout.visible.includes('active-tool') && groupId === 'primary' && React.isValidElement(item) && item.key === activeTool))}
                       </div>
@@ -1193,6 +1244,19 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
           <Languages size={14} className="text-panvas-accent-blue" aria-hidden="true" />
           Convert to Text
         </button>
+      )}
+
+      {inMobileDock && dockHidden && createPortal(
+        <button
+          type="button"
+          className="panvas-mobile-dock-reveal focus-ring"
+          aria-label="Show tools"
+          title="Show tools"
+          onClick={revealMobileDock}
+        >
+          <ChevronUp size={16} />
+        </button>,
+        document.body,
       )}
     </div>
   );

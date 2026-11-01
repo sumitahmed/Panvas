@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from 'react';
 import { flushSync } from 'react-dom';
-import { Bookmark, BookOpen, CalendarClock, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Download, FileText, Hand, Maximize2, MessageCircle, Minus, PanelLeftClose, PanelLeftOpen, PanelRight, Plus, Redo2, Undo2 } from 'lucide-react';
+import { Bookmark, BookOpen, CalendarClock, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Download, FileText, Hand, Maximize2, MessageCircle, Minus, PanelLeftClose, PanelLeftOpen, PanelRight, Plus, Redo2, Scan, Undo2 } from 'lucide-react';
 import { PdfThumbnailSidebar } from './PdfThumbnailSidebar';
 import { PdfPageRenderer } from './PdfPageRenderer';
 import { PdfStaticAnnotationLayer } from './PdfStaticAnnotationLayer';
@@ -36,7 +36,7 @@ import { NoteSpaceControl } from '@/components/notebook/NoteSpaceControl';
 import { resolveActivePdfPage } from './pdfNavigation';
 import { attachTwoFingerViewportGesture } from '@/components/notebook/engine/touchViewportGesture';
 import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
-import { useHasTouchInput } from '@/hooks/useHasTouchInput';
+import { useIsCompactTouchViewport } from '@/hooks/useIsCompactTouchViewport';
 import { useFullDarkView } from '@/hooks/useFullDarkView';
 import { fullDarkSurfaceColor } from '@/lib/fullDarkView';
 import { savePdfPosition, getPdfPosition } from '@/lib/readingPosition';
@@ -56,8 +56,8 @@ const PDF_RESIDENT_PAGE_RADIUS = 5;
 
 export function PdfWorkspace({ page }: { page?: NotebookPage }) {
   const isPhone = useIsMobileViewport();
-  const compactViewport = useIsMobileViewport(1023);
-  const hasTouchInput = useHasTouchInput();
+  // Landscape phones and small touch tablets read on the mobile dock too.
+  const compactTouchViewport = useIsCompactTouchViewport();
   const fullDarkView = useFullDarkView();
   const [mobileControlsOpen, setMobileControlsOpen] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
@@ -73,7 +73,7 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
   const { pdfDocument, numPages, isLoading, error } = usePdfDocument(page?.pdfDataId);
   const { workspaces, notebooks, loadWorkspaceContents, setActivePage } = useWorkspaceStore();
   const { notebookModeLevel, setNotebookModeLevel, workspaceViewMode, setWorkspaceViewMode, paneLayout } = useLayoutStore();
-  const useToolDock = isPhone || (compactViewport && hasTouchInput);
+  const useToolDock = isPhone || compactTouchViewport;
   const { isPropertiesPanelOpen, togglePropertiesPanel } = useUIStore();
   
   const notebook = page ? notebooks.find(item => item.id === page.notebookId) : undefined;
@@ -413,18 +413,47 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
   }, [containerSize, documentSessionId, geometryReady, page?.id, pdfPageState.pageOrder, viewport.scale]);
 
   useEffect(() => {
-    const fitKey = isPhone ? `${documentSessionId}:${containerSize.width}` : documentSessionId;
+    const fitKey = useToolDock ? `${documentSessionId}:${containerSize.width}` : documentSessionId;
     if (!documentSessionId || fittedDocumentRef.current === fitKey) return;
-    if (!isPhone && isSidebarOpen && sidebarWidth === 0) return; // Wait for the sidebar ResizeObserver to finish
+    if (!useToolDock && isSidebarOpen && sidebarWidth === 0) return; // Wait for the sidebar ResizeObserver to finish
     if (containerSize.width === 0 || paperDimensions.width === 0 || dimensionsSourceId !== page?.pdfDataId) return;
-    
-    const availableWidth = Math.max(100, containerSize.width - (!isPhone && isSidebarOpen ? sidebarWidth : 0));
-    const fitZoom = (availableWidth - (isPhone ? 16 : 40)) / paperDimensions.width;
-    
+
+    // Docked sessions refit whenever the layout width changes: rotating a
+    // phone must re-fit to the new width instead of keeping the portrait
+    // scale that leaves the page tiny in the middle of the screen. Desktop
+    // keeps one stable zoom level per document session.
+    const wasFitted = fittedDocumentRef.current !== null;
+    const isRotationRefit = useToolDock && wasFitted;
+    const scroller = documentScrollRef.current;
+    const scrollFraction = isRotationRefit && scroller && scroller.scrollHeight > 0
+      ? scroller.scrollTop / scroller.scrollHeight
+      : null;
+
+    const availableWidth = Math.max(100, containerSize.width - (!useToolDock && isSidebarOpen ? sidebarWidth : 0));
+    const fitZoom = (availableWidth - (useToolDock ? 16 : 40)) / paperDimensions.width;
+
     notebookEngine.viewport.setZoom(fitZoom);
     notebookEngine.viewport.setPan(0, 0);
     fittedDocumentRef.current = fitKey;
-  }, [documentSessionId, dimensionsSourceId, page?.pdfDataId, isSidebarOpen, sidebarWidth, containerSize.width, paperDimensions.width, notebookEngine, isPhone]);
+
+    // Return the reader to the same relative document position after the
+    // refit, and re-center the visible page horizontally (the grown layout
+    // padding would otherwise leave it half off-screen). The second frame
+    // waits for the new scale's layout to commit.
+    if (isRotationRefit && scroller) {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          const pageElement = pageElementRefs.current.get(visiblePageRef.current) ?? pageElementRefs.current.get(1);
+          if (pageElement) {
+            const bounds = scroller.getBoundingClientRect();
+            const pageBounds = pageElement.getBoundingClientRect();
+            scroller.scrollLeft += pageBounds.left + pageBounds.width / 2 - bounds.left - bounds.width / 2;
+          }
+          if (scrollFraction !== null) scroller.scrollTop = scrollFraction * scroller.scrollHeight;
+        });
+      });
+    }
+  }, [documentSessionId, dimensionsSourceId, page?.pdfDataId, isSidebarOpen, sidebarWidth, containerSize.width, paperDimensions.width, notebookEngine, useToolDock]);
 
   // Cache document geometry on layout changes, not on each native scroll rAF.
   const pageFrames = useRef<Array<{ page: number; top: number; bottom: number }>>([]);
@@ -740,6 +769,37 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
     };
   }, [notebookEngine, workspace, notebook, page, currentPage]);
 
+  // Fit the whole page inside the visible document area (clearing the tool
+  // dock and safe-area padding), unlike Fit width which fills horizontally.
+  const handleFitPage = useCallback(() => {
+    const scroller = documentScrollRef.current;
+    if (!scroller || paperDimensions.width === 0 || paperDimensions.height === 0) return;
+    const styles = window.getComputedStyle(scroller);
+    const availableWidth = scroller.clientWidth - parseFloat(styles.paddingLeft || '0') - parseFloat(styles.paddingRight || '0');
+    const availableHeight = scroller.clientHeight - parseFloat(styles.paddingTop || '0') - parseFloat(styles.paddingBottom || '0');
+    if (availableWidth <= 0 || availableHeight <= 0) return;
+    const fitZoom = Math.min(availableWidth / paperDimensions.width, availableHeight / paperDimensions.height);
+    setZoomStable(fitZoom);
+    notebookEngine.viewport.setPan(0, 0);
+  }, [notebookEngine, paperDimensions.height, paperDimensions.width, setZoomStable]);
+
+  // A quick tap (not a scroll or pinch) on the document in reading mode asks
+  // the mobile tool dock to reveal itself.
+  const dockTapRef = useRef<{ pointerId: number; x: number; y: number; time: number } | null>(null);
+  const handleDockTapStart = useCallback((event: React.PointerEvent) => {
+    if (event.pointerType !== 'touch') return;
+    dockTapRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, time: performance.now() };
+  }, []);
+  const handleDockTapEnd = useCallback((event: React.PointerEvent) => {
+    if (event.pointerType !== 'touch') return;
+    const tap = dockTapRef.current;
+    dockTapRef.current = null;
+    if (!tap || tap.pointerId !== event.pointerId) return;
+    const moved = Math.hypot(event.clientX - tap.x, event.clientY - tap.y);
+    if (moved > 12 || performance.now() - tap.time > 350) return;
+    window.dispatchEvent(new CustomEvent('panvas:dock-reveal'));
+  }, []);
+
   const handleExport = useCallback(async () => {
     if (!workspace || !notebook || !page?.pdfDataId) return;
     try {
@@ -857,10 +917,17 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
   }
 
   return (
-    <main 
-      className="relative flex h-full w-full flex-col overflow-hidden bg-panvas-bg-secondary select-none"
+    <main
+      className={`relative flex h-full w-full flex-col overflow-hidden bg-panvas-bg-secondary select-none ${useToolDock ? 'panvas-mobile-docked' : ''}`}
       ref={containerRef}
     >
+      {/* Floating Full Page exit control: with the dock auto-hidden in reading
+          mode this pill is the always-visible way out of Full Page. */}
+      {useToolDock && workspaceViewMode !== 'present' && notebookModeLevel === 2 && (
+        <div className="panvas-layer-toolbar absolute right-2 top-2 z-40 pointer-events-auto">
+          <NotebookWorkspaceControls focusOnly />
+        </div>
+      )}
       {!useToolDock && workspaceViewMode !== 'present' && notebookModeLevel === 2 && <div className="panvas-pdf-fullpage-controls panvas-layer-toolbar panvas-floating-surface absolute z-40 flex items-center gap-1 p-1">
         <button type="button" aria-label="PDF pages" className="panvas-icon-control" onClick={() => setIsSidebarOpen(value => !value)}><PanelLeftOpen size={18} /></button>
         <button type="button" className="min-w-0 whitespace-nowrap px-2 text-xs" onClick={() => setMobileControlsOpen(value => !value)} aria-label="PDF page controls">{currentOrderIndex + 1} / {numPages}</button>
@@ -985,7 +1052,13 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
         </div>}
       </div>
 
-      <div ref={documentScrollRef} data-panvas-scroll-viewport style={{ overflowAnchor: 'none' }} className={useToolDock ? 'panvas-pdf-docked-viewport relative min-h-0 flex-1 overflow-auto p-2' : 'absolute inset-0 overflow-auto px-8 pb-28 pt-28'} aria-label="PDF document pages">
+      <div
+        ref={documentScrollRef}
+        data-panvas-scroll-viewport
+        style={{ overflowAnchor: 'none' }}
+        onPointerDownCapture={handleDockTapStart}
+        onPointerUp={handleDockTapEnd}
+        className={useToolDock ? 'panvas-pdf-docked-viewport relative min-h-0 flex-1 overflow-auto p-2' : 'absolute inset-0 overflow-auto px-8 pb-28 pt-28'} aria-label="PDF document pages">
         <div className="mx-auto flex min-w-max flex-col items-center gap-8" style={{ width: 'max-content', paddingInline: containerSize.width / 2, paddingBlock: containerSize.height / 2 }}>
           {!geometryReady && <div className="flex min-h-[40vh] items-center justify-center text-sm text-panvas-text-tertiary">Preparing stable page layout…</div>}
           {geometryReady && (!isPhone && paneLayout === 'two-page'
@@ -1056,11 +1129,13 @@ export function PdfWorkspace({ page }: { page?: NotebookPage }) {
       </div>
       {useToolDock && workspaceViewMode === 'edit' && <div className="panvas-mobile-tool-dock"><NotebookFloatingToolbar
         engine={notebookEngine} editor={activeEditor} saveKey={page ? pdfAnnotationStorageId(page.id, currentPage) : undefined} workspaceId={workspace?.id}
+        holdDockVisible={mobileControlsOpen || isPropertiesPanelOpen}
         overflowActions={<>
           <NotebookWorkspaceControls focusOnly embedded showLabel />
           <button type="button" className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-panvas-bg-hover focus-ring" aria-label="PDF pages" onClick={() => setIsSidebarOpen(value => !value)}><PanelLeftOpen size={18} />PDF pages</button>
           <button type="button" className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-panvas-bg-hover focus-ring" aria-label="PDF page controls" onClick={() => setMobileControlsOpen(true)}><BookOpen size={18} />Page {currentOrderIndex + 1} of {numPages} · Zoom and export</button>
           <button type="button" className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-panvas-bg-hover focus-ring" aria-label="Fit PDF width" onClick={() => setZoomStable((containerSize.width - 16) / paperDimensions.width)}><Maximize2 size={18} />Fit width</button>
+          <button type="button" className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-panvas-bg-hover focus-ring" aria-label="Fit PDF page" onClick={handleFitPage}><Scan size={18} />Fit page</button>
           <button type="button" className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-panvas-bg-hover focus-ring" aria-label="Open page and view inspector" onClick={togglePropertiesPanel}><PanelRight size={18} />Page and view</button>
         </>}
         pageUtilities={<NotebookPageUtilities engine={notebookEngine} workspaceId={workspace?.id} notebookId={notebook?.id} ownerId={page ? pdfAnnotationStorageId(page.id, currentPage) : undefined} editable onPageDataPersisted={handlePageAudioPersisted} onChange={handleLayersChange} compact />}

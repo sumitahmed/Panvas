@@ -219,7 +219,7 @@ test('fullscreen notebook chrome is one hideable drawing-tool header', async () 
   const start = renderer.indexOf('aria-label="Fullscreen notebook tools"');
   // Stop before the normal-mode utility header so the assertions only inspect
   // the fullscreen branch itself.
-  const end = renderer.indexOf("{!isMobileViewport && workspaceViewMode !== 'present' && notebookModeLevel !== 2", start);
+  const end = renderer.indexOf("{!isMobileViewport && !useMobileDock && workspaceViewMode !== 'present' && notebookModeLevel !== 2", start);
   assert.ok(start >= 0 && end > start, 'fullscreen toolbar block should be present');
   const fullscreen = renderer.slice(start, end);
   assert.match(renderer, /aria-label="Fullscreen notebook tools"/);
@@ -266,8 +266,8 @@ test('fullscreen measurement host is full-width but the painted toolbar surface 
 
 test('fullscreen exit remains beside the expanded toolbar and reachable after restore', async () => {
   const renderer = await readFile(new URL('../src/components/notebook/NotebookRenderer.tsx', import.meta.url), 'utf8');
-  const start = renderer.indexOf("!isMobileViewport && workspaceViewMode !== 'present' && notebookModeLevel === 2");
-  const end = renderer.indexOf("!isMobileViewport && workspaceViewMode !== 'present' && notebookModeLevel !== 2", start);
+  const start = renderer.indexOf("!isMobileViewport && !useMobileDock && workspaceViewMode !== 'present' && notebookModeLevel === 2");
+  const end = renderer.indexOf("!isMobileViewport && !useMobileDock && workspaceViewMode !== 'present' && notebookModeLevel !== 2", start);
   assert.ok(start > -1 && end > start, 'inspect the desktop fullscreen branch, independently of the mobile header');
   const fullscreen = renderer.slice(start, end);
   assert.match(fullscreen, /NotebookWorkspaceControls focusOnly embedded/);

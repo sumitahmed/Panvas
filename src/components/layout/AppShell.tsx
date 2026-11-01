@@ -14,6 +14,7 @@ import { useUIStore } from '@/stores/uiStore';
 import { useLayoutStore } from '@/stores/layoutStore';
 import { useWorkspaceStore } from '@/stores/workspaceStore';
 import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
+import { useIsCompactTouchViewport } from '@/hooks/useIsCompactTouchViewport';
 import { useMobileVisualViewport } from '@/hooks/useMobileVisualViewport';
 import { useHasTouchInput } from '@/hooks/useHasTouchInput';
 
@@ -29,7 +30,16 @@ export function AppShell({ children }: AppShellProps) {
   const isMobileViewport = useIsMobileViewport();
   const hasTouchInput = useHasTouchInput();
   const useLibraryDrawer = useIsMobileViewport(819);
+  const compactTouchViewport = useIsCompactTouchViewport();
   useMobileVisualViewport(hasTouchInput || isMobileViewport);
+
+  // Landscape phones and small touch tablets (600–1023px, coarse pointer) share
+  // the phone chrome contract. Expose the state for stylesheet scoping so the
+  // dock, sheets, and status bar rules follow the device, not just the width.
+  useEffect(() => {
+    document.documentElement.dataset.panvasCompactTouch = compactTouchViewport ? 'true' : 'false';
+  }, [compactTouchViewport]);
+
   const [location] = useLocation();
   const hideAppChrome = notebookModeLevel > 0 || workspaceViewMode === 'present';
   useEffect(() => {
@@ -117,8 +127,9 @@ export function AppShell({ children }: AppShellProps) {
         </div>
       </div>
 
-      {/* Status Bar */}
-      <div className={hideAppChrome ? 'hidden' : 'max-[599px]:hidden'}>
+      {/* Status Bar. Phones and landscape touch sessions read documents
+          without a desktop status band. */}
+      <div className={hideAppChrome || compactTouchViewport ? 'hidden' : 'max-[599px]:hidden'}>
         <StatusBar />
       </div>
     </div>

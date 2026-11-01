@@ -227,18 +227,23 @@ async function verifyEditing(page) {
   assert.equal(returned.objects.find(o => o.id === 'text-24-2').metadata.isStickyNote, true);
   // Real native pointer input on an inactive page must not snap the scroller,
   // and the first pen stroke must be routed to that page's new live owner.
+  // The mobile tool dock floats over the document; while it is shown it owns
+  // its bottom band, so input targets (like user aims) stay above it.
   await page.evaluate(() => window.documentFixture.engine().tools.setMode('hand'));
-  const target = await page.evaluate(() => {
+  const findTarget = () => page.evaluate(() => {
     const scroller = document.querySelector('[aria-label="PDF document pages"]'), box = scroller.getBoundingClientRect();
+    const dock = document.querySelector('.panvas-mobile-tool-dock');
+    const dockTop = dock && dock.dataset.dockHidden !== 'true' ? dock.getBoundingClientRect().top : innerHeight;
     const canvas = window.documentFixture.engine().drawing.getCanvasElement();
     const active = canvas.closest('[data-pdf-source-page]');
     scroller.scrollTop += active.getBoundingClientRect().bottom - box.top - box.height * .45;
     for (const element of document.querySelectorAll('[data-pdf-source-page]')) {
       const b = element.getBoundingClientRect();
-      const top = Math.max(box.top + 16, b.top + 16), bottom = Math.min(box.bottom - 16, b.bottom - 16);
+      const top = Math.max(box.top + 16, b.top + 16), bottom = Math.min(box.bottom - 16, dockTop - 8, b.bottom - 16);
       if (element !== active && bottom > top) return { source: Number(element.dataset.pdfSourcePage), x: Math.max(box.left + 30, b.left + b.width / 2), y: (top + bottom) / 2, scrollTop: scroller.scrollTop };
     }
   });
+  let target = await findTarget();
   assert.ok(target, 'there is a visible inactive page for input handoff');
   const session = await page.context().newCDPSession(page);
   if (!electronMode) {
@@ -246,6 +251,10 @@ async function verifyEditing(page) {
     await frames(page, 2);
     assert.equal(await page.locator('[aria-label="PDF document pages"]').evaluate(element => element.scrollTop), target.scrollTop, 'touching a nearby page with Hand does not snap it');
     await session.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    // The hand-mode tap can reveal an auto-hidden dock; re-aim below it.
+    await frames(page, 2);
+    target = await findTarget();
+    assert.ok(target, 'there is a visible inactive page for the pen handoff');
   }
   await page.evaluate(() => window.documentFixture.engine().tools.setDrawingTool('pen'));
   await session.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: target.x, y: target.y, button: 'left', buttons: 1, clickCount: 1, pointerType: 'pen', force: .6 });

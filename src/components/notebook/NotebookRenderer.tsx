@@ -40,6 +40,7 @@ import { installNotebookReferenceNavigation } from './notebookReferences';
 import { useToolState } from './useEngineState';
 import { attachTwoFingerViewportGesture } from './engine/touchViewportGesture';
 import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
+import { useIsCompactTouchViewport } from '@/hooks/useIsCompactTouchViewport';
 import { useHasTouchInput } from '@/hooks/useHasTouchInput';
 import { capturePageGeometryAnchor, derivePagePropertyOverrides, getNotebookPageDefaults, hasAuthoritativePageAppearance, resolveNotebookPageLayout, resolvePageDimensions, resolvePageGeometryScrollDelta, resolvePageProperties, resolvePageRenderProperties, resolveBasePageDimensions, type PageGeometryAnchor } from '@/lib/pageProperties';
 import type { NotebookPropertyBatchSnapshot, PagePropertySet } from '@/types/notebook';
@@ -470,6 +471,13 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   const isMobileViewport = useIsMobileViewport();
   const hasTouchInput = useHasTouchInput();
   const isCompactWorkspace = useIsMobileViewport(1023);
+  const compactTouchViewport = useIsCompactTouchViewport();
+  // Landscape phones and small touch tablets read on the mobile dock instead
+  // of the desktop floating chrome.
+  const useMobileDock = (isMobileViewport || compactTouchViewport) && workspaceViewMode === 'edit';
+  const dockFitViewport = isMobileViewport || compactTouchViewport;
+  // Quick-tap tracking on the document scroller, used to reveal the auto-hidden mobile dock.
+  const dockTapRef = useRef<{ pointerId: number; x: number; y: number; time: number } | null>(null);
   const PROPERTIES_DRAWER_AUTOCLOSE_WIDTH = 680;
   useEffect(() => {
     if (!isPropertiesPanelOpen) return;
@@ -499,20 +507,20 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     // and repeatedly adds/removes the scrollbar. Use the stable layout width
     // to decide whether fitting is needed; retain the available width below.
     const layoutWidth = containerRef.current?.offsetWidth ?? containerSize.width;
-    const fitKey = `${isMobileViewport}:${layoutWidth}:${paperDimensions.width}:${activeNotebookSectionId}`;
-    const phoneResized = isMobileViewport && fittedViewportRef.current !== fitKey;
+    const fitKey = `${dockFitViewport}:${layoutWidth}:${paperDimensions.width}:${activeNotebookSectionId}`;
+    const phoneResized = dockFitViewport && fittedViewportRef.current !== fitKey;
     const wasAutoFitted = fittedScaleRef.current !== null && Math.abs(notebookEngine.viewport.getState().scale - fittedScaleRef.current) < 0.001;
-    const changedComposition = fittedViewportRef.current !== '' && !fittedViewportRef.current.startsWith(`${isMobileViewport}:`);
+    const changedComposition = fittedViewportRef.current !== '' && !fittedViewportRef.current.startsWith(`${dockFitViewport}:`);
     if (hasAutoZoomed.current && !phoneResized && !wasAutoFitted && !changedComposition) return;
 
-    const targetWidth = isMobileViewport ? containerSize.width - 16 : containerSize.width * 0.85;
+    const targetWidth = dockFitViewport ? containerSize.width - 16 : containerSize.width * 0.85;
     const fitZoom = Math.max(0.25, Math.min(1.75, targetWidth / paperDimensions.width));
     notebookEngine.viewport.setZoom(fitZoom);
-    if (isMobileViewport && containerRef.current) containerRef.current.scrollLeft = 0;
+    if (dockFitViewport && containerRef.current) containerRef.current.scrollLeft = 0;
     fittedViewportRef.current = fitKey;
     fittedScaleRef.current = fitZoom;
     hasAutoZoomed.current = true;
-  }, [containerSize.width, paperDimensions.width, notebookEngine, isMobileViewport, activeNotebookSectionId]);
+  }, [containerSize.width, paperDimensions.width, notebookEngine, dockFitViewport, activeNotebookSectionId]);
 
   // Reset auto-zoom when active notebook or section changes (not on every single page scroll)
   useEffect(() => {
@@ -968,9 +976,9 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         mode = state.mode;
         cancel();
       }),
-      getContentOffset: scale => ({ x: Math.max((container.clientWidth - layoutConfig.totalWidth * scale) / 2, isMobileViewport ? 8 : 32), y: 0 }),
+      getContentOffset: scale => ({ x: Math.max((container.clientWidth - layoutConfig.totalWidth * scale) / 2, dockFitViewport ? 8 : 32), y: 0 }),
     });
-  }, [notebookEngine, hasActivePage, layoutConfig.totalWidth, isMobileViewport, navigationGestures]);
+  }, [notebookEngine, hasActivePage, layoutConfig.totalWidth, dockFitViewport, navigationGestures]);
 
 
   // Central persistence writer for drawing data. Every notebook save goes
@@ -2991,7 +2999,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   return (
     <React.Profiler id="NotebookSurface" onRender={gate0OnRender}>
     <div
-      className={`panvas-notebook-workspace relative flex h-full w-full min-w-0 overflow-hidden bg-panvas-bg-primary ${isCompactWorkspace ? 'flex-col' : ''}`}
+      className={`panvas-notebook-workspace relative flex h-full w-full min-w-0 overflow-hidden bg-panvas-bg-primary ${isCompactWorkspace ? 'flex-col' : ''} ${useMobileDock ? 'panvas-mobile-docked' : ''}`}
       onPaste={workspaceViewMode === 'edit' ? handlePaste : undefined}
       onDrop={workspaceViewMode === 'edit' ? handleDrop : undefined}
       onDragOver={workspaceViewMode === 'edit' ? handleDragOver : undefined}
@@ -3008,19 +3016,19 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
           interactive turned the whole top band into an invisible click sink over the top of
           page 1 and over anything scrolled beneath it. Each child re-enables pointer events
           on its own visible chrome. */}
-      {isMobileViewport && workspaceViewMode !== 'present' && notebookModeLevel !== 2 && <div className="panvas-mobile-document-header">
+      {(isMobileViewport || compactTouchViewport) && workspaceViewMode !== 'present' && notebookModeLevel !== 2 && <div className="panvas-mobile-document-header">
         <button type="button" className="min-w-0 flex-1 truncate text-left text-xs font-medium" onClick={() => useUIStore.getState().toggleSidebar()} title="Browse notebook pages">{focusedPage?.title ?? 'Notebook'}</button>
         <button type="button" onClick={() => handlePanelZoom((containerSize.width - 16) / paperDimensions.width / viewport.scale)} className="shrink-0 whitespace-nowrap px-2 text-xs" aria-label="Fit page width">Fit width</button>
         <button type="button" className="panvas-icon-control focus-ring" onClick={() => useUIStore.getState().togglePropertiesPanel()} aria-label="Open page and view inspector" aria-expanded={isPropertiesPanelOpen}><PanelRight size={18} /></button>
         <NotebookPageUtilities engine={notebookEngine} workspaceId={workspace?.id} notebookId={notebook?.id} ownerId={focusedPage?.id} editable={workspaceViewMode === 'edit'} onPageDataPersisted={handlePageAudioPersisted} onVoiceDelete={handleDeleteVoiceNote} onVoiceRename={handleRenameVoiceNote} onChange={handleLayersChange} compact onExportPage={() => void handleExportPagePdf()} onExportNotebook={() => void handleExportNotebookPdf()} onPrintPage={() => void handlePrintPage()} onPrintNotebook={() => void handlePrintNotebook()} isExporting={isExportingPdf} />
         <NotebookWorkspaceControls focusOnly embedded />
       </div>}
-      {isMobileViewport && workspaceViewMode !== 'present' && notebookModeLevel === 2 && (
+      {(isMobileViewport || compactTouchViewport) && workspaceViewMode !== 'present' && notebookModeLevel === 2 && (
         <div className="panvas-layer-toolbar absolute right-2 top-2 z-40 pointer-events-auto">
           <NotebookWorkspaceControls focusOnly />
         </div>
       )}
-      {!isMobileViewport && workspaceViewMode !== 'present' && notebookModeLevel === 2 && (
+      {!isMobileViewport && !useMobileDock && workspaceViewMode !== 'present' && notebookModeLevel === 2 && (
         isToolbarCollapsed ? (
           <button
             type="button"
@@ -3043,7 +3051,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
           </div>
         )
       )}
-      {!isMobileViewport && workspaceViewMode !== 'present' && notebookModeLevel !== 2 && <div style={{ marginRight: isCompactWorkspace ? reservedPropertiesWidth : undefined }} className={`panvas-notebook-chrome panvas-layer-toolbar absolute top-0 left-0 right-0 p-4 flex justify-between items-start pointer-events-none gap-4 ${isPropertiesPanelOpen ? 'right-72 max-[599px]:right-0' : ''}`}>
+      {!isMobileViewport && !useMobileDock && workspaceViewMode !== 'present' && notebookModeLevel !== 2 && <div style={{ marginRight: isCompactWorkspace ? reservedPropertiesWidth : undefined }} className={`panvas-notebook-chrome panvas-layer-toolbar absolute top-0 left-0 right-0 p-4 flex justify-between items-start pointer-events-none gap-4 ${isPropertiesPanelOpen ? 'right-72 max-[599px]:right-0' : ''}`}>
         {/* Below ~500px of notebook width the navigator's minimum footprint
             (~116px even fully truncated) starves the toolbar cell below the
             minimal tier and the bar overlaps the workspace controls. Tool
@@ -3089,6 +3097,20 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
           if (contextMenu.isOpen) {
             setContextMenu(prev => ({ ...prev, isOpen: false }));
           }
+          if (e.pointerType === 'touch') {
+            dockTapRef.current = { pointerId: e.pointerId, x: e.clientX, y: e.clientY, time: performance.now() };
+          }
+        }}
+        onPointerUp={e => {
+          // A quick tap (not a scroll or pinch) on the document in reading
+          // mode asks the mobile tool dock to reveal itself.
+          if (e.pointerType !== 'touch') return;
+          const tap = dockTapRef.current;
+          dockTapRef.current = null;
+          if (!tap || tap.pointerId !== e.pointerId) return;
+          const moved = Math.hypot(e.clientX - tap.x, e.clientY - tap.y);
+          if (moved > 12 || performance.now() - tap.time > 350) return;
+          window.dispatchEvent(new CustomEvent('panvas:dock-reveal'));
         }}
         onPointerMove={e => {
           if (e.pointerType === 'touch' && !isTouchDevice) setIsTouchDevice(true);
@@ -3232,11 +3254,12 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         )}
       </main>
 
-      {isMobileViewport && workspaceViewMode === 'edit' && <div className="panvas-mobile-tool-dock">
+      {useMobileDock && <div className="panvas-mobile-tool-dock">
         <NotebookFloatingToolbar
           editor={activeEditor}
           engine={notebookEngine}
           workspaceId={workspace?.id}
+          holdDockVisible={isPropertiesPanelOpen}
          
           onConvertHandwriting={openHandwritingConversion}
           pageUtilities={
