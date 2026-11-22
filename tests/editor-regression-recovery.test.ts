@@ -43,22 +43,25 @@ test('complete editor font registry is retained and every non-system face is sel
   assert.deepEqual([...HANDWRITING_FONT_FAMILIES], expectedHandwritingFonts);
   assert.deepEqual([...PANVAS_TEXT_FONT_FAMILIES], [...expectedStandardFonts, ...expectedHandwritingFonts]);
 
-  const [manifestText, fontStyles, bootstrap] = await Promise.all([
+  const [manifestText, fontStyles, handwritingLoaders, bootstrap] = await Promise.all([
     readFile('package.json', 'utf8'),
     readFile('src/styles/editor-fonts.css', 'utf8'),
+    readFile('src/components/notebook/handwritingFontLoaders.ts', 'utf8'),
     readFile('src/bootstrap.tsx', 'utf8'),
   ]);
   const dependencies = JSON.parse(manifestText).dependencies as Record<string, string>;
+  const combinedFontSources = `${fontStyles}\n${handwritingLoaders}`;
   for (const family of [
     'inter', 'newsreader', 'jetbrains-mono', 'patrick-hand', 'kalam', 'caveat',
     'permanent-marker', 'shadows-into-light', 'architects-daughter',
     'dancing-script', 'indie-flower', 'gochi-hand', 'schoolbell', 'sacramento',
   ]) {
     assert.ok(dependencies[`@fontsource/${family}`], `${family} must be a pinned local dependency`);
-    assert.match(fontStyles, new RegExp(`@fontsource/${family.replaceAll('-', '\\-')}/`));
+    assert.match(combinedFontSources, new RegExp(`@fontsource/${family.replaceAll('-', '\\-')}/`));
   }
   assert.match(bootstrap, /import\('@\/styles\/editor-fonts\.css'\)/);
   assert.doesNotMatch(fontStyles, /https?:\/\//);
+  assert.doesNotMatch(handwritingLoaders, /https?:\/\//);
 });
 
 test('font availability waits for the registered face instead of OS-only width guessing', async () => {

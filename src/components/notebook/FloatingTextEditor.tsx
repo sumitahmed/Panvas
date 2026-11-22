@@ -3,6 +3,7 @@ import { stickyPaperStyle } from './stickyNotes';
 import { isHandwritingTextObject, textObjectStyle } from './textTypography';
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { EditorContent, useEditor, type Editor } from '@tiptap/react';
+import { preloadObjectFontStylesheets } from './textFonts';
 import { Extension } from '@tiptap/core';
 import { Plugin } from '@tiptap/pm/state';
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
@@ -30,12 +31,13 @@ import {
 } from './stickyNotes';
 import { gate0Profiler } from '@/dev/gate0Profiler';
 import { useFullDarkView } from '@/hooks/useFullDarkView';
-import { fullDarkSurfaceColor } from '@/lib/fullDarkView';
+import { colorLuminance, fullDarkSurfaceColor } from '@/lib/fullDarkView';
 import { useDocumentTextPresentation } from './useDocumentTextPresentation';
 import { notebookDocumentViewContent } from './notebookDocumentView';
 import { OverlayManager } from '@/components/ui/OverlayManager';
 import { STICKY_NOTE_RESIZE_MIN, stickyShapeBounds } from './stickyNotes';
 import { documentLayoutHistoryExtension } from './documentLayoutTransition';
+import { markTextTypingActivity } from '@/services/cloudsync/drawingActivity';
 
 const STICKY_PALETTE_COLORS = STICKY_NOTE_COLORS.filter((color, index, colors) =>
   colors.findIndex(item => item.value === color.value) === index);
@@ -47,8 +49,10 @@ interface FloatingTextEditorProps {
   toolMode: string;
   onFocus: (editor: Editor) => void;
   onBlur: () => void;
+  onEditMathObject?: (object: TextObject) => void;
   zIndex?: number;
   pageOffset?: { x: number; y: number };
+  paperColor?: string;
   /** Optional PDF placement contract. Text coordinates remain source-page coordinates. */
   pdfPlacement?: {
     rotation: PdfPageRotation;
@@ -92,9 +96,11 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
   toolMode,
   onFocus,
   onBlur,
+  onEditMathObject,
   pdfPlacement,
   zIndex,
   pageOffset,
+  paperColor,
 }) => {
   gate0Profiler.resource('reactRenders.FloatingTextEditor', 1);
   useEffect(() => {
@@ -104,12 +110,16 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
   const selectedElements = engine.selection.getSelectedElements();
   const isSelected = selectedElements.some(el => el.id === object.id);
   const stickyNote = isStickyNote(object);
+  const isMathObject = object.metadata?.generatedFrom === 'handwriting-math'
+    || (Array.isArray(object.content?.content) && object.content.content.length === 1 && object.content.content[0]?.type === 'blockMath');
   const handwritingText = isHandwritingTextObject(object) && !stickyNote;
   const [stickyStylePanel, setStickyStylePanel] = useState<'color' | 'shape' | null>(null);
-  const textWidth = Math.max(stickyNote ? STICKY_NOTE_RESIZE_MIN : 160, object.width ?? 0);
-  const textMinHeight = stickyNote ? STICKY_NOTE_RESIZE_MIN : 72;
+  const minBoxWidth = stickyNote ? STICKY_NOTE_RESIZE_MIN : (isMathObject ? 88 : 160);
+  const textWidth = Math.max(minBoxWidth, object.width ?? 0);
+  const textMinHeight = stickyNote ? STICKY_NOTE_RESIZE_MIN : (isMathObject ? 44 : 72);
   const containerRef = useRef<HTMLDivElement>(null);
   const fullDarkView = useFullDarkView();
+  const paperIsDark = !stickyNote && colorLuminance(fullDarkView ? fullDarkSurfaceColor(paperColor || '#ffffff') : (paperColor || '#ffffff')) < 0.35;
   const surfaceRef = useRef<HTMLDivElement>(null);
   const stickyControlsRef = useRef<HTMLDivElement>(null);
   const gestureCleanup = useRef<(() => void) | null>(null);
@@ -130,10 +140,10 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
 
   useEffect(() => {
     setSize({
-      width: Math.max(stickyNote ? STICKY_NOTE_RESIZE_MIN : 160, object.width ?? 0),
+      width: Math.max(minBoxWidth, object.width ?? 0),
       height: object.height || textMinHeight,
     });
-  }, [object.width, object.height, stickyNote, textMinHeight]);
+  }, [object.width, object.height, minBoxWidth, textMinHeight]);
 
   const authoredContent = useRef<unknown>(null);
   const prepared = useMemo(() => authoredContent.current === object.content
@@ -167,6 +177,7 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
     shouldRerenderOnTransaction: false,
     onUpdate: ({ editor }) => {
       if (protectedContent) return;
+      markTextTypingActivity();
       const json = editor.getJSON();
       authoredContent.current = json;
       object.content = json;
@@ -221,7 +232,10 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
     },
   });
 
-  useDocumentTextPresentation(containerRef, fullDarkView && Boolean(editor), object.content);
+  useDocumentTextPresentation(containerRef, (fullDarkView || paperIsDark) && Boolean(editor), object.content);
+  useEffect(() => {
+    preloadObjectFontStylesheets(object.fontFamily, object.content);
+  }, [object.fontFamily, object.content]);
 
   useEffect(() => {
     if (editor) {
@@ -244,36 +258,48 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
   }, [object.id, editor]);
 
   // Sync actual content height back to the engine so selection engine draws correct bounds
+  const snuggedMathKeyRef = useRef<string | null>(null);
   useEffect(() => {
     const el = containerRef.current;
     // Sticky bounds belong to the resize gesture, not the paragraph's intrinsic height.
     if (!el || stickyNote) return;
-    const observer = new ResizeObserver((entries) => {
-      if (entries[0]) {
-        const measuredHeight = Math.ceil(entries[0].contentRect.height);
-        // Keep a stable editing floor so the first keystroke cannot collapse a
-        // newly-created box to a tiny line and then jump as TipTap lays out.
-        const nextHeight = Math.max(textMinHeight, measuredHeight);
-        if (Math.abs((object.height ?? 0) - nextHeight) < 1) return;
-        // The current DOM content is the source of truth. Keep only a stable
-        // usable editor floor; never retain a previous, larger object height.
-        object.height = nextHeight;
-        engine.texts.updateTextBounds(object.id, size.width, nextHeight);
-        // Text is a DOM overlay, so its intrinsic height does not change the
-        // committed ink pixels. Only the selection chrome reads these bounds.
-        // Mounting a dense page can fire this observer for every text object at
-        // once; replaying the 1,200-stroke scene synchronously in each callback
-        // blocked layout and scrolling. Repaint only when this text is part of
-        // the current selection, and coalesce those repaints.
-        if (engine.selection.getSelectedElements().some(element => element.id === object.id)) {
-          engine.drawing.scheduleRedraw();
+    const syncBounds = (measuredHeight: number) => {
+      let nextWidth = size.width;
+      const mathKey = isMathObject ? String(object.metadata?.latex ?? JSON.stringify(object.content)) : null;
+      if (mathKey && snuggedMathKeyRef.current !== mathKey) {
+        const katexEl = el.querySelector('.tiptap-mathematics-render .katex') as HTMLElement | null;
+        if (katexEl) {
+          const rectWidth = katexEl.getBoundingClientRect().width;
+          const totalScale = (surfaceRef.current?.getBoundingClientRect().width ?? size.width * scale) / Math.max(1, size.width);
+          const formulaWidth = Math.max(katexEl.scrollWidth, totalScale > 0.05 ? rectWidth / totalScale : katexEl.scrollWidth);
+          if (formulaWidth > 10) {
+            snuggedMathKeyRef.current = mathKey;
+            const snugWidth = Math.max(88, Math.ceil(formulaWidth + 28));
+            if (Math.abs(snugWidth - size.width) >= 10) {
+              const nextX = Math.max(0, Math.round(object.x + (size.width - snugWidth) / 2));
+              nextWidth = snugWidth;
+              object.x = nextX;
+              object.width = snugWidth;
+              setPos({ x: nextX, y: object.y });
+            }
+          }
         }
-        setSize(prev => ({ ...prev, height: nextHeight }));
       }
+      const nextHeight = Math.max(textMinHeight, Math.ceil(measuredHeight));
+      if (Math.abs((object.height ?? 0) - nextHeight) < 1 && nextWidth === size.width) return;
+      object.height = nextHeight;
+      engine.texts.updateTextPositionAndBounds(object.id, object.x, object.y, nextWidth, nextHeight);
+      if (engine.selection.getSelectedElements().some(element => element.id === object.id)) {
+        engine.drawing.scheduleRedraw();
+      }
+      setSize(prev => (prev.width === nextWidth && prev.height === nextHeight ? prev : { width: nextWidth, height: nextHeight }));
+    };
+    const observer = new ResizeObserver((entries) => {
+      if (entries[0]) syncBounds(entries[0].contentRect.height);
     });
     observer.observe(el);
     return () => observer.disconnect();
-  }, [engine, object.height, object.id, textMinHeight, size.width, stickyNote]);
+  }, [engine, object, object.height, object.id, object.metadata?.latex, object.content, object.x, object.y, textMinHeight, size.width, stickyNote, isMathObject, scale]);
 
   const isHandTool = toolMode === 'hand';
   const isTextTool = toolMode === 'text';
@@ -400,6 +426,7 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
     e.preventDefault();
     const target = e.currentTarget as HTMLElement;
     target.setPointerCapture(e.pointerId);
+    object.metadata = { ...(object.metadata ?? {}), userResized: true };
 
     const startClientX = e.clientX;
     const startClientY = e.clientY;
@@ -696,7 +723,13 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
     <div
       ref={surfaceRef}
       data-text-object-id={object.id}
-      className={`absolute ${pastePresentationClass} ${isSelected && (!stickyNote || selectedElements.length === 1) ? 'ring-1.5 ring-panvas-accent-blue rounded-sm' : ''} ${
+      className={`absolute ${pastePresentationClass} ${
+        (isSelected || isInteractive) && (!stickyNote || selectedElements.length === 1)
+          ? 'ring-1.5 ring-panvas-accent-blue rounded-sm'
+          : (!isHandTool && engine.texts.isEditable(object) && (toolMode === 'select' || toolMode === 'text'))
+            ? 'hover:ring-1 hover:ring-panvas-accent-blue/35 hover:rounded-sm'
+            : ''
+      } ${
         isHandTool ? 'pointer-events-none z-0' : 'pointer-events-auto z-20'
       }`}
       style={{
@@ -737,6 +770,13 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
         }
       }}
       onDoubleClick={(e) => {
+        const isMathObject = object.metadata?.generatedFrom === 'handwriting-math'
+          || (Array.isArray(object.content?.content) && object.content.content.length === 1 && object.content.content[0]?.type === 'blockMath');
+        if (isMathObject && onEditMathObject && engine.texts.isEditable(object) && !e.shiftKey && selectedElements.length <= 1) {
+          e.stopPropagation();
+          onEditMathObject(object);
+          return;
+        }
         if (!isTextTool && !e.shiftKey && selectedElements.length <= 1) {
           e.stopPropagation();
           engine.tools.setMode('text');
@@ -911,6 +951,7 @@ const FloatingTextEditorComponent: React.FC<FloatingTextEditorProps> = ({
       {/* Editor Content */}
       <div
         ref={containerRef}
+        data-panvas-dark-paper={paperIsDark ? 'true' : undefined}
         className="panvas-document-text relative min-w-0"
         style={pdfPlacement ? {
           position: 'absolute',

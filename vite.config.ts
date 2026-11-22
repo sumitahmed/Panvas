@@ -95,6 +95,21 @@ function localExcalidrawAssets() {
   };
 }
 
+function copyMathOcrWorkerPlugin(): Plugin {
+  return {
+    name: 'panvas-copy-math-ocr-worker',
+    writeBundle(outputOptions) {
+      const outDir = path.resolve(__dirname, outputOptions.dir ?? 'dist-electron');
+      for (const file of ['mathOcrCore.mjs', 'mathOcrWorker.mjs']) {
+        const src = path.resolve(__dirname, 'electron', 'services', file);
+        if (existsSync(src)) {
+          cpSync(src, path.join(outDir, file));
+        }
+      }
+    },
+  };
+}
+
 function cleanElectronRollupOptions() {
   return {
     name: 'panvas-clean-electron-rollup-options',
@@ -140,8 +155,13 @@ export default defineConfig(({ command, mode }) => {
               main: {
                 entry: 'electron/main.ts',
                 vite: {
-                  plugins: [cleanElectronRollupOptions(), moduleAuditPlugin()],
-                  build: { emptyOutDir: true },
+                  plugins: [cleanElectronRollupOptions(), copyMathOcrWorkerPlugin(), moduleAuditPlugin()],
+                  build: {
+                    emptyOutDir: true,
+                    rollupOptions: {
+                      external: ['@huggingface/transformers', 'sharp', 'onnxruntime-node'],
+                    },
+                  },
                   define: {
                     'process.env.PANVAS_GOOGLE_CLIENT_ID': JSON.stringify(googleClientId),
                     'process.env.PANVAS_GOOGLE_CLIENT_SECRET': JSON.stringify(googleClientSecret),

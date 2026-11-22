@@ -4,6 +4,7 @@
 
 import React, { useEffect, useId, useRef, useState } from 'react';
 import { Bookmark } from 'lucide-react';
+import DOMPurify from 'dompurify';
 import { EditorContent, useEditor, type Editor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Underline from '@tiptap/extension-underline';
@@ -78,12 +79,22 @@ interface TemplateFieldInputProps {
   onFocusEditor?: (editor: Editor | null) => void;
 }
 
+function sanitizeTemplateFieldHtml(value: string): string {
+  if (!value) return '';
+  if (typeof window === 'undefined' || !DOMPurify.isSupported) return value;
+  return DOMPurify.sanitize(value, {
+    ALLOWED_TAGS: ['p', 'br', 'strong', 'b', 'em', 'i', 'u', 's', 'del', 'mark', 'span'],
+    ALLOWED_ATTR: ['style'],
+  });
+}
+
 function StaticTemplateField({ field, template, scale, value, color }: TemplateFieldInputProps) {
+  const sanitized = value ? sanitizeTemplateFieldHtml(value) : '';
   return (
     <div
       key={`${template}-${field.key}`}
       aria-label={`${field.placeholder} template field`}
-      className="panvas-colored-content absolute z-30 border-0 border-b border-current bg-transparent px-0 outline-none overflow-hidden select-none"
+      className="panvas-colored-content panvas-template-field-editor pointer-events-none absolute z-[60] border-0 border-b border-current bg-transparent px-0 outline-none overflow-hidden select-none"
       style={{
         left: field.x * scale,
         top: field.y * scale,
@@ -94,8 +105,13 @@ function StaticTemplateField({ field, template, scale, value, color }: TemplateF
         color,
         lineHeight: `${22 * scale}px`,
       }}
-      dangerouslySetInnerHTML={{ __html: value || `<span style="opacity: 0.6;">${field.placeholder}</span>` }}
-    />
+    >
+      {sanitized ? (
+        <div className="ProseMirror h-full w-full" dangerouslySetInnerHTML={{ __html: sanitized }} />
+      ) : (
+        <span style={{ opacity: 0.6 }}>{field.placeholder}</span>
+      )}
+    </div>
   );
 }
 
@@ -192,7 +208,7 @@ function ClientTemplateField({ field, template, scale, value, color, editable, o
           editor.commands.focus();
         }
       }}
-      className="panvas-colored-content panvas-template-field-editor absolute z-30 border-0 border-b border-current bg-transparent px-0 outline-none focus-within:border-panvas-accent-blue"
+      className="panvas-colored-content panvas-template-field-editor absolute z-[60] border-0 border-b border-current bg-transparent px-0 outline-none focus-within:border-panvas-accent-blue"
       style={{
         left: field.x * scale,
         top: field.y * scale,
@@ -211,15 +227,42 @@ function ClientTemplateField({ field, template, scale, value, color, editable, o
 }
 
 function TemplateFieldInput(props: TemplateFieldInputProps) {
-  if (typeof window === 'undefined') {
+  if (typeof window === 'undefined' || !props.editable) {
     return <StaticTemplateField {...props} />;
   }
   return <ClientTemplateField {...props} />;
 }
 
-const PageRendererComponent: React.FC<PageRendererProps> = ({ id, width, height, properties, className = '', children, pageNumberText, editable = false, onUpdateProperties, renderWindow, logicalBase = 0, isBookmarked: propIsBookmarked, engine, onFocusEditor }) => {
+interface PageBackgroundProps {
+  id: string;
+  width: number;
+  height: number;
+  properties: PageProperties;
+  pageNumberText?: string;
+  editable: boolean;
+  onUpdateProperties?: (updates: Partial<PageProperties>) => void;
+  logicalBase: number;
+  renderWindow?: { top: number; height: number };
+  engine?: NotebookEngine;
+  onFocusEditor?: (editor: Editor | null) => void;
+  fullDarkView: boolean;
+}
+
+const PageBackground = React.memo<PageBackgroundProps>(({
+  id,
+  width,
+  height,
+  properties,
+  pageNumberText,
+  editable,
+  onUpdateProperties,
+  logicalBase,
+  renderWindow,
+  engine,
+  onFocusEditor,
+  fullDarkView,
+}) => {
   const templateResourceScope = useId();
-  const fullDarkView = useFullDarkView();
   const { template, margins } = properties;
   const renderModel = resolvePageTemplateRenderModel(properties);
   const geometry = renderModel;
@@ -231,73 +274,41 @@ const PageRendererComponent: React.FC<PageRendererProps> = ({ id, width, height,
     height: geometry.source.height * scale,
   };
 
-  const isContinuationSheet = id.includes('-sheet-') && !id.endsWith('-sheet-1');
-  const baseId = id.includes('-sheet-') ? id.split('-sheet-')[0] : id;
+  let baseInset = 0;
+  if (margins === 'Normal') baseInset = 64;
+  else if (margins === 'Narrow') baseInset = 32;
+  else if (margins === 'Wide') baseInset = 104;
+  const marginInset = Math.round(baseInset * scale);
 
-  const isStoreBookmarked = useBookmarkStore(state => {
-    if (propIsBookmarked !== undefined || isContinuationSheet) return false;
-    return state.bookmarks.some(b => b.pageId === id || b.pageId === baseId || b.id.endsWith(`:${id}`) || b.id.endsWith(`:${baseId}`));
-  });
-
-  const isBookmarked = propIsBookmarked ?? isStoreBookmarked;
-
-  // Margin insets based on selection
-  const getMarginInset = () => {
-    if (margins === 'No Margin') return 0;
-    let baseInset = 64; // Normal (~8%)
-    if (margins === 'Narrow') baseInset = 32; // Narrow (~4%)
-    if (margins === 'Wide') baseInset = 104; // Wide (~13%)
-    return Math.round(baseInset * scale);
-  };
-
-  const marginInset = getMarginInset();
-
-  // Paper and template ink are persisted document values. Application theme
-  // only styles Panvas chrome and must never rewrite either value.
-  const effectiveBgColor = fullDarkView ? fullDarkSurfaceColor(renderModel.paperColor) : renderModel.paperColor;
   const effectiveLineColor = fullDarkView ? fullDarkRuleLineColor(renderModel.lineColor) : renderModel.lineColor;
-
-  // Retrieve template definition from registry
   const templateDef = TEMPLATE_REGISTRY[template] || TEMPLATE_REGISTRY.Blank;
   const baseHeight = resolveBasePageDimensions(properties).height;
   const notes = resolvePageNoteSpace(properties);
   const sheetHeight = baseHeight + notes.top + notes.bottom;
   const paged = properties.layoutMode === 'document' && properties.pageSize !== 'Infinite' && height > sheetHeight + 1;
+
   let paperFrames: React.ReactNode = null;
-  let sheetCount = 1;
   if (paged) {
     const stride = sheetHeight + 32;
     const count = Math.max(1, Math.round(((properties.layoutExtent ?? (height - notes.top - notes.bottom)) + notes.top + notes.bottom + 32) / stride));
     const first = Math.max(0, Math.floor(((renderWindow?.top ?? 0) + logicalBase) / stride) - 1);
     const last = Math.min(count - 1, Math.ceil(((renderWindow?.top ?? 0) + logicalBase + (renderWindow?.height ?? height)) / stride));
-    sheetCount = count;
     paperFrames = <>{Array.from({ length: Math.max(0, last - first + 1) }, (_, offset) => {
-        const index = first + offset;
-        const subPageText = pageNumberText
-          ? (count > 1 ? `${pageNumberText} (Sheet ${index + 1}/${count})` : pageNumberText)
-          : (count > 1 ? `Sheet ${index + 1}/${count}` : undefined);
-        return <div key={index} data-document-sheet={index + 1} className="absolute" style={{ top: index * stride - logicalBase, width, height: sheetHeight }}>
-          <PageRenderer id={`${id}-sheet-${index + 1}`} width={width} height={sheetHeight} properties={{ ...properties, layoutMode: 'freeform', layoutExtent: undefined }} pageNumberText={subPageText} />
-        </div>;
-      })}</>;
+      const index = first + offset;
+      const subPageText = pageNumberText
+        ? (count > 1 ? `${pageNumberText} (Sheet ${index + 1}/${count})` : pageNumberText)
+        : (count > 1 ? `Sheet ${index + 1}/${count}` : undefined);
+      return <div key={index} data-document-sheet={index + 1} className="absolute" style={{ top: index * stride - logicalBase, width, height: sheetHeight }}>
+        <PageRenderer id={`${id}-sheet-${index + 1}`} width={width} height={sheetHeight} properties={{ ...properties, layoutMode: 'freeform', layoutExtent: undefined }} pageNumberText={subPageText} />
+      </div>;
+    })}</>;
   }
 
   return (
-    <div
-      id={`page-${id}`}
-      data-page-id={id}
-      data-document-sheet-count={properties.layoutMode === 'document' ? sheetCount : undefined}
-      className={`relative shadow-2xl transition-colors duration-200 overflow-hidden ${className}`}
-      style={{
-        width: `${width}px`,
-        height: `${height}px`,
-        backgroundColor: paged ? 'transparent' : effectiveBgColor,
-      }}
-    >
-      <div key="paper-background" className="absolute inset-0">
+    <div key="paper-background" className="absolute inset-0">
       {paged ? paperFrames : <>
       {/* Background Template SVG Layer */}
-      <svg 
+      <svg
         className="panvas-colored-content absolute inset-0 pointer-events-none select-none"
         width="100%"
         height={renderWindow?.height ?? height}
@@ -324,7 +335,7 @@ const PageRendererComponent: React.FC<PageRendererProps> = ({ id, width, height,
 
       {/* Visual Margin Guidelines */}
       {marginInset > 0 && (
-        <div 
+        <div
           className="absolute pointer-events-none transition-all duration-200 border border-dashed"
           style={{
             left: `${source.left + marginInset}px`,
@@ -345,7 +356,77 @@ const PageRendererComponent: React.FC<PageRendererProps> = ({ id, width, height,
         />
       )}
       </>}
-      </div>
+    </div>
+  );
+}, (prev, next) => {
+  if (prev.id !== next.id || prev.width !== next.width || prev.height !== next.height) return false;
+  if (prev.fullDarkView !== next.fullDarkView) return false;
+  if (prev.editable !== next.editable || prev.logicalBase !== next.logicalBase) return false;
+  if (prev.renderWindow?.top !== next.renderWindow?.top || prev.renderWindow?.height !== next.renderWindow?.height) return false;
+  if (prev.onUpdateProperties !== next.onUpdateProperties || prev.engine !== next.engine || prev.onFocusEditor !== next.onFocusEditor) return false;
+  if (prev.pageNumberText !== next.pageNumberText) return false;
+  if (prev.properties !== next.properties && JSON.stringify(prev.properties) !== JSON.stringify(next.properties)) return false;
+  return true;
+});
+
+const PageRendererComponent: React.FC<PageRendererProps> = ({ id, width, height, properties, className = '', children, pageNumberText, editable = false, onUpdateProperties, renderWindow, logicalBase = 0, isBookmarked: propIsBookmarked, engine, onFocusEditor }) => {
+  const fullDarkView = useFullDarkView();
+  const renderModel = resolvePageTemplateRenderModel(properties);
+  const scale = width / renderModel.width;
+  const source = {
+    left: renderModel.source.left * scale,
+    top: renderModel.source.top * scale,
+    width: renderModel.source.width * scale,
+    height: renderModel.source.height * scale,
+  };
+
+  const isContinuationSheet = id.includes('-sheet-') && !id.endsWith('-sheet-1');
+  const baseId = id.includes('-sheet-') ? id.split('-sheet-')[0] : id;
+
+  const isStoreBookmarked = useBookmarkStore(state => {
+    if (propIsBookmarked !== undefined || isContinuationSheet) return false;
+    return state.bookmarks.some(b => b.pageId === id || b.pageId === baseId || b.id.endsWith(`:${id}`) || b.id.endsWith(`:${baseId}`));
+  });
+
+  const isBookmarked = propIsBookmarked ?? isStoreBookmarked;
+  const effectiveBgColor = fullDarkView ? fullDarkSurfaceColor(renderModel.paperColor) : renderModel.paperColor;
+
+  const baseHeight = resolveBasePageDimensions(properties).height;
+  const notes = resolvePageNoteSpace(properties);
+  const sheetHeight = baseHeight + notes.top + notes.bottom;
+  const paged = properties.layoutMode === 'document' && properties.pageSize !== 'Infinite' && height > sheetHeight + 1;
+  let sheetCount = 1;
+  if (paged) {
+    const stride = sheetHeight + 32;
+    sheetCount = Math.max(1, Math.round(((properties.layoutExtent ?? (height - notes.top - notes.bottom)) + notes.top + notes.bottom + 32) / stride));
+  }
+
+  return (
+    <div
+      id={`page-${id}`}
+      data-page-id={id}
+      data-document-sheet-count={properties.layoutMode === 'document' ? sheetCount : undefined}
+      className={`relative shadow-2xl transition-colors duration-200 overflow-hidden ${className}`}
+      style={{
+        width: `${width}px`,
+        height: `${height}px`,
+        backgroundColor: paged ? 'transparent' : effectiveBgColor,
+      }}
+    >
+      <PageBackground
+        id={id}
+        width={width}
+        height={height}
+        properties={properties}
+        pageNumberText={pageNumberText}
+        editable={editable}
+        onUpdateProperties={onUpdateProperties}
+        logicalBase={logicalBase}
+        renderWindow={renderWindow}
+        engine={engine}
+        onFocusEditor={onFocusEditor}
+        fullDarkView={fullDarkView}
+      />
 
       {/* Structured Content & Drawing Layer */}
       <div key="page-content" className="absolute inset-0">{children}</div>
@@ -369,7 +450,7 @@ const PageRendererComponent: React.FC<PageRendererProps> = ({ id, width, height,
 
       {/* Page Number Indicator */}
       {pageNumberText && !paged && properties.pageSize !== 'Infinite' && (
-        <div 
+        <div
           className="absolute pointer-events-none select-none whitespace-nowrap text-right text-[11px] font-mono font-medium tabular-nums text-panvas-text-tertiary"
           style={{
             opacity: 0.75,

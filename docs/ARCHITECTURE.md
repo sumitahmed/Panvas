@@ -77,9 +77,11 @@ Desktop writes are serialized by `electron/ipc/write-queue.ts`. Workspace metada
 
 Browser persistence uses the Dexie schema in `src/database/schema.ts`. Browser and Electron adapters share domain types but do not share a filesystem.
 
-## Recognition and PDFs
+## Recognition, Math OCR, and PDFs
 
-Handwriting recognition selects Windows Ink in a Windows Electron session, then a browser-native handwriting API when available. The local neural fallback infrastructure exists for evaluation but its runtime switch is off; unsupported providers preserve raw ink.
+Handwriting recognition selects Windows Ink in a Windows Electron session, then a browser-native handwriting API when available. Unsupported environments preserve raw ink.
+
+Desktop offline Handwriting-to-Math runs in an isolated Electron `utilityProcess` (`electron/services/mathOcrWorker.mjs`) via ONNX Runtime (`TexTeller3-ONNX`). It communicates across `mathOcr:*` IPC channels, bounds CPU thread utilization (`intraOpNumThreads <= 4`, `interOpNumThreads = 1`), and terminates after 90 seconds of idle inactivity to avoid background memory footprint.
 
 PDF.js renders imported documents and `pdf-lib` supports annotated-PDF export. Both operate in the renderer/service layer; native filesystem access for desktop assets still crosses IPC.
 

@@ -24,6 +24,7 @@ import type { LaserManager } from './LaserManager.ts';
 import {
   createBeautifiedTextPlacement,
   createHandwritingTipTapContent,
+  getHandwritingBounds,
   type ExistingHandwritingLinePlacement,
   type HandwritingToolPreferences,
 } from '@/services/beautification/handwritingBeautification';
@@ -36,8 +37,10 @@ import {
 } from '@/services/recognition/conversion';
 import {
   createBulkHandwritingLinePlacements,
+  type HandwritingLineBatch,
   type ReviewedHandwritingLine,
 } from '@/services/recognition/bulkConversion';
+import { buildEditedTextPlacements } from '@/services/handwriting/multiLineOrdering';
 import {
   RealTimeHandwritingSession,
   type HandwritingRecognitionCommit,
@@ -123,6 +126,7 @@ export class NotebookEngine {
     this.selection = new SelectionEngine(this.drawing, this.shapes, this.history, this.viewport, this.texts, this.images, this.layers);
     this.drawing.setSelectionEngine(this.selection);
     this.input = new InputManager(this.tools, this.viewport, this.drawing, this.eraser, this.shapes, this.selection, this.history, this.texts, this.ruler, this.laser);
+    this.input.setLayoutModeGetter(() => this.properties.layoutMode ?? 'freeform');
     this.handwriting = new RealTimeHandwritingSession(
       options.recognitionProvider ?? getHandwritingRecognitionProvider(),
       conversion => this.commitRecognizedHandwriting(conversion),
@@ -151,7 +155,7 @@ export class NotebookEngine {
       }
     });
     this.properties = createEmptyDrawingData().properties;
-    
+
     // Wire up redraw callback. Coalesce decoded-image repaints into a
     // microtask so a batch of page images cannot synchronously replay the
     // whole scene inside each onload task.
@@ -293,10 +297,34 @@ export class NotebookEngine {
     this.drawing.prepareSurfaceAdoption(null);
     // Numeric stroke samples already have a detached, lossless snapshot path.
     // Generic structuredClone of the entire populated scene stalls navigation.
+    const cloneNonStrokeObject = (object: any) => {
+      if (!object || typeof object !== 'object') return object;
+      if (object.type === 'shape') return { ...object };
+      if (object.type === 'image') {
+        return object.crop ? { ...object, crop: { ...object.crop } } : { ...object };
+      }
+      if (object.type === 'text') {
+        return {
+          ...object,
+          content: object.content && typeof object.content === 'object' ? structuredClone(object.content) : object.content,
+        };
+      }
+      return structuredClone(object);
+    };
     const ownedData = data ? (() => {
-      const { objects, strokes, ...rest } = data;
-      return { ...structuredClone(rest),
-        ...(objects ? { objects: objects.map(object => object.type === 'stroke' ? adoptPageStrokeSnapshot(object) : structuredClone(object)) } : {}),
+      const { objects, strokes, layers, properties, shapes, audioNotes, ...rest } = data;
+      return {
+        ...rest,
+        ...(layers ? { layers: layers.map(layer => ({ ...layer })) } : {}),
+        ...(properties ? {
+          properties: {
+            ...properties,
+            ...(properties.templateFields ? { templateFields: { ...properties.templateFields } } : {}),
+          },
+        } : {}),
+        ...(shapes ? { shapes: shapes.map(shape => ({ ...shape })) } : {}),
+        ...(audioNotes ? { audioNotes: audioNotes.map(note => ({ ...note })) } : {}),
+        ...(objects ? { objects: objects.map(object => object.type === 'stroke' ? adoptPageStrokeSnapshot(object) : cloneNonStrokeObject(object)) } : {}),
         ...(strokes ? { strokes: strokes.map(adoptPageStrokeSnapshot) } : {}),
       };
     })() : null;
@@ -355,6 +383,7 @@ export class NotebookEngine {
     move(this.shapes.getShapes());
     move(this.texts.getTexts());
     move(this.images.getImages());
+    this.drawing.syncStrokesIndex();
     this.drawing.redraw();
     return true;
   }
@@ -432,6 +461,127 @@ export class NotebookEngine {
       },
     }));
     return this.selection.replaceSelectedStrokesWithTexts(sourceStrokes, textObjects);
+  }
+
+  /** Commit reviewed/edited multi-line handwriting text as one atomic Undo/Redo step. */
+  convertSelectedHandwritingToEditedText(
+    editedText: string,
+    originalLines: readonly ReviewedHandwritingLine[],
+    preferences: HandwritingToolPreferences,
+    providerId: string,
+  ): boolean {
+    if (!editedText.trim() || originalLines.length === 0) return false;
+    const seen = new Set<string>();
+    const sourceStrokes: Stroke[] = [];
+    for (const line of originalLines) {
+      for (const stroke of line.strokes) {
+        if (!seen.has(stroke.id)) {
+          seen.add(stroke.id);
+          sourceStrokes.push(stroke);
+        }
+      }
+    }
+    if (sourceStrokes.length === 0) return false;
+    const placements = buildEditedTextPlacements(
+      editedText,
+      [...originalLines] as HandwritingLineBatch[],
+      preferences,
+      this.texts.getTexts(),
+    );
+    if (placements.length === 0) return false;
+    for (const item of placements) {
+      item.metadata = {
+        ...item.metadata,
+        recognitionProvider: providerId,
+      };
+      item.layerId ??= this.layers.getActiveLayerId();
+    }
+    return this.selection.replaceSelectedStrokesWithTexts(sourceStrokes, placements);
+  }
+
+  /** Commit recognized/edited LaTeX equation as a freeform TipTap math TextObject (1 Undo step). */
+  convertSelectedHandwritingToMath(
+    latex: string,
+    strokes: readonly Stroke[],
+    preferences: HandwritingToolPreferences,
+  ): boolean {
+    const cleanLatex = latex.trim();
+    if (!cleanLatex || strokes.length === 0) return false;
+    const bounds = getHandwritingBounds(strokes);
+    if (!bounds) return false;
+    const longestLine = cleanLatex
+      .replace(/\\begin\{[^}]+\}|\\end\{[^}]+\}/g, '')
+      .split('\\\\')
+      .reduce((max, part) => Math.max(max, part.replace(/\\[a-zA-Z]+/g, 'xx').replace(/[{}&^_\s]/g, '').length), 0);
+    const estimatedWidth = Math.max(108, Math.ceil(longestLine * 13 + 56));
+    const width = Math.max(96, Math.min(Math.ceil(bounds.width + 24), estimatedWidth));
+    const x = Math.max(0, Math.round(bounds.x + Math.max(0, (bounds.width - width) / 2)));
+    const height = Math.max(44, Math.ceil(bounds.height + 16));
+    const mathObject: TextObject = {
+      id: generateId('math'),
+      type: 'text',
+      x,
+      y: bounds.y,
+      width,
+      height,
+      content: {
+        type: 'doc',
+        content: [{ type: 'blockMath', attrs: { latex: cleanLatex } }],
+      },
+      createdAt: Date.now(),
+      layerId: strokes[0]?.layerId ?? this.layers.getActiveLayerId(),
+      metadata: {
+        generatedFrom: 'handwriting-math',
+        latex: cleanLatex,
+        recognitionLanguage: preferences.language || undefined,
+        sourceStrokeIds: strokes.map(stroke => stroke.id),
+        sourceBounds: structuredClone(bounds),
+        richTextSchemaVersion: 3,
+        autoConverted: false,
+      },
+    };
+    return this.selection.replaceSelectedStrokesWithTexts(strokes, [mathObject]);
+  }
+
+  /** Update an existing freeform math TextObject with 1 atomic Undo/Redo step. */
+  updateMathTextObject(textId: string, nextLatex: string): boolean {
+    const cleanLatex = nextLatex.trim();
+    if (!cleanLatex) return false;
+    const target = this.texts.getTexts().find(item => item.id === textId);
+    if (!target || !this.texts.isEditable(target)) return false;
+
+    const beforeContent = structuredClone(target.content);
+    const beforeMeta = target.metadata ? structuredClone(target.metadata) : undefined;
+    const afterContent = {
+      type: 'doc',
+      content: [{ type: 'blockMath', attrs: { latex: cleanLatex } }],
+    };
+    const afterMeta = {
+      ...(beforeMeta ?? {}),
+      generatedFrom: 'handwriting-math',
+      latex: cleanLatex,
+      richTextSchemaVersion: 3,
+    };
+
+    const applyState = (content: any, metadata: Record<string, any> | undefined) => {
+      const liveTarget = this.texts.getTexts().find(item => item.id === textId);
+      if (!liveTarget) return;
+      liveTarget.content = structuredClone(content);
+      liveTarget.metadata = metadata ? structuredClone(metadata) : undefined;
+      this.texts.updateTextContent(textId, liveTarget.content);
+      const editor = this.texts.getEditor(textId);
+      if (editor && !editor.isDestroyed) {
+        editor.commands.setContent(liveTarget.content, { emitUpdate: false });
+      }
+      this.drawing.redraw();
+    };
+
+    this.history.push({
+      description: 'Edit math equation',
+      execute: () => applyState(afterContent, afterMeta),
+      undo: () => applyState(beforeContent, beforeMeta),
+    });
+    return true;
   }
 
   private commitRecognizedHandwriting(conversion: HandwritingRecognitionCommit): boolean {
@@ -529,6 +679,7 @@ export class NotebookEngine {
     this.unsubscribeHandwritingTool = null;
     this.handwriting.destroy();
     this.unmount();
+    this.drawing.destroy();
     this.images.destroy();
     this.history.clear();
     this.tools.reset();

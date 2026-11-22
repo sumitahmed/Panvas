@@ -29,7 +29,8 @@ export async function recordLocalChange(change: LocalChangeRecord): Promise<void
     return;
   }
   if (CLOUD_SYNC_V2_ENABLED || import.meta.env?.VITE_PANVAS_SYNC_V2 === 'true') {
-    const { scheduleAutoCloudSync } = await import('@/stores/cloudSyncStore');
+    const { scheduleAutoCloudSync, markCloudSyncWorkspaceDirty } = await import('@/stores/cloudSyncStore');
+    markCloudSyncWorkspaceDirty?.(change.workspaceId);
     scheduleAutoCloudSync();
     return;
   }

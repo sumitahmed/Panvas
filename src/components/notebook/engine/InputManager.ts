@@ -12,7 +12,7 @@ import type { DrawingEngine } from './DrawingEngine';
 import type { EraserEngine } from './EraserEngine';
 import { analyzeScribble, findScribbleTargets } from './scribbleGesture.ts';
 import { analyzeCircleGesture } from './circleSelectGesture.ts';
-import { recognizeStraightLine } from './straightLineGesture.ts';
+import { recognizeStraightLine, recognizeArrowGesture } from './straightLineGesture.ts';
 import { recognizeRoughShape } from './roughShapeGesture.ts';
 import type { ShapeManager } from './ShapeManager';
 import type { SelectionEngine } from './SelectionEngine';
@@ -23,12 +23,14 @@ import { constrainShapeDrag } from './shapeGeometry.ts';
 import type { RulerHit, RulerManager } from './RulerManager.ts';
 import type { LaserManager } from './LaserManager.ts';
 import { InkInputFilter, mapPointerPressure } from './inkInput.ts';
+import { inkWidthAt } from './inkFamilyGeometry.ts';
 import { InkCenterline } from './inkCenterline.ts';
 import { gate0Profiler, type Gate0Record } from '../../../dev/gate0Profiler.ts';
 import { EraserGesture } from './EraserGesture.ts';
 import { InkSamples } from './inkSamples.ts';
 import { startHandwritingTrace, finishHandwritingTrace, type HandwritingTrace } from '../../../dev/handwritingTrace.ts';
 import { NavigationGestureLifecycle } from './NavigationGestureLifecycle.ts';
+import { setSelectionGestureActive } from '../../../services/cloudsync/drawingActivity.ts';
 
 export type DrawingChangeListener = (reason?: 'document-text') => void;
 export type DrawingGestureListener = (active: boolean) => void;
@@ -45,6 +47,74 @@ const SELECTION_CURSORS = new Set([
   'ew-resize',
   'grab',
 ]);
+
+const HOLD_SNAP_DELAY_MS = 350;
+const HOLD_SNAP_RETRY_MS = 180;
+const HOLD_SNAP_JITTER_CSS_PX = 14;
+const HOLD_SNAP_MIN_PATH_CSS_PX = 20;
+const SHAPE_DIAG_MAX_ENTRIES = 15;
+
+export interface ShapeRecognitionDiagnostic {
+  ts: number;
+  pointerType: string;
+  tool: string;
+  layout: 'document' | 'freeform';
+  zoom: number;
+  toggles: {
+    scribbleToErase: boolean;
+    circleToSelect: boolean;
+    straightLineRecognition: boolean;
+    snapRecognizedLines: boolean;
+    roughShapeRecognition: boolean;
+    snapRecognizedShapes: boolean;
+    rulerEnabled: boolean;
+    handwritingToTextEnabled: boolean;
+  };
+  pointCount: number;
+  pathLenCss: number;
+  holdTimerFired: boolean;
+  holdElapsedMs: number;
+  maxHoldDriftCss: number;
+  straightLineResult: {
+    isLine: boolean;
+    length: number;
+    efficiency: number;
+    maxDeviation: number;
+    snappedAngle: number | null;
+  } | null;
+  roughShapeResult: {
+    isShape: boolean;
+    shapeType: string | null;
+    width: number;
+    height: number;
+    rotation: number;
+  } | null;
+  circleSelectIntercepted: boolean;
+  finalOutcome: 'snapped-line' | 'snapped-shape' | 'freehand-stroke' | 'scribble-erased' | 'circle-selected' | 'cancelled';
+  rejectReason: string | null;
+}
+
+type HoldSnapState =
+  | {
+      kind: 'line';
+      shape: Shape;
+      start: StrokePoint;
+      end: StrokePoint;
+      snappedAngle: number | null;
+      adjustEngaged: boolean;
+    }
+  | {
+      kind: 'shape';
+      shape: Shape;
+      center: { x: number; y: number };
+      initialPointerDistance: number;
+      initialPointerAngle: number;
+      initialWidth: number;
+      initialHeight: number;
+      initialRotation: number;
+      isCircle: boolean;
+      adjustEngaged: boolean;
+    };
 
 export class InputManager {
   readonly navigationGestures = new NavigationGestureLifecycle();
@@ -64,16 +134,52 @@ export class InputManager {
   private lastClickTime = 0;
   private lastClickPoint: { x: number; y: number } | null = null;
   private lastClickPointerType = '';
-  private strokeStartTime: number = 0;
+  private strokeStartPerfMs: number = 0;
   private currentPoints: StrokePoint[] = [];
+  private layoutModeGetter: () => 'document' | 'freeform' = () => 'freeform';
+
+  /** Register a lightweight getter for current page layout mode ('document' | 'freeform'). */
+  setLayoutModeGetter(getter: () => 'document' | 'freeform'): void {
+    this.layoutModeGetter = getter;
+  }
 
   /** Lowest page-space y of the in-flight stroke, for live document-extent
    *  growth on infinite pages. -Infinity when no stroke is in flight. */
   getLiveStrokeBottom(): number {
+    if (this.holdSnapState?.kind === 'shape') {
+      const { x, y, width, height, rotation } = this.holdSnapState.shape;
+      const cx = x + width * 0.5;
+      const cy = y + height * 0.5;
+      const rad = (rotation * Math.PI) / 180;
+      const cos = Math.cos(rad);
+      const sin = Math.sin(rad);
+      let bottom = -Infinity;
+      for (const [px, py] of [[x, y], [x + width, y], [x + width, y + height], [x, y + height]]) {
+        const ry = cy + (px - cx) * sin + (py - cy) * cos;
+        if (ry > bottom) bottom = ry;
+      }
+      return bottom;
+    }
+    if (this.holdSnapState?.kind === 'line') {
+      return Math.max(this.holdSnapState.start.y, this.holdSnapState.end.y);
+    }
     let bottom = -Infinity;
     for (const point of this.currentPoints) bottom = Math.max(bottom, point.y);
     return bottom;
   }
+  private holdSnapTimer: ReturnType<typeof setTimeout> | null = null;
+  private holdSnapAnchor: { clientX: number; clientY: number; sincePerfMs: number; maxDriftCss: number } | null = null;
+  private holdSnapState: HoldSnapState | null = null;
+  private strokePointerType = 'mouse';
+  private strokeLastClientX = 0;
+  private strokeLastClientY = 0;
+  private strokePathLenCss = 0;
+  private holdTimerFired = false;
+  private holdElapsedMs = 0;
+  private holdMaxDriftCss = 0;
+  private holdLastAttemptPointCount = -1;
+  private lastStraightLineDiag: ShapeRecognitionDiagnostic['straightLineResult'] = null;
+  private lastRoughShapeDiag: ShapeRecognitionDiagnostic['roughShapeResult'] = null;
   private inkInputFilter = new InkInputFilter();
   private inkCenterline = new InkCenterline();
   private inkScreenScale = 1;
@@ -84,6 +190,7 @@ export class InputManager {
   private cachedCanvasRect: DOMRect | null = null;
   private cachedCssWidth = 0;
   private cachedCssHeight = 0;
+  private predictedPointsScratch: StrokePoint[] = [];
   private lastProcessedClientX = -1;
   private lastProcessedClientY = -1;
   private inkSamples: InkSamples | null = null;
@@ -117,6 +224,26 @@ export class InputManager {
   private lassoStartPoint: StrokePoint | null = null;
   private selectionRafId: number | null = null;
   private pendingSelectionPoint: StrokePoint | null = null;
+  private lassoRafId: number | null = null;
+  private holdSnapPreviewRafId: number | null = null;
+  private pendingHoldSnapPreview: (() => void) | null = null;
+
+  private cancelTransientAnimationFrames(): void {
+    if (this.selectionRafId !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(this.selectionRafId);
+      this.selectionRafId = null;
+    }
+    this.pendingSelectionPoint = null;
+    if (this.lassoRafId !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(this.lassoRafId);
+      this.lassoRafId = null;
+    }
+    if (this.holdSnapPreviewRafId !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(this.holdSnapPreviewRafId);
+      this.holdSnapPreviewRafId = null;
+    }
+    this.pendingHoldSnapPreview = null;
+  }
 
   private rulerManager: RulerManager;
   private rulerDragMode: Exclude<RulerHit, null> | null = null;
@@ -176,13 +303,40 @@ export class InputManager {
     this.drawingGestureListeners.add(listener);
     return () => this.drawingGestureListeners.delete(listener);
   }
+
+  isDrawingGestureActive(): boolean {
+    return this.drawingGestureActive;
+  }
+  private getCanvasCssSize(canvas: HTMLCanvasElement): { width: number; height: number } {
+    const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+    return {
+      width: canvas.clientWidth || parseFloat(canvas.style.width) || (canvas.width / dpr),
+      height: canvas.clientHeight || parseFloat(canvas.style.height) || (canvas.height / dpr),
+    };
+  }
+
   /** Preserve a captured pointer when a bounded raster changes its DOM origin. */
   refreshCanvasGeometry(): void {
     if (!this.canvas || !this.cachedCanvasRect) return;
     this.cachedCanvasRect = this.canvas.getBoundingClientRect();
-    this.cachedCssWidth = this.canvas.clientWidth;
-    this.cachedCssHeight = this.canvas.clientHeight;
+    const cssSize = this.getCanvasCssSize(this.canvas);
+    this.cachedCssWidth = cssSize.width;
+    this.cachedCssHeight = cssSize.height;
   }
+
+  private cacheCanvasRectForGesture(): void {
+    if (!this.canvas) return;
+    this.cachedCanvasRect = this.canvas.getBoundingClientRect();
+    const cssSize = this.getCanvasCssSize(this.canvas);
+    this.cachedCssWidth = cssSize.width;
+    this.cachedCssHeight = cssSize.height;
+  }
+
+  private clearCachedCanvasRect = (): void => {
+    this.cachedCanvasRect = null;
+    this.cachedCssWidth = 0;
+    this.cachedCssHeight = 0;
+  };
 
   /** Promote an incomplete single-pointer edit into a two-finger viewport gesture. */
   cancelActivePointerInteraction(): void {
@@ -224,8 +378,39 @@ export class InputManager {
     let previousToolMode = this.toolManager.getState().mode;
     this.unsubscribeToolState = this.toolManager.subscribe((state) => {
       if (state.mode === 'select' && previousToolMode !== 'select') this.drawingEngine.warmSelectionBacking?.();
+      else if (state.mode !== 'select' && previousToolMode === 'select') this.drawingEngine.releaseSelectionSurfaces?.();
+      if (state.mode !== 'select') {
+        this.clearSelectionCursor();
+        const selected = this.selectionEngine?.getSelectedElements?.() ?? [];
+        const shouldClearSelection =
+          state.mode === 'draw'
+          || state.mode === 'erase'
+          || state.mode === 'shape'
+          || (state.mode === 'text' && !(
+            selected.length === 1
+            && selected[0]?.type === 'text'
+          ));
+        if (shouldClearSelection) {
+          if (this.selectionDragMode === 'lasso') {
+            this.cancelTransientAnimationFrames();
+            this.drawingEngine.endLasso?.();
+            this.selectionDragMode = 'none';
+            this.lassoPoints = [];
+            this.lassoStartPoint = null;
+            this.isDrawing = false;
+            this.strokeModeAtStart = null;
+          }
+          if (selected.length > 0) {
+            this.selectionEngine.clearSelection?.();
+            this.selectionEngine.flushPendingSelectionRedraw?.();
+          }
+        }
+      }
+      if ((this.holdSnapTimer !== null || this.holdSnapState !== null)
+        && (state.mode !== 'draw' || (!state.straightLineRecognition && !state.roughShapeRecognition))) {
+        this.clearHoldSnap(true);
+      }
       previousToolMode = state.mode;
-      if (state.mode !== 'select') this.clearSelectionCursor();
       if (state.mode !== 'draw' || state.drawingTool !== 'laser') {
         this.laserPointerActive = false;
         this.laserManager.clear();
@@ -250,7 +435,10 @@ export class InputManager {
     // to be delivered here even when the button is released outside the element.
     // Ending the gesture on a boundary crossing only ever truncated live gestures.
     canvas.style.touchAction = 'none';
-    if (typeof window !== 'undefined') window.addEventListener('blur', this.cancelTransientInteraction);
+    if (typeof window !== 'undefined') {
+      window.addEventListener('blur', this.cancelTransientInteraction);
+      window.addEventListener('resize', this.clearCachedCanvasRect, { passive: true });
+    }
     if (typeof document !== 'undefined') document.addEventListener('visibilitychange', this.handleVisibilityChange);
   }
 
@@ -278,12 +466,16 @@ export class InputManager {
     if (typeof window !== 'undefined' && 'onpointerrawupdate' in window) {
       this.canvas.removeEventListener('pointerrawupdate', this.handlePointerMove as EventListener);
     }
-    if (typeof window !== 'undefined') window.removeEventListener('blur', this.cancelTransientInteraction);
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('blur', this.cancelTransientInteraction);
+      window.removeEventListener('resize', this.clearCachedCanvasRect);
+    }
     if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', this.handleVisibilityChange);
     this.clearSelectionCursor();
     this.rulerDragMode = null;
     this.laserPointerActive = false;
     this.laserManager.clear();
+    this.clearHoldSnap(false);
     this.isDrawing = false;
     this.drawingEngine?.endLiveStroke?.();
     this.cachedCanvasRect = null;
@@ -294,13 +486,10 @@ export class InputManager {
     this.clearInkSamples('detach');
     this.strokeModeAtStart = null;
     this.strokeContextAtStart = null;
-    if (this.selectionRafId !== null && typeof cancelAnimationFrame === 'function') {
-      cancelAnimationFrame(this.selectionRafId);
-      this.selectionRafId = null;
-    }
-    this.pendingSelectionPoint = null;
+    this.cancelTransientAnimationFrames();
     this.clearTransientTextDomPositions();
     this.drawingEngine?.endLasso?.();
+    setSelectionGestureActive(this, false);
     this.selectionDragMode = 'none';
     this.lassoPoints = [];
     this.lassoStartPoint = null;
@@ -337,7 +526,7 @@ export class InputManager {
       }
     }
     const now = Date.now();
-    
+
     // Check for double click to edit text box
     if (!e.shiftKey && e.button === 0 && now - this.lastClickTime < 300
       && this.lastClickPoint && this.lastClickPointerType === e.pointerType
@@ -373,11 +562,16 @@ export class InputManager {
     if (e.button !== 0) return;
 
     if (toolState.mode === 'draw' && toolState.drawingTool === 'laser') {
-      if (e.button === 0) this.startLaser(e);
+      if (e.button === 0) {
+        this.cacheCanvasRectForGesture();
+        this.startLaser(e);
+      }
       return;
     }
 
     if (['draw', 'shape', 'text'].includes(toolState.mode) && !this.drawingEngine.canEditActiveLayer()) return;
+
+    this.cacheCanvasRectForGesture();
 
     if (toolState.mode === 'draw') {
       this.startDrawing(e);
@@ -397,7 +591,7 @@ export class InputManager {
   private handlePointerMove = (e: PointerEvent): void => {
     // Hand navigation and selection transforms need the display-paced move stream. Keep raw/coalesced
     // samples for ink, erasing, ruler and laser interactions below.
-    if ((this.isPanning || this.selectionDragMode === 'transform') && e.type === 'pointerrawupdate') return;
+    if ((this.isPanning || this.selectionDragMode === 'transform' || this.selectionDragMode === 'lasso') && e.type === 'pointerrawupdate') return;
     if (this.inkSamples && !this.ownsInkEvent(e)) return;
     if (this.eraserGesture && e.pointerId !== this.eraserGesture.pointerId) return;
     const activeProfile = this.gate0InkGesture ?? this.gate0EraserGesture;
@@ -524,6 +718,7 @@ export class InputManager {
     } else if (this.strokeModeAtStart === 'select' && this.isDrawing) {
       this.finishSelection(e);
     }
+    this.clearCachedCanvasRect();
   };
 
   private handleVisibilityChange = (): void => {
@@ -543,7 +738,15 @@ export class InputManager {
     this.flushPendingErasing('cancel');
     const cancelledContext = this.strokeContextAtStart;
     const wasDrawingInk = this.isDrawing && this.strokeModeAtStart === 'draw';
+    if (wasDrawingInk && (this.holdTimerFired || this.holdSnapState !== null || this.strokePathLenCss >= HOLD_SNAP_MIN_PATH_CSS_PX)) {
+      if (this.holdSnapAnchor) {
+        this.holdElapsedMs = Math.max(this.holdElapsedMs, Math.max(0, performance.now() - this.holdSnapAnchor.sincePerfMs));
+        this.holdMaxDriftCss = Math.max(this.holdMaxDriftCss, this.holdSnapAnchor.maxDriftCss);
+      }
+      this.recordShapeDiag('cancelled', cancelledContext, this.toolManager.getState(), false);
+    }
 
+    this.clearHoldSnap(false);
     this.isDrawing = false;
     this.setDrawingGestureActive(false);
     this.drawingEngine?.endLiveStroke?.();
@@ -556,11 +759,7 @@ export class InputManager {
     this.lastProcessedClientY = -1;
     this.clearInkSamples('cancel');
     this.currentPoints = [];
-    if (this.selectionRafId !== null && typeof cancelAnimationFrame === 'function') {
-      cancelAnimationFrame(this.selectionRafId);
-      this.selectionRafId = null;
-    }
-    this.pendingSelectionPoint = null;
+    this.cancelTransientAnimationFrames();
     this.clearTransientTextDomPositions();
     this.selectionDragMode = 'none';
     this.lassoPoints = [];
@@ -618,6 +817,7 @@ export class InputManager {
   private finishRulerInteraction(e: PointerEvent): void {
     this.continueRulerInteraction(e);
     this.rulerDragMode = null;
+    this.clearCachedCanvasRect();
     if (this.canvas) {
       try {
         this.canvas.releasePointerCapture(e.pointerId);
@@ -635,7 +835,7 @@ export class InputManager {
       return;
     }
     const point = this.getCanvasPoint(e);
-    
+
     // Check if we hit an existing text box first
     this.selectionEngine.selectAt(point.x, point.y, false);
     const hit = this.selectionEngine.getSelectedElements()[0];
@@ -651,12 +851,12 @@ export class InputManager {
       x: point.x,
       y: point.y,
       width: 300,
-      content: { 
-        type: 'doc', 
-        content: [{ 
-          type: 'paragraph', 
+      content: {
+        type: 'doc',
+        content: [{
+          type: 'paragraph',
           content: [],
-        }] 
+        }]
       },
       createdAt: Date.now(),
     };
@@ -677,10 +877,9 @@ export class InputManager {
         this.canvas.setPointerCapture(e.pointerId);
       } catch {}
     }
-    const point = this.getCanvasPoint(e);
-
     this.isDrawing = true;
     this.strokeModeAtStart = 'select';
+    const point = this.getCanvasPoint(e);
     this.lassoPoints = [];
     this.lassoStartPoint = null;
     this.lassoShape = 'freeform';
@@ -694,6 +893,7 @@ export class InputManager {
     // add-to-selection behavior, and resize/rotate handles are checked first.
     if (!e.shiftKey && this.selectionEngine.shouldDragFreeformRegion(point.x, point.y)) {
       this.selectionDragMode = 'transform';
+      setSelectionGestureActive(this, true);
       this.selectionEngine.startDrag(point.x, point.y);
       return;
     }
@@ -703,6 +903,7 @@ export class InputManager {
         || this.selectionEngine.selectAt(point.x, point.y, e.shiftKey, Boolean(handleHit));
       if (hit) {
         this.selectionDragMode = 'transform';
+        setSelectionGestureActive(this, true);
         this.selectionEngine.startDrag(point.x, point.y);
       }
       return hit;
@@ -716,9 +917,11 @@ export class InputManager {
     }
 
     this.selectionDragMode = 'lasso';
+    setSelectionGestureActive(this, true);
     this.lassoShape = this.toolManager.getState().selectionShape === 'rectangle' ? 'rectangle' : 'freeform';
     this.lassoStartPoint = point;
     this.lassoPoints = [point];
+    this.selectionEngine.flushPendingSelectionRedraw?.();
     this.drawingEngine.startLasso?.();
     this.drawingEngine.renderLasso(this.lassoPoints);
   }
@@ -750,7 +953,18 @@ export class InputManager {
       } else {
         this.lassoPoints.push(point);
       }
-      this.drawingEngine.renderLasso(this.lassoPoints);
+      if (typeof requestAnimationFrame === 'function') {
+        if (this.lassoRafId === null) {
+          this.lassoRafId = requestAnimationFrame(() => {
+            this.lassoRafId = null;
+            if (this.selectionDragMode === 'lasso') {
+              this.drawingEngine.renderLasso(this.lassoPoints);
+            }
+          });
+        }
+      } else {
+        this.drawingEngine.renderLasso(this.lassoPoints);
+      }
       return;
     }
 
@@ -776,14 +990,10 @@ export class InputManager {
   }
 
   private finishSelection(e: PointerEvent): void {
-    if (this.selectionRafId !== null && typeof cancelAnimationFrame === 'function') {
-      cancelAnimationFrame(this.selectionRafId);
-      this.selectionRafId = null;
-    }
-    this.pendingSelectionPoint = null;
+    this.cancelTransientAnimationFrames();
+    const point = this.getCanvasPoint(e);
     this.isDrawing = false;
     this.strokeModeAtStart = null;
-    const point = this.getCanvasPoint(e);
 
     if (this.selectionDragMode === 'lasso') {
       if (this.lassoShape === 'rectangle') {
@@ -795,6 +1005,7 @@ export class InputManager {
       this.lassoPoints = [];
       this.lassoStartPoint = null;
       this.selectionDragMode = 'none';
+      setSelectionGestureActive(this, false);
       this.drawingEngine.endLasso?.();
       if (completedLoop.length >= 3) {
         // Freeform selections keep their drawn boundary as the visible region;
@@ -815,6 +1026,7 @@ export class InputManager {
       this.selectionEngine.dragTo(point.x, point.y);
       this.clearTransientTextDomPositions();
       this.selectionDragMode = 'none';
+      setSelectionGestureActive(this, false);
       const moved = this.selectionEngine.finishDrag(point.x, point.y);
       if (moved) {
         this.notifyChange();
@@ -822,6 +1034,7 @@ export class InputManager {
       return;
     }
 
+    setSelectionGestureActive(this, false);
     this.selectionDragMode = 'none';
   }
 
@@ -956,7 +1169,7 @@ export class InputManager {
   private startLaser(e: PointerEvent): void {
     if (this.canvas) this.canvas.setPointerCapture(e.pointerId);
     this.laserPointerActive = true;
-    this.strokeStartTime = Date.now();
+    this.strokeStartPerfMs = performance.now();
     this.laserManager.startStroke();
     this.laserManager.addPoint(this.getCanvasPoint(e));
   }
@@ -969,6 +1182,7 @@ export class InputManager {
   private finishLaser(e: PointerEvent): void {
     this.continueLaser(e);
     this.laserPointerActive = false;
+    this.clearCachedCanvasRect();
     if (this.canvas) {
       try {
         this.canvas.releasePointerCapture(e.pointerId);
@@ -981,17 +1195,22 @@ export class InputManager {
   private getCanvasPoint(e: Pick<PointerEvent, 'clientX' | 'clientY' | 'pointerType' | 'pressure'>): StrokePoint {
     if (!this.canvas) return { x: 0, y: 0, pressure: 0.5, t: 0 };
 
-    const useCache = this.isDrawing && this.strokeModeAtStart === 'draw' && Boolean(this.cachedCanvasRect);
+    const useCache = Boolean(this.cachedCanvasRect) && (
+      this.isDrawing
+      || this.selectionDragMode !== 'none'
+      || Boolean(this.eraserGesture)
+      || this.rulerDragMode !== null
+      || this.laserPointerActive
+    );
     const rect = useCache ? this.cachedCanvasRect! : this.canvas.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return { x: 0, y: 0, pressure: 0.5, t: 0 };
 
     // Base document CSS dimensions of the canvas
-    const cssWidth = (useCache && this.cachedCssWidth > 0)
-      ? this.cachedCssWidth
-      : (this.canvas.clientWidth || (this.canvas.width / (window.devicePixelRatio || 1)));
-    const cssHeight = (useCache && this.cachedCssHeight > 0)
-      ? this.cachedCssHeight
-      : (this.canvas.clientHeight || (this.canvas.height / (window.devicePixelRatio || 1)));
+    const fallbackCss = (useCache && this.cachedCssWidth > 0 && this.cachedCssHeight > 0)
+      ? null
+      : this.getCanvasCssSize(this.canvas);
+    const cssWidth = (useCache && this.cachedCssWidth > 0) ? this.cachedCssWidth : fallbackCss!.width;
+    const cssHeight = (useCache && this.cachedCssHeight > 0) ? this.cachedCssHeight : fallbackCss!.height;
 
     // First map client pixels into the canvas CSS box. PDF canvases use zoomed CSS
     // dimensions and apply the same zoom in the drawing context, so ViewportManager then
@@ -1012,7 +1231,7 @@ export class InputManager {
       x,
       y,
       pressure,
-      t: Date.now() - this.strokeStartTime,
+      t: Math.max(0, performance.now() - this.strokeStartPerfMs),
     };
   }
 
@@ -1025,9 +1244,7 @@ export class InputManager {
       } catch {
         // Pointer capture can fail in synthetic tests or if pointer was already lost
       }
-      this.cachedCanvasRect = this.canvas.getBoundingClientRect();
-      this.cachedCssWidth = this.canvas.clientWidth || (this.canvas.width / (window.devicePixelRatio || 1));
-      this.cachedCssHeight = this.canvas.clientHeight || (this.canvas.height / (window.devicePixelRatio || 1));
+      if (!this.cachedCanvasRect) this.cacheCanvasRectForGesture();
     }
     this.isDrawing = true;
     this.setDrawingGestureActive(true);
@@ -1038,7 +1255,17 @@ export class InputManager {
     const toolState = this.toolManager.getState();
     this.strokeModeAtStart = toolState.mode;
     this.strokeContextAtStart = resolveDrawingStrokeContext(toolState);
-    this.strokeStartTime = Date.now();
+    this.strokeStartPerfMs = performance.now();
+    this.strokePointerType = e.pointerType || 'mouse';
+    this.strokeLastClientX = e.clientX;
+    this.strokeLastClientY = e.clientY;
+    this.strokePathLenCss = 0;
+    this.holdTimerFired = false;
+    this.holdElapsedMs = 0;
+    this.holdMaxDriftCss = 0;
+    this.holdLastAttemptPointCount = -1;
+    this.lastStraightLineDiag = null;
+    this.lastRoughShapeDiag = null;
     this.inkInputFilter.reset();
     this.inkCenterline.reset();
     this.inkRulerSnapped = false;
@@ -1050,6 +1277,7 @@ export class InputManager {
         (axis.y - origin.y) * this.cachedCanvasRect.height / this.cachedCssHeight) : 1;
     this.currentPoints = [];
     this.inkRawPoints = [];
+    this.clearHoldSnap(false);
     this.acceptInkSamples(e);
     const firstPoint = this.inkRawPoints[this.inkRawPoints.length - 1];
     gate0Profiler.increment(this.gate0InkGesture, 'liveRenderInvocations');
@@ -1072,15 +1300,503 @@ export class InputManager {
     }
   }
 
+  private canHoldSnap(
+    toolState: ReturnType<ToolManager['getState']>,
+    strokeContext: DrawingStrokeContext | null,
+  ): boolean {
+    if (this.strokeModeAtStart !== 'draw' || !strokeContext || strokeContext.recognitionEligible || this.inkRulerSnapped) {
+      return false;
+    }
+    const shapeEligibleTool = strokeContext.tool === 'pen' || strokeContext.tool === 'pencil' || strokeContext.tool === 'marker';
+    return (toolState.straightLineRecognition && shapeEligibleTool)
+      || (toolState.roughShapeRecognition && shapeEligibleTool);
+  }
+
+  private clearHoldSnap(clearPreview = false): void {
+    if (this.holdSnapTimer !== null) {
+      clearTimeout(this.holdSnapTimer);
+      this.holdSnapTimer = null;
+    }
+    if (this.holdSnapPreviewRafId !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(this.holdSnapPreviewRafId);
+      this.holdSnapPreviewRafId = null;
+    }
+    this.pendingHoldSnapPreview = null;
+    this.holdSnapAnchor = null;
+    this.holdLastAttemptPointCount = -1;
+    const hadShapePreview = this.holdSnapState !== null;
+    this.holdSnapState = null;
+    if (clearPreview && hadShapePreview) {
+      this.drawingEngine?.clearLiveShapePreview?.();
+    }
+  }
+
+  private scheduleHoldSnapPreview(render: () => void): void {
+    if (typeof requestAnimationFrame !== 'function') {
+      render();
+      return;
+    }
+    this.pendingHoldSnapPreview = render;
+    if (this.holdSnapPreviewRafId !== null) return;
+    this.holdSnapPreviewRafId = requestAnimationFrame(() => {
+      this.holdSnapPreviewRafId = null;
+      const job = this.pendingHoldSnapPreview;
+      this.pendingHoldSnapPreview = null;
+      if (job && this.holdSnapState) job();
+    });
+  }
+
+  private scheduleHoldSnapTimer(delayMs: number): void {
+    if (this.holdSnapTimer !== null) {
+      clearTimeout(this.holdSnapTimer);
+      this.holdSnapTimer = null;
+    }
+    this.holdSnapTimer = setTimeout(() => {
+      this.onHoldSnapTimer();
+    }, delayMs);
+  }
+
+  private onHoldSnapTimer(): void {
+    this.holdSnapTimer = null;
+    if (!this.isDrawing || this.holdSnapState) return;
+    if (this.strokePathLenCss < HOLD_SNAP_MIN_PATH_CSS_PX) return;
+    this.holdTimerFired = true;
+    const now = performance.now();
+    this.holdElapsedMs = this.holdSnapAnchor
+      ? Math.max(this.holdElapsedMs, now - this.holdSnapAnchor.sincePerfMs)
+      : Math.max(this.holdElapsedMs, HOLD_SNAP_DELAY_MS);
+    this.tryHoldSnap();
+    if (!this.holdSnapState) {
+      this.holdLastAttemptPointCount = this.inkRawPoints.length;
+    }
+  }
+
+  private recordShapeDiag(
+    finalOutcome: ShapeRecognitionDiagnostic['finalOutcome'],
+    strokeContext: DrawingStrokeContext | null,
+    toolState: ReturnType<ToolManager['getState']>,
+    circleSelectIntercepted = false,
+  ): void {
+    if (typeof window === 'undefined') return;
+    const now = performance.now();
+    const anchorElapsed = this.holdSnapAnchor ? Math.max(0, now - this.holdSnapAnchor.sincePerfMs) : 0;
+    const holdElapsedMs = Math.round(Math.max(this.holdElapsedMs, anchorElapsed) * 10) / 10;
+    const maxHoldDriftCss = Math.round(
+      Math.max(this.holdMaxDriftCss, this.holdSnapAnchor?.maxDriftCss ?? 0) * 100,
+    ) / 100;
+
+    let rejectReason: string | null = null;
+    if (finalOutcome === 'snapped-line' || finalOutcome === 'snapped-shape') {
+      rejectReason = null;
+    } else if (finalOutcome === 'circle-selected') {
+      rejectReason = 'circle-to-select';
+    } else if (finalOutcome === 'scribble-erased') {
+      rejectReason = 'scribble-to-erase';
+    } else if (finalOutcome === 'cancelled') {
+      rejectReason = 'pointer-cancelled';
+    } else if (!strokeContext) {
+      rejectReason = 'missing-stroke-context';
+    } else if (strokeContext.recognitionEligible) {
+      rejectReason = 'handwriting-mode';
+    } else if (this.inkRulerSnapped) {
+      rejectReason = 'ruler-snapped';
+    } else if (!(strokeContext.tool === 'pen' || strokeContext.tool === 'pencil' || strokeContext.tool === 'marker')) {
+      rejectReason = 'tool-ineligible';
+    } else if (!toolState.straightLineRecognition && !toolState.roughShapeRecognition) {
+      rejectReason = 'toggles-off';
+    } else if (this.strokePathLenCss < HOLD_SNAP_MIN_PATH_CSS_PX) {
+      rejectReason = 'path-too-short';
+    } else if (!this.holdTimerFired) {
+      rejectReason = 'not-held';
+    } else {
+      rejectReason = 'geometry-rejected';
+    }
+
+    const entry: ShapeRecognitionDiagnostic = {
+      ts: Date.now(),
+      pointerType: this.strokePointerType,
+      tool: strokeContext?.tool ?? toolState.drawingTool,
+      layout: this.layoutModeGetter(),
+      zoom: Math.round(this.inkScreenScale * 1000) / 1000,
+      toggles: {
+        scribbleToErase: toolState.scribbleToErase,
+        circleToSelect: toolState.circleToSelect,
+        straightLineRecognition: toolState.straightLineRecognition,
+        snapRecognizedLines: toolState.snapRecognizedLines,
+        roughShapeRecognition: toolState.roughShapeRecognition,
+        snapRecognizedShapes: toolState.snapRecognizedShapes,
+        rulerEnabled: toolState.rulerEnabled,
+        handwritingToTextEnabled: toolState.handwritingToTextEnabled,
+      },
+      pointCount: this.inkRawPoints.length,
+      pathLenCss: Math.round(this.strokePathLenCss * 10) / 10,
+      holdTimerFired: this.holdTimerFired,
+      holdElapsedMs,
+      maxHoldDriftCss,
+      straightLineResult: this.lastStraightLineDiag,
+      roughShapeResult: this.lastRoughShapeDiag,
+      circleSelectIntercepted,
+      finalOutcome,
+      rejectReason,
+    };
+
+    const target = window as unknown as { __panvasShapeDiag?: ShapeRecognitionDiagnostic[] };
+    const ring = Array.isArray(target.__panvasShapeDiag) ? target.__panvasShapeDiag : [];
+    ring.push(entry);
+    if (ring.length > SHAPE_DIAG_MAX_ENTRIES) {
+      ring.splice(0, ring.length - SHAPE_DIAG_MAX_ENTRIES);
+    }
+    target.__panvasShapeDiag = ring;
+  }
+
+  private resolveSnappedStrokeWidth(strokeContext: DrawingStrokeContext, points: ReadonlyArray<StrokePoint>): number {
+    if (strokeContext.tool === 'marker') {
+      return Math.max(4, strokeContext.thickness * 3);
+    }
+    // Use the median pressure of the moving stroke (excluding trailing stationary hold pressure spikes)
+    // so snapped shapes match the drawn Classic Pen / inkFamily stroke width 1:1.
+    let medianPressure = 0.5;
+    if (strokeContext.pressureSensitivity && points.length > 0) {
+      const end = points.length >= 12 ? Math.max(4, Math.floor(points.length * 0.88)) : points.length;
+      const pressures: number[] = [];
+      for (let i = 0; i < end; i += 1) {
+        const p = points[i].pressure;
+        if (Number.isFinite(p) && p > 0) pressures.push(p);
+      }
+      if (pressures.length > 0) {
+        pressures.sort((a, b) => a - b);
+        medianPressure = pressures[Math.floor(pressures.length / 2)];
+      }
+    }
+    if (strokeContext.tool === 'pen' && strokeContext.inkFamily) {
+      return Math.max(1, inkWidthAt(strokeContext.inkFamily, {
+        pressure: medianPressure,
+        direction: 0,
+        thickness: strokeContext.thickness,
+        distance: 100,
+        length: 200,
+      }));
+    }
+    return Math.max(1, strokeContext.thickness * medianPressure * 2);
+  }
+
+  private tryHoldSnap(): void {
+    if (!this.isDrawing || this.holdSnapState) return;
+    const toolState = this.toolManager.getState();
+    const strokeContext = this.strokeContextAtStart;
+    if (!this.canHoldSnap(toolState, strokeContext) || !strokeContext) return;
+    const shapeEligibleTool = strokeContext.tool === 'pen' || strokeContext.tool === 'pencil' || strokeContext.tool === 'marker';
+    const shapeStrokeWidth = this.resolveSnappedStrokeWidth(strokeContext, this.inkRawPoints);
+    const screenScale = Math.max(0.1, this.inkScreenScale);
+    const minPageDist = 8 / screenScale;
+
+    const line = toolState.straightLineRecognition && shapeEligibleTool
+      ? recognizeStraightLine(this.inkRawPoints, toolState.snapRecognizedLines, this.inkScreenScale, { deliberateHold: true })
+      : null;
+    this.lastStraightLineDiag = line ? {
+      isLine: line.isLine,
+      length: Math.round(line.length * 10) / 10,
+      efficiency: Math.round(line.efficiency * 1000) / 1000,
+      maxDeviation: Math.round(line.maxDeviation * 100) / 100,
+      snappedAngle: line.snappedAngle !== null ? Math.round((line.snappedAngle * 180) / Math.PI) : null,
+    } : null;
+    if (line?.isLine && line.points.length >= 2) {
+      const start = { ...line.points[0] };
+      const end = { ...line.points[line.points.length - 1] };
+      const shape: Shape = {
+        id: generateId('shp'),
+        type: 'shape',
+        shapeType: 'line',
+        lineStyle: toolState.lineStyle,
+        x: start.x,
+        y: start.y,
+        width: end.x - start.x,
+        height: end.y - start.y,
+        color: strokeContext.color,
+        strokeWidth: shapeStrokeWidth,
+        fill: null,
+        rotation: 0,
+        opacity: strokeContext.opacity,
+        createdAt: Date.now(),
+      };
+      this.holdSnapState = {
+        kind: 'line',
+        shape,
+        start,
+        end,
+        snappedAngle: line.snappedAngle,
+        adjustEngaged: false,
+      };
+      if (typeof this.drawingEngine.renderLiveShapePreview === 'function') {
+        this.drawingEngine.renderLiveShapePreview(shape);
+      } else {
+        this.drawingEngine.renderLiveStroke(
+          [start, end],
+          strokeContext.tool,
+          strokeContext.color,
+          strokeContext.thickness,
+          strokeContext.opacity,
+          strokeContext.strokePattern,
+          strokeContext.inkFamily,
+          end,
+          0,
+        );
+      }
+      return;
+    }
+
+    const arrow = (toolState.roughShapeRecognition || toolState.straightLineRecognition) && shapeEligibleTool
+      ? recognizeArrowGesture(this.inkRawPoints, toolState.snapRecognizedLines, this.inkScreenScale, { deliberateHold: true })
+      : null;
+    if (arrow?.isArrow && arrow.points && arrow.points.length >= 2) {
+      const start = { ...arrow.points[0] };
+      const end = { ...arrow.points[arrow.points.length - 1] };
+      const shape: Shape = {
+        id: generateId('shp'),
+        type: 'shape',
+        shapeType: arrow.shapeType,
+        lineStyle: toolState.lineStyle,
+        x: start.x,
+        y: start.y,
+        width: end.x - start.x,
+        height: end.y - start.y,
+        color: strokeContext.color,
+        strokeWidth: shapeStrokeWidth,
+        fill: null,
+        rotation: 0,
+        opacity: strokeContext.opacity,
+        createdAt: Date.now(),
+      };
+      this.holdSnapState = {
+        kind: 'line',
+        shape,
+        start,
+        end,
+        snappedAngle: arrow.snappedAngle,
+        adjustEngaged: false,
+      };
+      if (typeof this.drawingEngine.renderLiveShapePreview === 'function') {
+        this.drawingEngine.renderLiveShapePreview(shape);
+      } else {
+        this.drawingEngine.renderLiveStroke(
+          [start, end],
+          strokeContext.tool,
+          strokeContext.color,
+          strokeContext.thickness,
+          strokeContext.opacity,
+          strokeContext.strokePattern,
+          strokeContext.inkFamily,
+          end,
+          0,
+        );
+      }
+      return;
+    }
+
+    const recognized = toolState.roughShapeRecognition && shapeEligibleTool
+      ? recognizeRoughShape(this.inkRawPoints, toolState.snapRecognizedShapes, this.inkScreenScale, { deliberateHold: true })
+      : null;
+    this.lastRoughShapeDiag = recognized ? {
+      isShape: recognized.isShape,
+      shapeType: recognized.shapeType,
+      width: Math.round(recognized.width * 10) / 10,
+      height: Math.round(recognized.height * 10) / 10,
+      rotation: Math.round(recognized.rotation * 10) / 10,
+    } : null;
+    if (recognized?.isShape && recognized.shapeType) {
+      const shape: Shape = {
+        id: generateId('shp'),
+        type: 'shape',
+        shapeType: recognized.shapeType,
+        x: recognized.x,
+        y: recognized.y,
+        width: recognized.width,
+        height: recognized.height,
+        color: strokeContext.color,
+        strokeWidth: shapeStrokeWidth,
+        fill: null,
+        rotation: recognized.rotation,
+        opacity: strokeContext.opacity,
+        createdAt: Date.now(),
+      };
+      const center = { x: shape.x + shape.width * 0.5, y: shape.y + shape.height * 0.5 };
+      const lastRaw = this.inkRawPoints[this.inkRawPoints.length - 1] ?? { x: center.x, y: center.y, pressure: 0.5, t: 0 };
+      this.holdSnapState = {
+        kind: 'shape',
+        shape,
+        center,
+        initialPointerDistance: Math.max(minPageDist, Math.hypot(lastRaw.x - center.x, lastRaw.y - center.y)),
+        initialPointerAngle: Math.atan2(lastRaw.y - center.y, lastRaw.x - center.x),
+        initialWidth: shape.width,
+        initialHeight: shape.height,
+        initialRotation: shape.rotation,
+        isCircle: Boolean(recognized.isCircle),
+        adjustEngaged: false,
+      };
+      this.drawingEngine.renderLiveShapePreview?.(shape);
+    }
+  }
+
+  private adjustHoldSnap(e: PointerEvent): void {
+    const state = this.holdSnapState;
+    const strokeContext = this.strokeContextAtStart;
+    if (!state || !strokeContext) return;
+    if (!state.adjustEngaged) {
+      if (this.holdSnapAnchor && Math.hypot(e.clientX - this.holdSnapAnchor.clientX, e.clientY - this.holdSnapAnchor.clientY) <= HOLD_SNAP_JITTER_CSS_PX) {
+        return;
+      }
+      state.adjustEngaged = true;
+    }
+
+    const pt = this.getCanvasPoint(e);
+    const toolState = this.toolManager.getState();
+    const invScale = 1 / Math.max(0.1, this.inkScreenScale);
+
+    if (state.kind === 'line') {
+      const dx = pt.x - state.start.x;
+      const dy = pt.y - state.start.y;
+      const length = Math.hypot(dx, dy);
+      if (length >= 4 * invScale) {
+        const rawAngle = Math.atan2(dy, dx);
+        let finalAngle = rawAngle;
+        let snappedAngle: number | null = null;
+        if (toolState.snapRecognizedLines || e.shiftKey) {
+          const step = e.shiftKey ? Math.PI / 12 : Math.PI / 4;
+          const tol = e.shiftKey ? (7.5 * Math.PI) / 180 : (6 * Math.PI) / 180;
+          const nearest = Math.round(rawAngle / step) * step;
+          const diff = Math.abs(Math.atan2(Math.sin(rawAngle - nearest), Math.cos(rawAngle - nearest)));
+          if (diff <= tol) {
+            finalAngle = nearest;
+            snappedAngle = nearest;
+          }
+        }
+        const cos = Math.abs(Math.cos(finalAngle)) < 1e-12 ? 0 : Math.cos(finalAngle);
+        const sin = Math.abs(Math.sin(finalAngle)) < 1e-12 ? 0 : Math.sin(finalAngle);
+        state.end = {
+          ...state.end,
+          x: state.start.x + cos * length,
+          y: state.start.y + sin * length,
+          t: Math.max(0, performance.now() - this.strokeStartPerfMs),
+        };
+        state.snappedAngle = snappedAngle;
+        state.shape.x = state.start.x;
+        state.shape.y = state.start.y;
+        state.shape.width = state.end.x - state.start.x;
+        state.shape.height = state.end.y - state.start.y;
+      }
+      this.scheduleHoldSnapPreview(() => {
+        if (typeof this.drawingEngine.renderLiveShapePreview === 'function') {
+          this.drawingEngine.renderLiveShapePreview(state.shape);
+        } else {
+          this.drawingEngine.renderLiveStroke(
+            [state.start, state.end],
+            strokeContext.tool,
+            strokeContext.color,
+            strokeContext.thickness,
+            strokeContext.opacity,
+            strokeContext.strokePattern,
+            strokeContext.inkFamily,
+            state.end,
+            0,
+          );
+        }
+      });
+      return;
+    }
+
+    const dx = pt.x - state.center.x;
+    const dy = pt.y - state.center.y;
+    const dist = Math.hypot(dx, dy);
+    const scale = Math.max(0.2, Math.min(5, dist / Math.max(8 * invScale, state.initialPointerDistance)));
+    const newWidth = Math.max(10 * invScale, state.initialWidth * scale);
+    const newHeight = Math.max(10 * invScale, state.initialHeight * scale);
+    state.shape.width = newWidth;
+    state.shape.height = newHeight;
+    state.shape.x = state.center.x - newWidth * 0.5;
+    state.shape.y = state.center.y - newHeight * 0.5;
+
+    if (!state.isCircle) {
+      const deltaDeg = ((Math.atan2(dy, dx) - state.initialPointerAngle) * 180) / Math.PI;
+      let rot = ((state.initialRotation + deltaDeg + 180) % 360 + 360) % 360 - 180;
+      const nearest = Math.round(rot / 45) * 45;
+      if (Math.abs(rot - nearest) <= 5) rot = nearest;
+      if (rot === 180 || rot === -180) rot = 0;
+      state.shape.rotation = rot;
+    }
+    this.scheduleHoldSnapPreview(() => {
+      this.drawingEngine.renderLiveShapePreview?.(state.shape);
+    });
+  }
+
   private continueDrawing(e: PointerEvent): void {
     const startedAt = this.inkTrace ? performance.now() : 0;
     const strokeContext = this.strokeContextAtStart ?? resolveDrawingStrokeContext(this.toolManager.getState());
-    if (!this.acceptInkSamples(e)) {
+    if (this.holdSnapState) {
+      if (this.ownsInkEvent(e)) this.adjustHoldSnap(e);
+      this.traceInkTiming('pointerHandlerMs', startedAt);
+      return;
+    }
+    const owned = this.ownsInkEvent(e);
+    if (owned && Number.isFinite(e.clientX) && Number.isFinite(e.clientY)) {
+      this.strokePathLenCss += Math.hypot(e.clientX - this.strokeLastClientX, e.clientY - this.strokeLastClientY);
+      this.strokeLastClientX = e.clientX;
+      this.strokeLastClientY = e.clientY;
+    }
+    const accepted = this.acceptInkSamples(e);
+    if (owned) {
+      if (this.inkRulerSnapped) {
+        this.clearHoldSnap(false);
+      } else if (this.canHoldSnap(this.toolManager.getState(), strokeContext) && this.strokePathLenCss >= HOLD_SNAP_MIN_PATH_CSS_PX) {
+        const now = performance.now();
+        const anchor = this.holdSnapAnchor;
+        const distFromAnchor = anchor ? Math.hypot(e.clientX - anchor.clientX, e.clientY - anchor.clientY) : Infinity;
+
+        if (!anchor || distFromAnchor > HOLD_SNAP_JITTER_CSS_PX) {
+          // Pointer genuinely moved away from previous anchor: move anchor and reschedule a fresh hold timer.
+          this.holdSnapAnchor = { clientX: e.clientX, clientY: e.clientY, sincePerfMs: now, maxDriftCss: 0 };
+          this.holdLastAttemptPointCount = -1;
+          this.scheduleHoldSnapTimer(HOLD_SNAP_DELAY_MS);
+        } else {
+          // Within <= 14 CSS px of anchor: NEVER cancel/reset an active timer (handles both motionless mouse
+          // holds and noisy 240-500Hz stylus holds). If a prior timer tick already fired and failed, cleanly
+          // re-arm whenever new geometry arrives so a subsequent motionless hold can never lock out.
+          if (distFromAnchor > anchor.maxDriftCss) anchor.maxDriftCss = distFromAnchor;
+          if (anchor.maxDriftCss > this.holdMaxDriftCss) this.holdMaxDriftCss = anchor.maxDriftCss;
+
+          if (this.holdSnapTimer === null) {
+            if (this.inkRawPoints.length > this.holdLastAttemptPointCount) {
+              this.scheduleHoldSnapTimer(HOLD_SNAP_RETRY_MS);
+            }
+          } else if (now - anchor.sincePerfMs >= HOLD_SNAP_DELAY_MS + 40) {
+            // Backstop if high-rate input events delayed macrotask delivery past HOLD_SNAP_DELAY_MS.
+            clearTimeout(this.holdSnapTimer);
+            this.onHoldSnapTimer();
+            if (this.holdSnapState) {
+              this.traceInkTiming('pointerHandlerMs', startedAt);
+              return;
+            }
+          }
+
+          // Avoid bloating a pressure-spike ink blotch at the tip while the stylus dwells stationary waiting to snap.
+          if (now - anchor.sincePerfMs >= 100) {
+            const prev = this.currentPoints[this.currentPoints.length - 2];
+            const curr = this.currentPoints[this.currentPoints.length - 1];
+            if (prev && curr && Math.hypot(curr.x - prev.x, curr.y - prev.y) * Math.max(0.1, this.inkScreenScale) < 1.5) {
+              curr.pressure = prev.pressure;
+              this.traceInkTiming('pointerHandlerMs', startedAt);
+              return;
+            }
+          }
+        }
+      }
+    }
+    if (!accepted) {
       this.traceInkTiming('pointerHandlerMs', startedAt);
       return;
     }
     const latestRawPoint = this.inkRawPoints[this.inkRawPoints.length - 1];
     const renderStartedAt = this.inkTrace ? performance.now() : 0;
+    const predictedPoints = this.extractPredictedPoints(e, strokeContext);
 
     this.drawingEngine.renderLiveStroke(
       this.currentPoints,
@@ -1092,6 +1808,7 @@ export class InputManager {
       strokeContext.inkFamily,
       latestRawPoint,
       this.consumeLiveRevisionFrom(),
+      predictedPoints,
     );
     gate0Profiler.increment(this.gate0InkGesture, 'liveRenderInvocations');
     gate0Profiler.sample(this.gate0InkGesture, 'currentStrokePointCount', this.currentPoints.length);
@@ -1113,6 +1830,52 @@ export class InputManager {
     const value = this.liveRevisionFrom;
     this.liveRevisionFrom = Infinity;
     return value;
+  }
+
+  /**
+   * Extract at most 2 bounded ephemeral OS pointer-prediction samples (<= 24 CSS px
+   * from the live tip). Disabled during hold-to-snap dwell, ruler snapping,
+   * patterned strokes, and non-pen tools; NEVER persisted into stroke.points.
+   */
+  private extractPredictedPoints(
+    e: PointerEvent,
+    strokeContext: DrawingStrokeContext,
+  ): readonly StrokePoint[] | undefined {
+    this.predictedPointsScratch.length = 0;
+    if (
+      e.type === 'pointerrawupdate'
+      || !this.isDrawing
+      || this.strokeModeAtStart !== 'draw'
+      || strokeContext.tool !== 'pen'
+      || strokeContext.strokePattern !== 'solid'
+      || this.inkRulerSnapped
+      || this.holdSnapState !== null
+      || this.currentPoints.length === 0
+      || typeof e.getPredictedEvents !== 'function'
+    ) {
+      return undefined;
+    }
+    if (this.holdSnapAnchor && performance.now() - this.holdSnapAnchor.sincePerfMs >= 80) {
+      return undefined;
+    }
+    const events = e.getPredictedEvents();
+    if (!events || events.length === 0) return undefined;
+    const cssScale = Math.max(0.1, this.inkScreenScale);
+    let prevTip = this.currentPoints[this.currentPoints.length - 1];
+    let cumCss = 0;
+    const limit = Math.min(2, events.length);
+    for (let i = 0; i < limit; i += 1) {
+      const ev = events[i];
+      if (!ev || !Number.isFinite(ev.clientX) || !Number.isFinite(ev.clientY)) break;
+      const pt = this.getCanvasPoint(ev);
+      const stepCss = Math.hypot(pt.x - prevTip.x, pt.y - prevTip.y) * cssScale;
+      if (stepCss <= 0.5) continue;
+      cumCss += stepCss;
+      if (cumCss > 24) break;
+      this.predictedPointsScratch.push(pt);
+      prevTip = pt;
+    }
+    return this.predictedPointsScratch.length > 0 ? this.predictedPointsScratch : undefined;
   }
 
   private acceptInkSamples(e: PointerEvent): boolean {
@@ -1223,7 +1986,15 @@ export class InputManager {
 
   private finishDrawing(e: PointerEvent): void {
     const traceStartedAt = this.inkTrace ? performance.now() : 0;
-    if (e.type === 'pointerup') this.acceptInkSamples(e);
+    const snapped = this.holdSnapState;
+    const toolStateAtFinish = this.toolManager.getState();
+    // Capture anchor hold metrics before clearHoldSnap() resets holdSnapAnchor.
+    if (this.holdSnapAnchor) {
+      this.holdElapsedMs = Math.max(this.holdElapsedMs, Math.max(0, performance.now() - this.holdSnapAnchor.sincePerfMs));
+      this.holdMaxDriftCss = Math.max(this.holdMaxDriftCss, this.holdSnapAnchor.maxDriftCss);
+    }
+    this.clearHoldSnap(false);
+    if (e.type === 'pointerup' && !snapped) this.acceptInkSamples(e);
     const finalTip = this.inkRawPoints[this.inkRawPoints.length - 1];
     const filteredPoints = this.currentPoints;
     // Commit precisely the displayed path. The bounded filtered tip is already
@@ -1244,10 +2015,21 @@ export class InputManager {
     this.inkOwner = null;
     const gestureMode = this.strokeModeAtStart;
     this.strokeModeAtStart = null;
-    const strokeContext = this.strokeContextAtStart ?? resolveDrawingStrokeContext(this.toolManager.getState());
+    const strokeContext = this.strokeContextAtStart ?? resolveDrawingStrokeContext(toolStateAtFinish);
     this.strokeContextAtStart = null;
     try {
-      if (this.currentPoints.length < 1) {
+      if (e.type === 'pointercancel' && snapped) {
+        this.recordShapeDiag('cancelled', strokeContext, toolStateAtFinish, false);
+        this.currentPoints = [];
+        this.drawingEngine.endLiveStroke?.();
+        this.drawingEngine.redraw();
+        gate0Profiler.finish(this.gate0InkGesture, { finishDrawingMs: finishStartedAt ? performance.now() - finishStartedAt : 0, cancelled: true });
+        this.gate0InkGesture = null;
+        return;
+      }
+
+      if (this.currentPoints.length < 1 && !snapped) {
+        this.recordShapeDiag('cancelled', strokeContext, toolStateAtFinish, false);
         this.currentPoints = [];
         this.drawingEngine.redraw();
         if (strokeContext.recognitionEligible) {
@@ -1261,9 +2043,31 @@ export class InputManager {
         return;
       }
 
-      const toolState = this.toolManager.getState();
+      if (snapped) {
+        this.recordShapeDiag(
+          snapped.kind === 'line' && snapped.shape.shapeType === 'line' ? 'snapped-line' : 'snapped-shape',
+          strokeContext,
+          toolStateAtFinish,
+          false,
+        );
+        this.drawingEngine.endLiveStroke?.();
+        this.shapeManager.addShape(snapped.shape);
+        this.drawingEngine.redraw();
+        this.recordCommittedShape(snapped.shape, `Recognize ${snapped.shape.shapeType}`);
+        this.currentPoints = [];
+        gate0Profiler.finish(this.gate0InkGesture, {
+          finishDrawingMs: finishStartedAt ? performance.now() - finishStartedAt : 0,
+          committedPoints: 0,
+          tool: strokeContext.tool,
+        });
+        this.gate0InkGesture = null;
+        return;
+      }
+
+      const toolState = toolStateAtFinish;
       if (
-        !strokeContext.recognitionEligible
+        !snapped
+        && !strokeContext.recognitionEligible
         && gestureMode === 'draw'
         && toolState.scribbleToErase
         && (strokeContext.tool === 'pen' || strokeContext.tool === 'pencil')
@@ -1275,6 +2079,7 @@ export class InputManager {
           Math.max(3, strokeContext.thickness),
         );
         if (this.eraserEngine.eraseStrokeIds(targets)) {
+          this.recordShapeDiag('scribble-erased', strokeContext, toolState, false);
           this.currentPoints = [];
           this.notifyChange();
           return;
@@ -1282,55 +2087,22 @@ export class InputManager {
       }
 
       if (
-        !strokeContext.recognitionEligible
+        !snapped
+        && !strokeContext.recognitionEligible
         && gestureMode === 'draw'
         && toolState.circleToSelect
         && (strokeContext.tool === 'pen' || strokeContext.tool === 'pencil')
         && analyzeCircleGesture(this.inkRawPoints, this.inkScreenScale).isCircle
         && this.selectionEngine.selectWithinLoop(this.inkRawPoints) > 0
       ) {
+        this.recordShapeDiag('circle-selected', strokeContext, toolState, true);
         this.currentPoints = [];
         this.toolManager.setMode('select');
         return;
       }
 
-      const recognizedLine = !strokeContext.recognitionEligible && gestureMode === 'draw' && toolState.straightLineRecognition
-        ? recognizeStraightLine(this.inkRawPoints, toolState.snapRecognizedLines, this.inkScreenScale)
-        : null;
-      const recognizedShape = !recognizedLine?.isLine
-        && gestureMode === 'draw'
-        && !strokeContext.recognitionEligible
-        && toolState.roughShapeRecognition
-        && (strokeContext.tool === 'pen' || strokeContext.tool === 'pencil')
-        ? recognizeRoughShape(this.inkRawPoints, toolState.snapRecognizedShapes, this.inkScreenScale)
-        : null;
-
-      if (recognizedShape?.isShape && recognizedShape.shapeType) {
-        const shape: Shape = {
-          id: generateId('shp'),
-          type: 'shape',
-          shapeType: recognizedShape.shapeType,
-          x: recognizedShape.x,
-          y: recognizedShape.y,
-          width: recognizedShape.width,
-          height: recognizedShape.height,
-          color: strokeContext.color,
-          strokeWidth: strokeContext.thickness,
-          fill: null,
-          rotation: 0,
-          opacity: strokeContext.opacity,
-          createdAt: Date.now(),
-        };
-        this.shapeManager.addShape(shape);
-        this.drawingEngine.redraw();
-        this.recordCommittedShape(shape, `Recognize ${shape.shapeType}`);
-        this.currentPoints = [];
-        return;
-      }
-
-      const committedPoints = recognizedLine?.isLine
-        ? recognizedLine.points
-        : this.currentPoints;
+      this.recordShapeDiag('freehand-stroke', strokeContext, toolState, false);
+      const committedPoints = this.currentPoints;
 
       if (trace) {
         trace.committed = committedPoints.map(point => ({ ...point }));
@@ -1426,7 +2198,7 @@ export class InputManager {
     }
     this.isDrawing = true;
     this.strokeModeAtStart = 'erase';
-    
+
     const toolState = this.toolManager.getState();
     const point = this.getCanvasPoint(e);
     const radius = Math.max(3, toolState.thickness || 12);
@@ -1466,6 +2238,7 @@ export class InputManager {
     this.eraserGesture = null;
     this.isDrawing = false;
     this.strokeModeAtStart = null;
+    this.clearCachedCanvasRect();
     const changed = gesture.finish();
     if (changed) {
       this.notifyChange();
@@ -1487,10 +2260,10 @@ export class InputManager {
     this.isDrawing = true;
     this.strokeModeAtStart = 'shape';
     this.shapeStartPoint = this.getCanvasPoint(e);
-    
+
     const toolState = this.toolManager.getState();
     this.activeShapeId = generateId('shp');
-    
+
     // Draw an initial tiny shape
     this.shapeManager.addShape({
       id: this.activeShapeId,
@@ -1526,7 +2299,7 @@ export class InputManager {
     this.isDrawing = false;
     this.strokeModeAtStart = null;
     if (!this.activeShapeId) return;
-    
+
     const shape = this.shapeManager.getShapes().find(s => s.id === this.activeShapeId);
     this.activeShapeId = null;
 

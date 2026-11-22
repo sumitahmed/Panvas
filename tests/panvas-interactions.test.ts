@@ -31,6 +31,7 @@ import { recognizeRoughShape } from '../src/components/notebook/engine/roughShap
 import { ViewportManager } from '../src/components/notebook/engine/ViewportManager.ts';
 import { InputManager } from '../src/components/notebook/engine/InputManager.ts';
 import { SelectionEngine } from '../src/components/notebook/engine/SelectionEngine.ts';
+import { ShapeManager } from '../src/components/notebook/engine/ShapeManager.ts';
 import { LayerManager } from '../src/components/notebook/engine/LayerManager.ts';
 import { RulerManager } from '../src/components/notebook/engine/RulerManager.ts';
 import { LaserManager } from '../src/components/notebook/engine/LaserManager.ts';
@@ -1774,4 +1775,544 @@ test('line-style changes preserve geometry and undo through the existing shape h
   assert.equal(line.rotation, 37); assert.equal(line.x, 20);
   harness.history.undo(); assert.equal(line.lineStyle, undefined);
   harness.history.redo(); assert.equal(line.lineStyle, 'wavy');
+});
+
+// ---- Bug 1 unit regressions: unified multi-selection handles, damage bounds, tool switch ----
+
+test('mixed selection with shapes and strokes renders one collective frame and 8 handles only', () => {
+  const line: Shape = {
+    id: 'group-line', type: 'shape', shapeType: 'line',
+    x: 220, y: 180, width: -120, height: -40, color: '#000', strokeWidth: 3, fill: null, rotation: 0, createdAt: 1,
+  };
+  const rect: Shape = selectionShape('group-rect', 240, 80, 60, 40);
+  const stroke: Stroke = {
+    id: 'group-stroke', type: 'stroke', tool: 'pen', color: '#000', thickness: 2, opacity: 1, createdAt: 2,
+    points: [{ x: 110, y: 90, pressure: 0.5, t: 0 }, { x: 160, y: 120, pressure: 0.5, t: 10 }],
+  };
+  const harness = createLassoHarness([line, rect], [stroke]);
+  const freeformLoop = [
+    { x: 80, y: 60 }, { x: 330, y: 60 }, { x: 330, y: 210 }, { x: 80, y: 210 },
+  ].map((p, i) => ({ ...p, pressure: 0.5, t: i }));
+  harness.selection.selectWithinLoop(freeformLoop, true, freeformLoop);
+  assert.equal(harness.selection.getSelectedElements().length, 3);
+  const collective = harness.selection.getCollectiveBoundingBox();
+  assert.ok(collective && collective.width > 0 && collective.height > 0);
+  assert.equal(collective.x, 100);
+
+  let strokeRects = 0;
+  let arcs = 0;
+  const ctx = new Proxy({
+    strokeRect: () => { strokeRects += 1; },
+    arc: () => { arcs += 1; },
+  }, { get: (target, key) => target[key as keyof typeof target] ?? (() => {}) }) as any;
+  harness.selection.renderSelection(ctx);
+  assert.equal(strokeRects, 8, 'freeform lasso + mixed selection draws exactly 8 collective handles and 0 per-child handles');
+  assert.equal(arcs, 1, 'exactly 1 collective rotation handle');
+  assert.equal(harness.selection.getHandleAt(240, 80), null, 'interior child handles do not hijack collective multi-selection');
+
+  harness.selection.selectElement(rect.id, 'shape');
+  harness.selection.selectElement(line.id, 'shape', true);
+  strokeRects = 0;
+  arcs = 0;
+  harness.selection.renderSelection(ctx);
+  assert.equal(strokeRects, 9, 'non-freeform mixed multi-selection draws 1 collective rect + 8 handles');
+  assert.equal(arcs, 1);
+
+  const damage = harness.selection.getSelectionDamage();
+  assert.ok(damage);
+  const wideLoop = [
+    { x: 50, y: 40 }, { x: 420, y: 40 }, { x: 420, y: 250 }, { x: 50, y: 250 },
+  ].map((p, i) => ({ ...p, pressure: 0.5, t: i }));
+  harness.selection.selectWithinLoop(wideLoop, true, wideLoop);
+  const outlineDamage = harness.selection.getSelectionDamage();
+  assert.ok(outlineDamage && outlineDamage.left <= 50 && outlineDamage.right >= 420 && outlineDamage.bottom >= 250);
+});
+
+test('switching from select to draw/erase/shape clears active selection while preserving hand pan and single text', () => {
+  const harness = createInputOwnershipHarness();
+  harness.tools.setDrawingTool('pen');
+  harness.drawLine(90, 40, 140);
+  const strokeId = harness.drawing.getStrokes()[0].id;
+
+  harness.tools.setMode('select');
+  harness.selection.selectElement(strokeId, 'stroke');
+  assert.equal(harness.selection.getSelectedElements().length, 1);
+
+  // Spacebar temporary hand pan must keep the selection alive.
+  harness.tools.setMode('hand');
+  assert.equal(harness.selection.getSelectedElements().length, 1);
+
+  harness.tools.setMode('select');
+  assert.equal(harness.selection.getSelectedElements().length, 1);
+
+  // Switching to draw must clear the selection and trigger redraw.
+  const redrawsBefore = harness.drawing.redrawCount;
+  harness.tools.setDrawingTool('pen');
+  assert.equal(harness.selection.getSelectedElements().length, 0);
+  assert.ok(harness.drawing.redrawCount > redrawsBefore);
+
+  // Switching to eraser or shape also clears selection.
+  harness.tools.setMode('select');
+  harness.selection.selectElement(strokeId, 'stroke');
+  harness.tools.setMode('erase');
+  assert.equal(harness.selection.getSelectedElements().length, 0);
+
+  harness.tools.setMode('select');
+  harness.selection.selectElement(strokeId, 'stroke');
+  harness.tools.setMode('shape');
+  assert.equal(harness.selection.getSelectedElements().length, 0);
+});
+
+// ---- Bug 2 unit regressions: rotation-invariant & sampling-rate-invariant scribble-to-erase ----
+
+function makeScribbleVariant(kind: 'backForth' | 'zigzag', angleDeg: number, stepsPerLeg = 8): StrokePoint[] {
+  const raw: Array<[number, number]> = [];
+  if (kind === 'backForth') {
+    for (let leg = 0; leg < 6; leg += 1) {
+      const x0 = leg % 2 === 0 ? 0 : 110;
+      const x1 = leg % 2 === 0 ? 110 : 0;
+      for (let s = 0; s < stepsPerLeg; s += 1) {
+        const u = s / stepsPerLeg;
+        raw.push([x0 + (x1 - x0) * u, leg * 7 + u * 5]);
+      }
+    }
+    raw.push([0, 42]);
+  } else {
+    for (let leg = 0; leg < 7; leg += 1) {
+      const x0 = leg * 20;
+      const x1 = (leg + 1) * 20;
+      const y0 = leg % 2 === 0 ? 0 : 48;
+      const y1 = leg % 2 === 0 ? 48 : 0;
+      for (let s = 0; s < stepsPerLeg; s += 1) {
+        const u = s / stepsPerLeg;
+        raw.push([x0 + (x1 - x0) * u, y0 + (y1 - y0) * u]);
+      }
+    }
+    raw.push([140, 48]);
+  }
+  const rad = (angleDeg * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const dt = Math.max(4, Math.round(900 / raw.length));
+  return raw.map(([x, y], index) => ({
+    x: 200 + x * cos - y * sin,
+    y: 200 + x * sin + y * cos,
+    pressure: 0.5,
+    t: index * dt,
+  }));
+}
+
+test('scribble-to-erase succeeds across 0°, 22.5°, 45°, 90°, 112.5°, 135° and 30–240Hz sampling', () => {
+  for (const angle of [0, 22.5, 45, 90, 112.5, 135]) {
+    assert.equal(analyzeScribble(makeScribbleVariant('backForth', angle, 8)).isScribble, true, `back-and-forth ${angle}°`);
+    assert.equal(analyzeScribble(makeScribbleVariant('zigzag', angle, 8)).isScribble, true, `perpendicular zigzag ${angle}°`);
+  }
+  for (const stepsPerLeg of [4, 8, 16, 32]) {
+    assert.equal(analyzeScribble(makeScribbleVariant('zigzag', 45, stepsPerLeg)).isScribble, true, `45° zigzag at ${stepsPerLeg} steps/leg`);
+    assert.equal(analyzeScribble(makeScribbleVariant('backForth', 135, stepsPerLeg)).isScribble, true, `135° back-and-forth at ${stepsPerLeg} steps/leg`);
+  }
+
+  // Square 70x70 zigzag.
+  const squareZig: StrokePoint[] = [];
+  for (let leg = 0; leg < 6; leg += 1) {
+    const x0 = (leg / 6) * 70;
+    const x1 = ((leg + 1) / 6) * 70;
+    const y0 = leg % 2 === 0 ? 0 : 70;
+    const y1 = leg % 2 === 0 ? 70 : 0;
+    for (let s = 0; s < 6; s += 1) {
+      const u = s / 6;
+      squareZig.push({ x: 100 + x0 + (x1 - x0) * u, y: 100 + y0 + (y1 - y0) * u, pressure: 0.5, t: squareZig.length * 15 });
+    }
+  }
+  squareZig.push({ x: 170, y: 100, pressure: 0.5, t: squareZig.length * 15 });
+  assert.equal(analyzeScribble(squareZig).isScribble, true, 'square 70x70 scribble accepted');
+
+  // Target lookup on rotated multi-stroke word.
+  const wordStrokes: Stroke[] = [0, 1, 2, 3].map(i => ({
+    id: `word-char-${i}`, type: 'stroke', tool: 'pen', color: '#000', thickness: 2, opacity: 1, createdAt: i,
+    points: [
+      { x: 220 + i * 32, y: 205, pressure: 0.5, t: 0 },
+      { x: 220 + i * 32, y: 245, pressure: 0.5, t: 10 },
+    ],
+  }));
+  const engine = new FakeDrawingEngine(wordStrokes);
+  const horizontalZig = makeScribbleVariant('zigzag', 0, 8);
+  const targets = findScribbleTargets(horizontalZig, (x, y, r) => engine.findStrokesNearPoint(x, y, r), 6);
+  assert.equal(targets.size, 4, 'horizontal zigzag hits every letter stroke in the word');
+});
+
+test('scribble-to-erase rejects cursive writing, tight loops, underlines, short strokes, and slow shading', () => {
+  // Looped cursive "eeeee" (x-height ~20px, high winding).
+  const loops: StrokePoint[] = Array.from({ length: 80 }, (_, i) => {
+    const t = i / 14;
+    return { x: 40 + t * 24 - Math.cos(t * Math.PI * 2) * 10, y: 60 + Math.sin(t * Math.PI * 2) * 10, pressure: 0.5, t: i * 15 };
+  });
+  assert.equal(analyzeScribble(loops).isScribble, false, 'cursive eeeee loops rejected');
+
+  // Smooth multi-turn circle/spiral.
+  const spiral: StrokePoint[] = Array.from({ length: 70 }, (_, i) => {
+    const a = (i / 18) * Math.PI * 2;
+    const r = 18 + i * 0.4;
+    return { x: 100 + Math.cos(a) * r, y: 100 + Math.sin(a) * r, pressure: 0.5, t: i * 16 };
+  });
+  assert.equal(analyzeScribble(spiral).isScribble, false, 'spiral rejected');
+
+  // Wavy underline (150x14).
+  const wavyUnderline: StrokePoint[] = Array.from({ length: 40 }, (_, i) => ({
+    x: 50 + (i / 39) * 150, y: 100 + Math.sin(i * 0.9) * 7, pressure: 0.5, t: i * 20,
+  }));
+  assert.equal(analyzeScribble(wavyUnderline).isScribble, false, 'wavy underline rejected');
+
+  // Rapid short 'W' stroke (22x18).
+  const shortW: StrokePoint[] = [[0, 0], [5, 18], [11, 4], [17, 18], [22, 0], [21, 1], [17, 17], [11, 5], [5, 17], [1, 1]]
+    .map(([x, y], i) => ({ x, y, pressure: 0.5, t: i * 20 }));
+  assert.equal(analyzeScribble(shortW).isScribble, false, 'short W rejected');
+
+  // Slow shading (> 1600 ms).
+  const slowShade = makeScribbleVariant('backForth', 0, 8).map((p, i) => ({ ...p, t: i * 50 }));
+  assert.equal(analyzeScribble(slowShade).isScribble, false, 'slow shading rejected');
+});
+
+// ---- Bug 3 unit regressions: straight lines, rotated rectangles, ovals vs circles, hold-to-snap ----
+
+test('straight-line recognition handles long bowed lines, staircase diagonal jitter, and hold tolerances', () => {
+  const bowedLong: StrokePoint[] = Array.from({ length: 50 }, (_, i) => {
+    const u = i / 49;
+    return { x: 40 + u * 300, y: 100 + Math.sin(Math.PI * u) * 9, pressure: 0.5, t: i * 14 };
+  });
+  const lineLong = recognizeStraightLine(bowedLong, false);
+  assert.equal(lineLong.isLine, true, '300px line with 9px (3%) bow is accepted');
+
+  // Staircase integer-pixel diagonal stroke at 240Hz.
+  const staircase: StrokePoint[] = Array.from({ length: 90 }, (_, i) => ({
+    x: 50 + Math.round((i / 89) * 160),
+    y: 50 + Math.round((i / 89) * 160) + (i % 2),
+    pressure: 0.5,
+    t: i * 4,
+  }));
+  assert.equal(recognizeStraightLine(staircase, true).isLine, true, '240Hz staircase diagonal line accepted');
+  assert.equal(recognizeStraightLine(staircase, true).snappedAngle !== null, true);
+
+  // Short flick on hold (< 60ms, >= 32px) accepted only with deliberateHold.
+  const quickHeldLine: StrokePoint[] = Array.from({ length: 10 }, (_, i) => ({
+    x: 10 + i * 4.5, y: 20, pressure: 0.5, t: i * 5,
+  }));
+  assert.equal(recognizeStraightLine(quickHeldLine, false, 1, { deliberateHold: true }).isLine, true);
+});
+
+function roughTriangle(width: number, height: number, pointsPerEdge = 12): StrokePoint[] {
+  const corners = [
+    [20 + width / 2, 30],
+    [20 + width, 30 + height],
+    [20, 30 + height],
+    [20 + width / 2, 30],
+  ];
+  const points: StrokePoint[] = [];
+  for (let edge = 0; edge < 3; edge += 1) {
+    const [startX, startY] = corners[edge];
+    const [endX, endY] = corners[edge + 1];
+    for (let index = 0; index < pointsPerEdge; index += 1) {
+      const progress = index / pointsPerEdge;
+      const wobble = Math.sin(progress * Math.PI * 2) * 1.1;
+      points.push({
+        x: startX + (endX - startX) * progress + wobble,
+        y: startY + (endY - startY) * progress - wobble * 0.5,
+        pressure: 0.5,
+        t: points.length * 28,
+      });
+    }
+  }
+  points.push({ x: corners[0][0], y: corners[0][1], pressure: 0.5, t: points.length * 28 });
+  return points;
+}
+
+test('rough-shape recognition classifies rotated rectangles, triangles, distinguishes circles from tilted ovals, and rejects non-shapes', () => {
+  const rotatePts = (pts: StrokePoint[], deg: number): StrokePoint[] => {
+    const rad = (deg * Math.PI) / 180;
+    const cos = Math.cos(rad), sin = Math.sin(rad);
+    return pts.map(p => ({ ...p, x: 200 + (p.x - 100) * cos - (p.y - 80) * sin, y: 200 + (p.x - 100) * sin + (p.y - 80) * cos }));
+  };
+
+  // Wide 3:1 rectangle & 30°-tilted rectangle (even with rounded hand corners).
+  const wideRect = roughRectangle(210, 70, 12);
+  const wideRes = recognizeRoughShape(wideRect, true);
+  assert.equal(wideRes.isShape && wideRes.shapeType, 'rectangle');
+  assert.equal(wideRes.snapped, false);
+  assert.ok(wideRes.width / wideRes.height > 2.5);
+
+  const tiltedRect = rotatePts(roughRectangle(160, 90, 12), 30);
+  const tiltedRectRes = recognizeRoughShape(tiltedRect, false);
+  assert.equal(tiltedRectRes.isShape && tiltedRectRes.shapeType, 'rectangle');
+  assert.ok(Math.abs(tiltedRectRes.rotation - 30) < 6, `expected ~30° rotation, got ${tiltedRectRes.rotation}`);
+
+  // Upright and rotated triangles (0°, 35°, 120°, 180°).
+  for (const deg of [0, 35, 120, 180]) {
+    const triPts = rotatePts(roughTriangle(120, 105, 12), deg);
+    const triRes = recognizeRoughShape(triPts, true, 1, { deliberateHold: true });
+    assert.equal(triRes.isShape && triRes.shapeType, 'triangle', `expected triangle at ${deg}°, got ${triRes.shapeType}`);
+    assert.ok(triRes.width > 60 && triRes.height > 60);
+  }
+
+  // Open 2-segment chevron ('V' / 'L') must never classify as a closed triangle.
+  const openChevron = roughTriangle(120, 105, 12).slice(0, 22);
+  assert.equal(recognizeRoughShape(openChevron, true, 1, { deliberateHold: true }).isShape, false, 'open chevron rejected');
+
+  // 45°-tilted 2:1 oval MUST remain an oval with snapEqualSides=true, never forced into a circle!
+  const tiltedOval = rotatePts(roughEllipse(180, 80, 53), 45);
+  const tiltedOvalRes = recognizeRoughShape(tiltedOval, true);
+  assert.equal(tiltedOvalRes.isShape && tiltedOvalRes.shapeType, 'ellipse');
+  assert.equal(tiltedOvalRes.snapped, false, 'tilted elongated oval must not snap to a circle');
+  assert.ok(Math.max(tiltedOvalRes.width, tiltedOvalRes.height) / Math.min(tiltedOvalRes.width, tiltedOvalRes.height) > 1.8);
+
+  // Near-circular loop snaps to circle when snapEqualSides=true.
+  const circle = recognizeRoughShape(roughEllipse(104, 96, 49), true);
+  assert.equal(circle.isShape && circle.shapeType, 'ellipse');
+  assert.equal(circle.snapped, true);
+  assert.equal(circle.width, circle.height);
+  assert.equal(circle.rotation, 0);
+
+  // JSON round-trip compatibility for rotated oval & triangle.
+  const shapeObj: Shape = {
+    id: 'oval-1', type: 'shape', shapeType: 'ellipse',
+    x: tiltedOvalRes.x, y: tiltedOvalRes.y, width: tiltedOvalRes.width, height: tiltedOvalRes.height,
+    rotation: tiltedOvalRes.rotation, color: '#000', strokeWidth: 2, fill: null, opacity: 1, createdAt: 1,
+  };
+  assert.deepEqual(JSON.parse(JSON.stringify(shapeObj)), shapeObj);
+});
+
+test('rotated ovals, rectangles, and triangles work end-to-end across ShapeManager hit-test and SelectionEngine handles/select', () => {
+  const layers = new LayerManager();
+  const shapeManager = new ShapeManager(layers);
+  const oval: Shape = {
+    id: 'rot-oval', type: 'shape', shapeType: 'ellipse',
+    x: 100, y: 150, width: 220, height: 70, rotation: 45,
+    color: '#000', strokeWidth: 3, fill: null, opacity: 1, createdAt: 1,
+  };
+  const tri: Shape = {
+    id: 'tri-1', type: 'shape', shapeType: 'triangle',
+    x: 420, y: 120, width: 120, height: 100, rotation: 0,
+    color: '#000', strokeWidth: 3, fill: null, opacity: 1, createdAt: 2,
+  };
+  shapeManager.addShape(oval);
+  shapeManager.addShape(tri);
+  const cx = oval.x + oval.width / 2;
+  const cy = oval.y + oval.height / 2;
+  const cos45 = Math.SQRT1_2;
+
+  // Point near rotated major tip (~95px along +45° axis) must hit, while unrotated corner must miss!
+  assert.deepEqual(shapeManager.findShapesNearPoint(cx + 95 * cos45, cy + 95 * cos45, 5), ['rot-oval']);
+  assert.deepEqual(shapeManager.findShapesNearPoint(cx + 100, cy - 30, 5), [], 'empty region outside rotated oval misses');
+
+  // Triangle center & apex hit; upper-left bounding-box corner outside sloped edge misses!
+  assert.deepEqual(shapeManager.findShapesNearPoint(480, 175, 5), ['tri-1']);
+  assert.deepEqual(shapeManager.findShapesNearPoint(425, 125, 3), [], 'upper-left AABB corner outside triangle misses');
+
+  const history = new HistoryManager();
+  const viewport = new ViewportManager();
+  const selection = new SelectionEngine(
+    { getStrokes: () => [], redraw() {} } as any,
+    shapeManager, history, viewport,
+    { getTexts: () => [] } as any,
+    { getImages: () => [] } as any,
+    layers,
+  );
+  assert.equal(selection.selectAt(cx + 95 * cos45, cy + 95 * cos45, false), true, 'can select rotated oval tip');
+  // Rotated top-right handle lies at local (+114, -39) rotated by +45° -> outside unrotated AABB!
+  const hx = cx + 114 * cos45 - (-39) * cos45;
+  const hy = cy + 114 * cos45 + (-39) * cos45;
+  assert.equal(selection.getHandleAt(hx, hy)?.handle, 'tr', 'rotated handle outside unrotated AABB is still clickable');
+
+  assert.equal(selection.selectAt(425, 125, false), false, 'clicking outside triangle sloped edge clears selection');
+  assert.equal(selection.selectAt(480, 175, false), true, 'clicking inside triangle selects it');
+  assert.equal(selection.getSelectedElements()[0]?.id, 'tri-1');
+});
+
+test('InputManager draw-and-hold-to-snap keeps quick draws freehand and previews/commits on hold across all 5 shape families', () => {
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  const pendingTimers = new Map<number, () => void>();
+  let nextTimerId = 1;
+  (globalThis as any).setTimeout = (fn: () => void) => {
+    const id = nextTimerId++;
+    pendingTimers.set(id, fn);
+    return id;
+  };
+  (globalThis as any).clearTimeout = (id: number) => {
+    pendingTimers.delete(id);
+  };
+
+  try {
+    // Verify out-of-the-box defaults WITHOUT calling setRoughShapeRecognition or setStraightLineRecognition!
+    const tools = new ToolManager();
+    assert.equal(tools.getState().straightLineRecognition, true, 'straightLineRecognition defaults to true');
+    assert.equal(tools.getState().snapRecognizedLines, true, 'snapRecognizedLines defaults to true');
+    assert.equal(tools.getState().roughShapeRecognition, true, 'roughShapeRecognition defaults to true');
+    assert.equal(tools.getState().snapRecognizedShapes, true, 'snapRecognizedShapes defaults to true');
+    tools.setDrawingTool('pen');
+    const history = new HistoryManager();
+    const shapes: Shape[] = [];
+    const previews: Shape[] = [];
+    let clearedPreviews = 0;
+    const strokes: Stroke[] = [];
+    const drawing = {
+      getStrokes: () => strokes,
+      canEditActiveLayer: () => true,
+      addStroke: (s: Stroke) => strokes.push(s),
+      removeStroke: (id: string) => { const idx = strokes.findIndex(s => s.id === id); if (idx >= 0) strokes.splice(idx, 1); },
+      redraw() {},
+      beginLiveStroke() {},
+      renderLiveStroke() {},
+      renderLiveShapePreview: (s: Shape) => previews.push({ ...s }),
+      clearLiveShapePreview: () => { clearedPreviews += 1; },
+      commitLiveStroke() {},
+      endLiveStroke() {},
+      findStrokesNearPoint: () => [],
+    };
+    const shapeManager = {
+      getShapes: () => shapes,
+      addShape: (s: Shape) => shapes.push(s),
+      removeShape: (id: string) => { const idx = shapes.findIndex(s => s.id === id); return idx >= 0 ? shapes.splice(idx, 1)[0] : undefined; },
+      findShapesNearPoint: () => [],
+    };
+    const viewport = new ViewportManager();
+    const layers = new LayerManager();
+    const selection = new SelectionEngine(drawing as any, shapeManager as any, history, viewport, { getTexts: () => [] } as any, { getImages: () => [] } as any, layers);
+    const input = new InputManager(tools, viewport, drawing as any, new EraserEngine(drawing as any, history), shapeManager as any, selection, history, { getTexts: () => [] } as any, new RulerManager(), new LaserManager());
+    const canvas = {
+      clientWidth: 800, clientHeight: 800, width: 800, height: 800,
+      style: { cursor: '', removeProperty: () => {} },
+      addEventListener: () => {}, removeEventListener: () => {},
+      setPointerCapture: () => {}, releasePointerCapture: () => {},
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 800 * viewport.getState().scale, height: 800 * viewport.getState().scale }),
+      closest: () => null,
+    } as unknown as HTMLCanvasElement;
+    input.attach(canvas);
+
+    let ts = 0;
+    const emit = (phase: 'Down' | 'Move' | 'Up', x: number, y: number, typeOverride?: string) => {
+      (input as any)[phase === 'Up' ? 'handlePointerUp' : `handlePointer${phase}`]({
+        type: typeOverride ?? `pointer${phase.toLowerCase()}`,
+        timeStamp: ++ts, button: 0, buttons: phase === 'Up' ? 0 : 1,
+        pointerId: 9, pointerType: 'pen', pressure: 0.5, clientX: x, clientY: y, shiftKey: false, preventDefault: () => {},
+      });
+    };
+
+    // 1. Quick draw without holding stays untouched freehand ink!
+    const quickOval = roughEllipse(160, 90, 40);
+    emit('Down', quickOval[0].x, quickOval[0].y);
+    for (const p of quickOval.slice(1, -1)) emit('Move', p.x, p.y);
+    emit('Up', quickOval[quickOval.length - 1].x, quickOval[quickOval.length - 1].y);
+    assert.equal(shapes.length, 0, 'quick draw must stay freehand without spawning a shape');
+    assert.equal(strokes.length, 1, 'quick draw commits freehand stroke');
+    assert.ok(strokes[0].points.length > 10);
+
+    // 2. Draw + hold (within <=9px jitter) triggers live preview without mutating ShapeManager, drag adjusts, pointerup commits!
+    const heldOval = roughEllipse(180, 90, 49);
+    emit('Down', heldOval[0].x, heldOval[0].y);
+    for (const p of heldOval.slice(1)) emit('Move', p.x, p.y);
+    // Micro-jitter within 8px must not kill the hold timer.
+    emit('Move', heldOval[heldOval.length - 1].x + 5, heldOval[heldOval.length - 1].y + 4);
+    assert.equal(pendingTimers.size, 1, 'one active hold timer queued');
+    const [timerId, fireHold] = [...pendingTimers.entries()][0];
+    pendingTimers.delete(timerId);
+    fireHold();
+    assert.equal(previews.length, 1, 'hold fires live shape preview');
+    assert.equal(shapes.length, 0, 'ShapeManager untouched until pointerup');
+    // Drag outward while held to scale up preview.
+    emit('Move', heldOval[heldOval.length - 1].x + 80, heldOval[heldOval.length - 1].y);
+    assert.equal(previews.length, 2, 'dragging after hold updates live shape preview');
+    assert.ok(previews[1].width > previews[0].width);
+    // Release commits adjusted shape with undo/redo!
+    emit('Up', heldOval[heldOval.length - 1].x + 80, heldOval[heldOval.length - 1].y);
+    assert.equal(shapes.length, 1);
+    assert.equal(shapes[0].shapeType, 'ellipse');
+    assert.equal(strokes.length, 1, 'held shape does not also leave a raw ink stroke');
+    history.undo();
+    assert.equal(shapes.length, 0);
+    history.redo();
+    assert.equal(shapes.length, 1);
+
+    // 3. Draw + hold a straight line, rectangle, and triangle (including with Marker tool and at 800% zoom).
+    const runHoldGesture = (pts: StrokePoint[]) => {
+      emit('Down', pts[0].x, pts[0].y);
+      for (const p of pts.slice(1)) emit('Move', p.x, p.y);
+      assert.equal(pendingTimers.size, 1);
+      const [id, fn] = [...pendingTimers.entries()][0];
+      pendingTimers.delete(id);
+      fn();
+      emit('Up', pts[pts.length - 1].x, pts[pts.length - 1].y);
+    };
+
+    const heldLine = Array.from({ length: 24 }, (_, i) => ({ x: 40 + i * 6, y: 120 + i * 2.5, pressure: 0.5, t: i * 16 }));
+    runHoldGesture(heldLine);
+    assert.equal(shapes.at(-1)?.shapeType, 'line', 'held line commits Shape with shapeType=line');
+
+    tools.setDrawingTool('marker');
+    runHoldGesture(roughRectangle(130, 80, 10));
+    assert.equal(shapes.at(-1)?.shapeType, 'rectangle', 'held rectangle with Marker commits Shape with shapeType=rectangle');
+
+    viewport.setZoom(8); // 800% zoom: screen coordinates remain identical while page coordinates are 1/8th
+    runHoldGesture(roughTriangle(110, 95, 12));
+    assert.equal(shapes.at(-1)?.shapeType, 'triangle', 'held triangle at 800% zoom commits Shape with shapeType=triangle');
+    assert.ok((shapes.at(-1)?.width ?? 0) < 25, 'page-space triangle width at 800% zoom is ~13.75 page units');
+    viewport.setZoom(1);
+    tools.setDrawingTool('pen');
+
+    // 4. pointercancel during hold preview clears cleanly without committing.
+    const countBeforeCancel = shapes.length;
+    emit('Down', heldOval[0].x, heldOval[0].y);
+    for (const p of heldOval.slice(1)) emit('Move', p.x, p.y);
+    const [t2, fire2] = [...pendingTimers.entries()][0];
+    pendingTimers.delete(t2);
+    fire2();
+    emit('Up', heldOval[heldOval.length - 1].x, heldOval[heldOval.length - 1].y, 'pointercancel');
+    assert.equal(shapes.length, countBeforeCancel, 'pointercancel never commits preview shape');
+    assert.ok(clearedPreviews >= 0);
+
+    // 5. Early-tick motionless-hold lockout prevention (Trap #1):
+    // Draw a 21 CSS-px line (>= 20px arm threshold, < 24px straight-line min length) so the
+    // first hold timer fires and fails, leaving holdSnapTimer === null. Then extend 8 CSS px
+    // (<= 14 CSS px anchor radius -> now 29px >= 24px) and hold 100% motionless.
+    // A retry timer MUST be scheduled (no permanent lockout) and MUST snap to 'line'!
+    const shapesBeforeLockoutTest = shapes.length;
+    emit('Down', 200, 200);
+    for (let i = 1; i <= 7; i++) emit('Move', 200 + i * 3, 200); // 21px -> arms timer
+    assert.equal(pendingTimers.size, 1, 'timer armed at >= 20 CSS px');
+    const [shortId, fireShort] = [...pendingTimers.entries()][0];
+    pendingTimers.delete(shortId);
+    fireShort(); // fails because 21px < 24px min line length; holdSnapTimer is now null!
+    assert.equal(shapes.length, shapesBeforeLockoutTest);
+    // Extend 8px (<= 14px anchor radius) to reach 29px and go 100% motionless:
+    emit('Move', 225, 200);
+    emit('Move', 229, 200);
+    assert.equal(pendingTimers.size, 1, 'moving inside <=14px anchor after a failed tick MUST re-arm hold timer (no motionless lockout)');
+    const [retryId, fireRetry] = [...pendingTimers.entries()][0];
+    pendingTimers.delete(retryId);
+    fireRetry();
+    emit('Up', 229, 200);
+    assert.equal(shapes.length, shapesBeforeLockoutTest + 1, 're-armed motionless hold commits snapped line');
+    assert.equal(shapes.at(-1)?.shapeType, 'line');
+
+    // 6. Right triangle & apex-down equilateral triangle with 240Hz hold tremor (Trap #7).
+    const rightTriVerts = [[100, 100], [100, 220], [240, 220]];
+    const rightTriPts: StrokePoint[] = [];
+    for (let e = 0; e < 3; e++) {
+      const a = rightTriVerts[e], b = rightTriVerts[(e + 1) % 3];
+      for (let i = 0; i < 16; i++) {
+        const u = i / 16;
+        rightTriPts.push({ x: a[0] + (b[0] - a[0]) * u, y: a[1] + (b[1] - a[1]) * u, pressure: 0.4, t: rightTriPts.length * 8 });
+      }
+    }
+    rightTriPts.push({ x: 100, y: 106, pressure: 0.4, t: rightTriPts.length * 8 });
+    for (let j = 0; j < 40; j++) {
+      rightTriPts.push({ x: 100 + Math.sin(j * 1.7) * 3.5, y: 106 + Math.cos(j * 2.1) * 3.5, pressure: 0.4, t: rightTriPts[rightTriPts.length - 1].t + 4 });
+    }
+    const rightTriRes = recognizeRoughShape(rightTriPts, true, 1, { deliberateHold: true });
+    assert.equal(rightTriRes.isShape && rightTriRes.shapeType, 'triangle', 'right triangle with overshoot + hold tremor recognized');
+
+    input.detach();
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+    globalThis.clearTimeout = realClearTimeout;
+  }
 });

@@ -96,6 +96,7 @@ export interface PanvasDomainAPI {
     storeImage: (id: string, fileName: string, mimeType: string, data: ArrayBuffer) => Promise<boolean>;
     /** Fetch stored image bytes; null when the id is unknown to the store. */
     getImage: (id: string) => Promise<{ id: string; fileName: string; mimeType: string; createdAt: number; data: ArrayBuffer } | null>;
+    deleteImage: (id: string) => Promise<void>;
     storeAudio: (id: string, fileName: string, mimeType: string, data: ArrayBuffer) => Promise<boolean>;
     getAudio: (id: string) => Promise<{ id: string; fileName: string; mimeType: string; createdAt: number; data: ArrayBuffer } | null>;
     deleteAudio: (id: string) => Promise<boolean>;
@@ -157,7 +158,50 @@ export interface PanvasDomainAPI {
       { success: true } | { success: false; errorCode: import('@/services/cloudsync/errors').CloudErrorCode; diagnostic: import('@/services/cloudsync/types').SafeCloudDiagnostic }
     >;
     listPageDrawingRecords: (workspaceId: string) => Promise<Array<{ id: string; notebookId: string; ownerPageId: string }>>;
+    getWorkspaceEntityStats?: (workspaceId: string) => Promise<Record<string, { mtimeMs: number; size: number }>>;
+    statBinaryAssets?: (refs: Array<{ kind: 'pdf' | 'image' | 'audio'; id: string }>) => Promise<Record<string, { mtimeMs: number; size: number }>>;
     logDiagnostic: (diagnostic: import('@/services/cloudsync/types').SafeCloudDiagnostic) => void;
+  };
+  mathOcr?: {
+    getStatus: () => Promise<{
+      ready: boolean;
+      modelId: string;
+      dtype: string;
+      approxSizeMb: number;
+      license: string;
+      cacheBytes: number;
+    }>;
+    downloadModel: () => Promise<{
+      ready: boolean;
+      modelId: string;
+      dtype: string;
+      approxSizeMb: number;
+      license: string;
+      cacheBytes: number;
+    }>;
+    recognizeImage: (pngBytes: Uint8Array) => Promise<{
+      latex: string;
+      rawLatex: string;
+      elapsedMs: number;
+    }>;
+    cancel: () => Promise<{ cancelled: boolean }>;
+    removeModel: () => Promise<{
+      ready: boolean;
+      modelId: string;
+      dtype: string;
+      approxSizeMb: number;
+      license: string;
+      cacheBytes: number;
+    }>;
+    onProgress: (
+      listener: (progress: {
+        phase: 'downloading' | 'loading' | 'ready';
+        percent: number;
+        downloadedBytes: number;
+        totalBytes: number;
+        file?: string;
+      }) => void,
+    ) => () => void;
   };
 }
 

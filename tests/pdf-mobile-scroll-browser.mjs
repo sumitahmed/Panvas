@@ -23,7 +23,7 @@ const server = await createServer({ mode: 'web', cacheDir: path.join(directory, 
     }
     if (id.endsWith('/PdfStaticAnnotationLayer.tsx')) code = code.replace('const canvasRef = useRef', `React.useEffect(() => {${bump('previewMounts')}return () => {${bump('previewUnmounts')}};}, []);const canvasRef = useRef`);
     if (id.endsWith('/FloatingTextEditor.tsx')) code = code.replace('const editor = useEditor({', `useEffect(() => {${bump('editorMounts')}return () => {${bump('editorUnmounts')}};}, []);$&`);
-    if (id.endsWith('/ImageManager.ts')) code = code.replace('setImages(images: ImageObject[]): void {', "$&window.__documentWork?.bump('imageMounts', images.filter(image => !this.images.some(old => old.id === image.id)).length);");
+    if (id.endsWith('/ImageManager.ts')) code = code.replace(/setImages\([^)]*\): void \{/, "$&window.__documentWork?.bump('imageMounts', images.filter(image => !this.images.some(old => old.id === image.id)).length);");
     return { code, map: null };
   },
 }] });

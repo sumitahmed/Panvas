@@ -1,16 +1,61 @@
-import { ImageObject, DEFAULT_PAGE_LAYER_ID } from './drawingTypes.ts';
+import { type ImageObject, DEFAULT_PAGE_LAYER_ID } from './drawingTypes.ts';
+import type { EraseBounds } from './capsuleErase.ts';
+import { isEmptyBounds, objectIntersectsBounds } from './strokeSpatialIndex.ts';
 import { ViewportManager } from './ViewportManager.ts';
-import { canvasRepository } from '@/repositories/CanvasRepository';
 import { LayerManager } from './LayerManager.ts';
 import { getImageRenderAppearance, getImageCrop } from './imageAppearance.ts';
 import { gate0Profiler } from '../../../dev/gate0Profiler.ts';
+import { imageAssetCache, selectMipTier } from './ImageAssetCache.ts';
 
+const INITIAL_PRELOAD_TIER = 1024 as const;
 const gate0ImageRequests = new Map<string, number>();
+let nextImageManagerScopeId = 0;
+
+class ImageCacheCompatibilityMap extends Map<string, CanvasImageSource> {
+  private readonly getOwnedImages: () => ImageObject[];
+
+  constructor(getOwnedImages: () => ImageObject[]) {
+    super();
+    this.getOwnedImages = getOwnedImages;
+  }
+
+  override set(fileId: string, drawable: CanvasImageSource): this {
+    super.set(fileId, drawable);
+    imageAssetCache.seedExternalDrawable(fileId, drawable);
+    return this;
+  }
+
+  override get(fileId: string): CanvasImageSource | undefined {
+    return imageAssetCache.getBestDrawable(fileId, 'original')?.drawable ?? super.get(fileId);
+  }
+
+  override has(fileId: string): boolean {
+    return imageAssetCache.hasDrawable(fileId) || super.has(fileId);
+  }
+
+  override keys(): MapIterator<string> {
+    const seen = new Set<string>();
+    for (const img of this.getOwnedImages()) {
+      if (img.fileId && !seen.has(img.fileId) && (imageAssetCache.hasDrawable(img.fileId) || super.has(img.fileId))) {
+        seen.add(img.fileId);
+      }
+    }
+    for (const key of super.keys()) {
+      if (!seen.has(key) && (imageAssetCache.hasDrawable(key) || super.has(key))) {
+        seen.add(key);
+      }
+    }
+    return seen.values();
+  }
+}
 
 export class ImageManager {
+  private readonly scopeId = `imgmgr-${++nextImageManagerScopeId}`;
   private images: ImageObject[] = [];
-  private imageCache: Map<string, HTMLImageElement> = new Map();
+  private imageCache: Map<string, CanvasImageSource>;
   private objectUrls: Map<string, string> = new Map();
+  private revokedBlobUrls = new Set<string>();
+  private countedDecodedIds = new Set<string>();
   private viewport: ViewportManager;
   private redrawCallback?: () => void;
   private layerManager: LayerManager;
@@ -18,27 +63,62 @@ export class ImageManager {
   private generation = 0;
   private decodedListeners = new Set<() => void>();
   private decodedRedrawPending = false;
+  private pendingUpgrades = new Set<string>();
+  private upgradeRedrawPending = false;
+  private upgradeMicrotaskScheduled = false;
+  private upgradeFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(viewport: ViewportManager = new ViewportManager(), layerManager: LayerManager = new LayerManager()) {
+    this.viewport = viewport;
+    this.layerManager = layerManager;
+    this.imageCache = new ImageCacheCompatibilityMap(() => this.images);
+  }
 
   onDecodedImage(listener: () => void): () => void {
     this.decodedListeners.add(listener);
     return () => { this.decodedListeners.delete(listener); };
   }
 
-  // Share already-decoded elements only between resident page surfaces. Each
-  // manager retains at most its current page's assets; no global cache exists.
-  adoptDecodedImages(source: ImageManager, fileIds = this.images.map(image => image.fileId)): void {
-    for (const id of fileIds) {
-      const image = source.imageCache.get(id);
-      if (image && !this.imageCache.has(id)) {
-        this.imageCache.set(id, image);
-        gate0Profiler.resource('decodedImages', 1);
-      }
+  private markDecodedCounted(fileId: string): void {
+    if (!fileId || this.countedDecodedIds.has(fileId)) return;
+    this.countedDecodedIds.add(fileId);
+    gate0Profiler.resource('decodedImages', 1);
+  }
+
+  private unmarkDecodedCounted(fileId: string): void {
+    if (!this.countedDecodedIds.delete(fileId)) return;
+    gate0Profiler.resource('decodedImages', -1);
+  }
+
+  private safeRevokeBlobUrl(url?: string): void {
+    if (!url || !url.startsWith('blob:') || this.revokedBlobUrls.has(url)) return;
+    if (typeof URL?.revokeObjectURL !== 'function') return;
+    this.revokedBlobUrls.add(url);
+    try {
+      URL.revokeObjectURL(url);
+      gate0Profiler.event('image-object-url-revoked');
+    } catch {
+      /* ignore invalid/already-revoked object URL */
     }
   }
 
-  constructor(viewport: ViewportManager, layerManager: LayerManager = new LayerManager()) {
-    this.viewport = viewport;
-    this.layerManager = layerManager;
+  adoptDecodedImages(source: ImageManager, fileIds = this.images.map(image => image.fileId)): void {
+    const pinSet = new Set<string>();
+    for (const image of this.images) {
+      if (image.fileId) pinSet.add(image.fileId);
+    }
+    for (const id of fileIds) {
+      if (!id) continue;
+      pinSet.add(id);
+      if (!imageAssetCache.hasDrawable(id)) {
+        const legacy = source.imageCache.get(id);
+        if (legacy) imageAssetCache.seedExternalDrawable(id, legacy);
+      }
+      if (imageAssetCache.hasDrawable(id)) {
+        this.markDecodedCounted(id);
+      }
+    }
+    imageAssetCache.pin(this.scopeId, pinSet);
   }
 
   setRedrawCallback(cb: () => void) {
@@ -49,86 +129,44 @@ export class ImageManager {
     return this.images;
   }
 
-  /** Object URL for a decoded image asset, for DOM-level rendering (the image
-   *  overlay must stack above text DOM, which the raster canvas cannot). */
-  getObjectUrl(fileId: string): string | undefined {
-    return this.objectUrls.get(fileId);
-  }
-
-  // ---- DOM overlay lifecycle ----
-  // The overlay is the visually authoritative on-screen representation (it
-  // stacks above text DOM). During selection drags the raster canvas repaints
-  // the moved image per frame while React state is intentionally quiet, so the
-  // overlay is synced imperatively: hidden during resize/rotate previews and
-  // translated during move previews, then reconciled at commit.
-
-  private overlayElements = new Map<string, HTMLElement>();
-
-  registerOverlayElement(imageId: string, element: HTMLElement | null): void {
-    if (element) this.overlayElements.set(imageId, element);
-    else this.overlayElements.delete(imageId);
-  }
-
-  private overlayRotationRadians(imageId: string): number {
-    const object = this.getImage(imageId);
-    return ((object?.rotation || 0) * Math.PI) / 180;
-  }
-
-  /** Move-preview: translate the overlay by the live drag delta. */
-  previewImageOverlay(imageId: string, dx: number, dy: number): void {
-    const element = this.overlayElements.get(imageId);
-    if (!element) return;
-    element.style.visibility = 'visible';
-    element.style.transform = `translate3d(${dx}px, ${dy}px, 0) rotate(${this.overlayRotationRadians(imageId)}rad)`;
-  }
-
-  /** Resize/rotate preview: the overlay cannot express the changing geometry,
-   *  so hide it and let the raster canvas carry the preview. */
-  hideImageOverlay(imageId: string): void {
-    const element = this.overlayElements.get(imageId);
-    if (element) element.style.visibility = 'hidden';
-  }
-
-  /** Commit: snap the overlay to the object's committed geometry and restore it. */
-  commitImageOverlay(imageId: string): void {
-    const element = this.overlayElements.get(imageId);
-    const object = this.getImage(imageId);
-    if (!element || !object) return;
-    element.style.visibility = 'visible';
-    element.style.left = `${object.x}px`;
-    element.style.top = `${object.y}px`;
-    element.style.width = `${object.width}px`;
-    element.style.height = `${object.height ?? 0}px`;
-    element.style.transform = `rotate(${this.overlayRotationRadians(imageId)}rad)`;
-  }
-
-  clearImageOverlayPreview(imageId: string): void {
-    const element = this.overlayElements.get(imageId);
-    if (element) {
-      element.style.visibility = 'visible';
-      element.style.transform = `rotate(${this.overlayRotationRadians(imageId)}rad)`;
-    }
-  }
-
   getImage(id: string): ImageObject | undefined {
     return this.images.find(image => image.id === id);
   }
 
-  setImages(images: ImageObject[]): void {
+  private prunePendingUpgrades(retained: Set<string>): void {
+    for (const key of this.pendingUpgrades) {
+      const splitIndex = key.lastIndexOf(':');
+      const keyFileId = splitIndex === -1 ? key : key.slice(0, splitIndex);
+      if (!retained.has(keyFileId)) {
+        this.pendingUpgrades.delete(key);
+      }
+    }
+    if (this.pendingUpgrades.size === 0 && !this.upgradeRedrawPending && this.upgradeFallbackTimer) {
+      clearTimeout(this.upgradeFallbackTimer);
+      this.upgradeFallbackTimer = null;
+    }
+  }
+
+  setImages(images: ImageObject[], options?: { skipPreload?: boolean }): void {
     this.images = images;
-    const retained = new Set(images.map(image => image.fileId));
-    for (const id of this.imageCache.keys()) {
-      if (retained.has(id)) continue;
-      this.imageCache.delete(id);
-      gate0Profiler.resource('decodedImages', -1);
+    const retained = new Set(images.map(image => image.fileId).filter(Boolean));
+    imageAssetCache.pin(this.scopeId, retained);
+    this.prunePendingUpgrades(retained);
+
+    for (const id of [...this.countedDecodedIds]) {
+      if (!retained.has(id)) {
+        this.unmarkDecodedCounted(id);
+      }
     }
     for (const [id, url] of this.objectUrls) {
       if (retained.has(id)) continue;
-      URL.revokeObjectURL(url);
+      this.safeRevokeBlobUrl(url);
       this.objectUrls.delete(id);
       gate0Profiler.resource('objectUrls', -1);
     }
-    // Preload newly set images
+
+    if (options?.skipPreload) return;
+
     for (const img of images) {
       this.preloadImage(img.fileId);
     }
@@ -137,6 +175,7 @@ export class ImageManager {
   addImage(image: ImageObject): void {
     image.layerId ??= this.layerManager.getActiveLayerId();
     this.images.push(image);
+    imageAssetCache.pin(this.scopeId, this.images.map(item => item.fileId));
     this.preloadImage(image.fileId);
   }
 
@@ -144,6 +183,9 @@ export class ImageManager {
     const index = this.images.findIndex(i => i.id === id);
     if (index === -1) return undefined;
     const [removed] = this.images.splice(index, 1);
+    const retained = new Set(this.images.map(item => item.fileId).filter(Boolean));
+    imageAssetCache.pin(this.scopeId, retained);
+    this.prunePendingUpgrades(retained);
     return removed;
   }
 
@@ -156,14 +198,40 @@ export class ImageManager {
       }
       return true;
     });
+    if (removed.length > 0) {
+      const retained = new Set(this.images.map(item => item.fileId).filter(Boolean));
+      imageAssetCache.pin(this.scopeId, retained);
+      this.prunePendingUpgrades(retained);
+    }
     return removed;
   }
 
   cacheImage(fileId: string, img: HTMLImageElement, objectUrl?: string): void {
-    if (!this.imageCache.has(fileId)) gate0Profiler.resource('decodedImages', 1);
-    this.imageCache.set(fileId, img);
-    if (objectUrl) {
-      this.objectUrls.set(fileId, objectUrl);
+    if (!fileId || !img) return;
+    const finalize = () => {
+      imageAssetCache.seedExternalDrawable(fileId, img);
+      this.markDecodedCounted(fileId);
+      if (objectUrl && objectUrl.startsWith('blob:')) {
+        if (typeof img.decode === 'function') {
+          void img.decode().catch(() => undefined).finally(() => this.safeRevokeBlobUrl(objectUrl));
+        } else {
+          this.safeRevokeBlobUrl(objectUrl);
+        }
+      }
+    };
+
+    const isReady = 'complete' in img
+      ? Boolean(img.complete && (img.naturalWidth > 0 || ((img as { width?: number }).width ?? 0) > 0))
+      : Boolean((img as { naturalWidth?: number }).naturalWidth || (img as { width?: number }).width);
+
+    if (isReady) {
+      finalize();
+      return;
+    }
+
+    if (typeof img.addEventListener === 'function') {
+      img.addEventListener('load', finalize, { once: true });
+      img.addEventListener('error', () => this.safeRevokeBlobUrl(objectUrl), { once: true });
     }
   }
 
@@ -173,8 +241,67 @@ export class ImageManager {
     return removed;
   }
 
+  private clearUpgradeState(): void {
+    this.pendingUpgrades.clear();
+    this.upgradeRedrawPending = false;
+    this.upgradeMicrotaskScheduled = false;
+    if (this.upgradeFallbackTimer) {
+      clearTimeout(this.upgradeFallbackTimer);
+      this.upgradeFallbackTimer = null;
+    }
+  }
+
+  private flushUpgradeRedraw(expectedGeneration: number): void {
+    if (this.upgradeFallbackTimer) {
+      clearTimeout(this.upgradeFallbackTimer);
+      this.upgradeFallbackTimer = null;
+    }
+    if (expectedGeneration !== this.generation || !this.upgradeRedrawPending) {
+      this.upgradeRedrawPending = false;
+      return;
+    }
+    this.upgradeRedrawPending = false;
+    this.redrawCallback?.();
+  }
+
+  private onUpgradePromoted(upgradeKey: string, fileId: string): void {
+    this.pendingUpgrades.delete(upgradeKey);
+    if (!this.images.some(image => image.fileId === fileId)) {
+      if (this.pendingUpgrades.size === 0 && !this.upgradeRedrawPending && this.upgradeFallbackTimer) {
+        clearTimeout(this.upgradeFallbackTimer);
+        this.upgradeFallbackTimer = null;
+      }
+      return;
+    }
+    this.upgradeRedrawPending = true;
+    const generation = this.generation;
+    if (this.pendingUpgrades.size === 0) {
+      if (this.upgradeFallbackTimer) {
+        clearTimeout(this.upgradeFallbackTimer);
+        this.upgradeFallbackTimer = null;
+      }
+      if (!this.upgradeMicrotaskScheduled) {
+        this.upgradeMicrotaskScheduled = true;
+        queueMicrotask(() => {
+          this.upgradeMicrotaskScheduled = false;
+          this.flushUpgradeRedraw(generation);
+        });
+      }
+      return;
+    }
+    if (!this.upgradeFallbackTimer) {
+      this.upgradeFallbackTimer = setTimeout(() => {
+        this.upgradeFallbackTimer = null;
+        this.flushUpgradeRedraw(generation);
+      }, 40);
+    }
+  }
+
   private async preloadImage(fileId: string) {
-    if (this.imageCache.has(fileId)) {
+    if (!fileId) return;
+    const existing = imageAssetCache.getBestDrawable(fileId, INITIAL_PRELOAD_TIER);
+    if (existing && !existing.needsPromotion) {
+      this.markDecodedCounted(fileId);
       gate0Profiler.event('image-cache-hit', undefined, { fileId });
       return;
     }
@@ -188,6 +315,7 @@ export class ImageManager {
     const simultaneous = (gate0ImageRequests.get(fileId) ?? 0) + 1;
     gate0ImageRequests.set(fileId, simultaneous);
     gate0Profiler.event('image-load-start', undefined, { fileId, simultaneous });
+
     const finishLoadProfile = () => {
       if (generation === this.generation) this.pending.delete(fileId);
       const remaining = Math.max(0, (gate0ImageRequests.get(fileId) ?? 1) - 1);
@@ -196,37 +324,19 @@ export class ImageManager {
       if (loadStartedAt) gate0Profiler.event('image-load-request', performance.now() - loadStartedAt, { fileId, simultaneous });
       this.flushDecodedRedraw();
     };
-    // Decode every image in a page batch before repainting. Each individual
-    // load used to schedule its own full page preview paint, and on a dense
-    // page that turned three loads into three 1,200-stroke raster passes.
-    const requestDecodedRedraw = () => {
-      this.decodedRedrawPending = true;
-    };
+
     try {
-      const fileData = await canvasRepository.getImage(fileId);
-      if (!fileData || !isCurrent() || this.imageCache.has(fileId)) { finishLoadProfile(); return; }
-
-      const blob = new Blob([fileData.data], { type: fileData.mimeType });
-      const url = URL.createObjectURL(blob);
-      this.objectUrls.set(fileId, url);
-      gate0Profiler.resource('objectUrls', 1);
-      gate0Profiler.event('image-object-url-created', undefined, { fileId });
-
-      const img = new Image();
       const decodeStartedAt = gate0Profiler.isEnabled() ? performance.now() : 0;
       gate0Profiler.event('image-decode-attempt', undefined, { fileId });
-      img.onload = () => {
-        if (!isCurrent()) { finishLoadProfile(); return; }
-        if (!this.imageCache.has(fileId)) gate0Profiler.resource('decodedImages', 1);
-        this.imageCache.set(fileId, img);
+      const drawable = await imageAssetCache.preload(fileId, INITIAL_PRELOAD_TIER, 'visible');
+      if (drawable && isCurrent()) {
+        this.markDecodedCounted(fileId);
         gate0Profiler.event('image-decode-success', decodeStartedAt ? performance.now() - decodeStartedAt : undefined, { fileId });
-        requestDecodedRedraw();
-        finishLoadProfile();
-      };
-      img.onerror = () => finishLoadProfile();
-      img.src = url;
+        this.decodedRedrawPending = true;
+      }
     } catch (err) {
       console.error('Failed to load image:', err);
+    } finally {
       finishLoadProfile();
     }
   }
@@ -242,20 +352,66 @@ export class ImageManager {
     for (const listener of this.decodedListeners) listener();
   }
 
-  renderImages(ctx: CanvasRenderingContext2D, layerId?: string, excludeIds?: Set<string>): void {
+  renderImages(
+    ctx: CanvasRenderingContext2D,
+    layerId?: string,
+    excludeIds?: Set<string>,
+    cullBounds?: EraseBounds | null
+  ): void {
+    if (cullBounds && isEmptyBounds(cullBounds)) return;
     for (const imgObj of this.images) {
       if (excludeIds && excludeIds.has(imgObj.id)) continue;
-      if (!this.viewport.intersectsRenderWindow(imgObj)) continue;
-      if (layerId && imgObj.layerId !== layerId) continue;
       const imgLayerId = imgObj.layerId ?? DEFAULT_PAGE_LAYER_ID;
       if (layerId && imgLayerId !== layerId) continue;
+      if (!this.viewport.intersectsRenderWindow(imgObj)) continue;
+      if (cullBounds && !objectIntersectsBounds(imgObj, cullBounds)) continue;
       this.renderImage(ctx, imgObj);
     }
   }
 
   renderImage(ctx: CanvasRenderingContext2D, imgObj: ImageObject): void {
-    const imgElem = this.imageCache.get(imgObj.fileId);
-    if (!imgElem) return;
+    const m = typeof ctx.getTransform === 'function' ? ctx.getTransform() : null;
+    const fallbackScale = this.viewport
+      ? this.viewport.getState().scale * this.viewport.getDevicePixelRatio()
+      : 1;
+    const scaleX = m ? Math.hypot(m.a, m.b) : fallbackScale;
+    const scaleY = m ? Math.hypot(m.c, m.d) : scaleX;
+
+    const crop = getImageCrop(imgObj);
+    const nat = imageAssetCache.getNaturalSize(imgObj.fileId);
+    const desiredTier = selectMipTier(
+      imgObj.width * scaleX,
+      imgObj.height * scaleY,
+      crop,
+      nat?.width,
+      nat?.height,
+    );
+
+    const upgradeKey = `${imgObj.fileId}:${desiredTier}`;
+    const hit = imageAssetCache.getBestDrawable(
+      imgObj.fileId,
+      desiredTier,
+      () => this.onUpgradePromoted(upgradeKey, imgObj.fileId),
+    );
+    if (!hit) {
+      void this.preloadImage(imgObj.fileId);
+      return;
+    }
+    if (hit.needsPromotion) {
+      this.pendingUpgrades.add(upgradeKey);
+    }
+
+    if ('close' in hit.drawable) {
+      const bmp = hit.drawable as ImageBitmap;
+      if (!(bmp.width > 0 && bmp.height > 0)) return;
+    } else if (!(hit.width > 0 && hit.height > 0)) {
+      return;
+    }
+
+    const sx = Math.max(0, Math.min(hit.width - 1, crop.x * hit.width));
+    const sy = Math.max(0, Math.min(hit.height - 1, crop.y * hit.height));
+    const sw = Math.max(1, Math.min(hit.width - sx, crop.width * hit.width));
+    const sh = Math.max(1, Math.min(hit.height - sy, crop.height * hit.height));
 
     ctx.save();
     // Ensure high quality bicubic/lanczos filtering across any zoom and display dimensions
@@ -267,18 +423,17 @@ export class ImageManager {
     // Move to center of image to apply rotation
     ctx.translate(imgObj.x + imgObj.width / 2, imgObj.y + imgObj.height / 2);
     ctx.rotate(appearance.rotationRadians);
-    
-    // Draw image centered at the translated coordinate using original full-resolution source
-    const crop = getImageCrop(imgObj);
+
+    // Draw image centered at the translated coordinate using selected mip tier
     ctx.drawImage(
-      imgElem,
-      crop.x * imgElem.naturalWidth, crop.y * imgElem.naturalHeight, crop.width * imgElem.naturalWidth, crop.height * imgElem.naturalHeight,
+      hit.drawable,
+      sx, sy, sw, sh,
       -imgObj.width / 2,
       -imgObj.height / 2,
       imgObj.width,
       imgObj.height
     );
-    
+
     ctx.restore();
   }
 
@@ -286,21 +441,24 @@ export class ImageManager {
     return this.layerManager.isEditable(image.layerId);
   }
 
-  // Cleanup object URLs to prevent memory leaks when manager is destroyed
+  // Unpin this manager's asset scope and release transient resources without closing shared bitmaps
   destroy() {
     this.generation += 1;
     this.redrawCallback = undefined;
     this.pending.clear();
     this.decodedRedrawPending = false;
+    this.clearUpgradeState();
     this.decodedListeners.clear();
+    imageAssetCache.unpin(this.scopeId);
     for (const url of this.objectUrls.values()) {
-      URL.revokeObjectURL(url);
+      this.safeRevokeBlobUrl(url);
       gate0Profiler.resource('objectUrls', -1);
-      gate0Profiler.event('image-object-url-revoked');
     }
-    gate0Profiler.resource('decodedImages', -this.imageCache.size);
     this.objectUrls.clear();
+    if (this.countedDecodedIds.size > 0) {
+      gate0Profiler.resource('decodedImages', -this.countedDecodedIds.size);
+      this.countedDecodedIds.clear();
+    }
     this.imageCache.clear();
-    this.overlayElements.clear();
   }
 }

@@ -231,7 +231,7 @@
 
   /* Sidebar item */
   .sidebar-item {
-    @apply flex items-center gap-2 px-2.5 py-1.5 my-0.5 rounded-md text-sm text-panvas-text-secondary 
+    @apply flex items-center gap-2 px-2.5 py-1.5 my-0.5 rounded-md text-sm text-panvas-text-secondary
            hover:bg-panvas-bg-hover hover:text-panvas-text-primary
            border border-transparent
            transition-all duration-150 cursor-pointer select-none relative;
@@ -240,7 +240,7 @@
   .sidebar-item.active {
     @apply bg-panvas-bg-hover text-panvas-text-primary;
   }
-  
+
   .sidebar-item.active::before {
     content: '';
     @apply absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-3/4 bg-panvas-accent-violet rounded-r-full;
@@ -558,7 +558,8 @@
 .panvas-document-text .tiptap-mathematics-render[data-type="inline-math"] { display: inline; padding: 0 .08em; }
 .panvas-document-text .tiptap-mathematics-render[data-type="block-math"] { overflow-x: auto; max-width: 100%; margin: .65em 0; padding: .15em .25em; }
 .panvas-document-text .tiptap-mathematics-render .katex-display { margin: .35em 0; }
-.panvas-document-text .tiptap-mathematics-render.ProseMirror-selectednode { outline: 1px solid rgb(var(--accent-blue) / .6); outline-offset: 2px; }
+.panvas-document-text .tiptap-mathematics-render.ProseMirror-selectednode { outline: none; }
+.panvas-document-text .ProseMirror-focused .tiptap-mathematics-render.ProseMirror-selectednode { outline: 1px solid rgb(var(--accent-blue) / .6); outline-offset: 2px; }
 
 /* Markdown block styles */
 .markdown-content {
@@ -1195,11 +1196,14 @@
   filter: var(--content-filter);
 }
 
-/* Full Dark View adapts known document surfaces, never a parent containing UI
+/* Full Dark View & Dark Paper adapt known document surfaces, never a parent containing UI
    or photographs. Inline TipTap paint remains its original stored value. */
 .dark.full-dark-view .panvas-document-text,
 .dark.full-dark-view .panvas-document-text .prose,
-.dark.full-dark-view .panvas-document-content {
+.dark.full-dark-view .panvas-document-content,
+.panvas-document-text[data-panvas-dark-paper="true"],
+.panvas-document-text[data-panvas-dark-paper="true"] .prose,
+.panvas-document-text[data-panvas-dark-paper="true"] .panvas-document-content {
   color: #dce3eb;
   --tw-prose-body: #dce3eb;
   --tw-prose-headings: #dce3eb;

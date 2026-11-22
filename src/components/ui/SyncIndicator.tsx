@@ -4,13 +4,23 @@
 // ============================================
 
 import React from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useCloudSyncStore } from '@/stores/cloudSyncStore';
 import { Cloud, CloudOff, RefreshCw, AlertCircle } from 'lucide-react';
 import { CLOUD_SYNC_ENABLED, CLOUD_SYNC_V2_ENABLED } from '@/config/features';
 import { getCloudSyncPresentation } from '@/services/cloudsync/presentation';
 
 export function SyncIndicator({ onOpenCloudSync }: { onOpenCloudSync?: () => void } = {}) {
-  const { statusByProvider, connectionByProvider, triggerSync, lastError, reviewItems, workspaceRecoveryIssues } = useCloudSyncStore();
+  const { statusByProvider, connectionByProvider, triggerSync, lastError, reviewItems, workspaceRecoveryIssues } = useCloudSyncStore(
+    useShallow(state => ({
+      statusByProvider: state.statusByProvider,
+      connectionByProvider: state.connectionByProvider,
+      triggerSync: state.triggerSync,
+      lastError: state.lastError,
+      reviewItems: state.reviewItems,
+      workspaceRecoveryIssues: state.workspaceRecoveryIssues,
+    })),
+  );
   const gdConnection = connectionByProvider.googledrive;
   const gdStatus = statusByProvider.googledrive;
   const recoveryOnly = gdStatus === 'synced-review' && workspaceRecoveryIssues.length > 0 && reviewItems.length === 0;
@@ -28,7 +38,7 @@ export function SyncIndicator({ onOpenCloudSync }: { onOpenCloudSync?: () => voi
     icon = <CloudOff size={13} aria-hidden="true" />;
     color = 'text-panvas-text-tertiary';
   } else if (presentation.kind === 'busy') {
-    icon = <RefreshCw size={12} className="animate-spin text-panvas-accent-blue" aria-hidden="true" />;
+    icon = <RefreshCw size={12} className="animate-spin will-change-transform text-panvas-accent-blue" aria-hidden="true" />;
     color = 'text-panvas-text-secondary';
   } else if (presentation.kind === 'attention') {
     icon = <AlertCircle size={13} aria-hidden="true" />;

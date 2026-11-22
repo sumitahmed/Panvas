@@ -335,27 +335,110 @@ function ellipseScreen(radiusX: number, radiusY: number): ProbePoint[] {
     return [40 + radiusX * Math.cos(angle), 30 + radiusY * Math.sin(angle)];
   }), 10);
 }
+function rectangleScreen(width: number, height: number): ProbePoint[] {
+  const corners: [number, number][] = [[10, 10], [10 + width, 10], [10 + width, 10 + height], [10, 10 + height], [10, 10]];
+  const pts: [number, number][] = [];
+  for (let e = 0; e < 4; e++) {
+    const [x0, y0] = corners[e], [x1, y1] = corners[e + 1];
+    for (let i = 0; i < 10; i++) {
+      const u = i / 10;
+      pts.push([x0 + (x1 - x0) * u, y0 + (y1 - y0) * u]);
+    }
+  }
+  pts.push(corners[0]);
+  return screenStroke(pts, 10);
+}
+function triangleScreen(width: number, height: number): ProbePoint[] {
+  const corners: [number, number][] = [[10 + width / 2, 10], [10 + width, 10 + height], [10, 10 + height], [10 + width / 2, 10]];
+  const pts: [number, number][] = [];
+  for (let e = 0; e < 3; e++) {
+    const [x0, y0] = corners[e], [x1, y1] = corners[e + 1];
+    for (let i = 0; i < 12; i++) {
+      const u = i / 12;
+      pts.push([x0 + (x1 - x0) * u, y0 + (y1 - y0) * u]);
+    }
+  }
+  pts.push(corners[0]);
+  return screenStroke(pts, 10);
+}
 const toPage = (points: ProbePoint[], zoom: number) => points.map(p => ({ ...p, x: p.x / zoom, y: p.y / zoom }));
+
+const rotateScreenPoints = (points: ProbePoint[], degrees: number): ProbePoint[] => {
+  const rad = (degrees * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  return points.map(p => ({ ...p, x: p.x * cos - p.y * sin, y: p.x * sin + p.y * cos }));
+};
+
+function zigzagWordScreen(): ProbePoint[] {
+  const points: [number, number][] = [];
+  for (let leg = 0; leg < 7; leg += 1) {
+    const startX = leg * 20;
+    const endX = (leg + 1) * 20;
+    const startY = leg % 2 === 0 ? 0 : 48;
+    const endY = leg % 2 === 0 ? 48 : 0;
+    for (let s = 0; s < 8; s += 1) {
+      const u = s / 8;
+      points.push([startX + (endX - startX) * u, startY + (endY - startY) * u]);
+    }
+  }
+  points.push([140, 48]);
+  return screenStroke(points, 12);
+}
 
 test('gesture verdicts are invariant under page zoom for the same on-screen gesture', () => {
   const cases = {
     line: straightLineScreen(100),
     bowed: bowedLineScreen(100, 15),
     scribble: scribbleScreen(),
+    wordZigzag: zigzagWordScreen(),
     word: inkFixture('word', 120, 1).raw,
     circle: circleScreen(18),
     arc: circleScreen(18, 300),
     ellipse: ellipseScreen(36, 24),
+    tiltedOval: rotateScreenPoints(ellipseScreen(54, 24), 35),
+    rectangle: rectangleScreen(84, 52),
+    tiltedRectangle: rotateScreenPoints(rectangleScreen(88, 52), 28),
+    triangle: triangleScreen(86, 74),
+    tiltedTriangle: rotateScreenPoints(triangleScreen(86, 74), 40),
   };
-  for (const zoom of INK_ZOOMS) {
+  for (const zoom of [...INK_ZOOMS, 4, 8]) {
     assert.equal(recognizeStraightLine(toPage(cases.line, zoom), false, zoom).isLine, true, `line accepted at zoom ${zoom}`);
     assert.equal(recognizeStraightLine(toPage(cases.bowed, zoom), false, zoom).isLine, false, `bowed line rejected at zoom ${zoom}`);
     assert.equal(analyzeScribble(toPage(cases.scribble, zoom), zoom).isScribble, true, `scribble accepted at zoom ${zoom}`);
     assert.equal(analyzeScribble(toPage(cases.word, zoom), zoom).isScribble, false, `handwriting not erased at zoom ${zoom}`);
+    for (const angle of [0, 45, 90, 135]) {
+      assert.equal(
+        analyzeScribble(toPage(rotateScreenPoints(cases.scribble, angle), zoom), zoom).isScribble,
+        true,
+        `rotated back-and-forth scribble (${angle}°) accepted at zoom ${zoom}`,
+      );
+      assert.equal(
+        analyzeScribble(toPage(rotateScreenPoints(cases.wordZigzag, angle), zoom), zoom).isScribble,
+        true,
+        `rotated zigzag scribble (${angle}°) accepted at zoom ${zoom}`,
+      );
+      assert.equal(
+        analyzeScribble(toPage(rotateScreenPoints(cases.word, angle), zoom), zoom).isScribble,
+        false,
+        `rotated word (${angle}°) not erased at zoom ${zoom}`,
+      );
+    }
     assert.equal(analyzeCircleGesture(toPage(cases.circle, zoom), zoom).isCircle, true, `circle accepted at zoom ${zoom}`);
     assert.equal(analyzeCircleGesture(toPage(cases.arc, zoom), zoom).isCircle, false, `open arc rejected at zoom ${zoom}`);
     const shape = recognizeRoughShape(toPage(cases.ellipse, zoom), false, zoom);
     assert.equal(shape.isShape && shape.shapeType, 'ellipse', `ellipse recognized at zoom ${zoom}`);
+    const tiltedOval = recognizeRoughShape(toPage(cases.tiltedOval, zoom), true, zoom, { deliberateHold: true });
+    assert.equal(tiltedOval.isShape && tiltedOval.shapeType, 'ellipse', `tilted oval recognized at zoom ${zoom}`);
+    assert.equal(tiltedOval.snapped, false, `tilted oval not snapped to circle at zoom ${zoom}`);
+    const rect = recognizeRoughShape(toPage(cases.rectangle, zoom), false, zoom, { deliberateHold: true });
+    assert.equal(rect.isShape && rect.shapeType, 'rectangle', `rectangle recognized at zoom ${zoom}`);
+    const tiltedRect = recognizeRoughShape(toPage(cases.tiltedRectangle, zoom), false, zoom, { deliberateHold: true });
+    assert.equal(tiltedRect.isShape && tiltedRect.shapeType, 'rectangle', `tilted rectangle recognized at zoom ${zoom}`);
+    const tri = recognizeRoughShape(toPage(cases.triangle, zoom), false, zoom, { deliberateHold: true });
+    assert.equal(tri.isShape && tri.shapeType, 'triangle', `triangle recognized at zoom ${zoom}`);
+    const tiltedTri = recognizeRoughShape(toPage(cases.tiltedTriangle, zoom), false, zoom, { deliberateHold: true });
+    assert.equal(tiltedTri.isShape && tiltedTri.shapeType, 'triangle', `tilted triangle recognized at zoom ${zoom}`);
     assert.equal(recognizeRoughShape(toPage(cases.word, zoom), false, zoom).isShape, false, `handwriting not reshaped at zoom ${zoom}`);
   }
 });

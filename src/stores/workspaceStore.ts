@@ -67,7 +67,43 @@ function readStoredId(key: string): string | null {
   }
 }
 
+const pendingDeferredStorage = new Map<string, string | null>();
+let deferredStorageTimer: ReturnType<typeof setTimeout> | null = null;
+let deferredStorageListenersInstalled = false;
+
+export function flushDeferredWorkspaceStorage(): void {
+  if (deferredStorageTimer !== null) {
+    clearTimeout(deferredStorageTimer);
+    deferredStorageTimer = null;
+  }
+  if (pendingDeferredStorage.size === 0) return;
+  const entries = [...pendingDeferredStorage.entries()];
+  pendingDeferredStorage.clear();
+  for (const [key, value] of entries) {
+    writeStoredId(key, value);
+  }
+}
+
+function installDeferredStorageFlushListeners(): void {
+  if (
+    deferredStorageListenersInstalled
+    || typeof window === 'undefined'
+    || typeof window.addEventListener !== 'function'
+  ) {
+    return;
+  }
+  deferredStorageListenersInstalled = true;
+  window.addEventListener('pagehide', flushDeferredWorkspaceStorage);
+  window.addEventListener('beforeunload', flushDeferredWorkspaceStorage);
+  if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') flushDeferredWorkspaceStorage();
+    });
+  }
+}
+
 function writeStoredId(key: string, value: string | null): void {
+  pendingDeferredStorage.delete(key);
   try {
     if (value) {
       window.localStorage.setItem(key, value);
@@ -79,6 +115,17 @@ function writeStoredId(key: string, value: string | null): void {
   }
 }
 
+function writeStoredIdDeferred(key: string, value: string | null, delayMs = 500): void {
+  installDeferredStorageFlushListeners();
+  pendingDeferredStorage.set(key, value);
+  if (deferredStorageTimer !== null) clearTimeout(deferredStorageTimer);
+  deferredStorageTimer = setTimeout(() => {
+    deferredStorageTimer = null;
+    flushDeferredWorkspaceStorage();
+  }, delayMs);
+  (deferredStorageTimer as unknown as { unref?: () => void })?.unref?.();
+}
+
 interface WorkspaceState {
   // Data
   workspaces: Workspace[];
@@ -88,7 +135,7 @@ interface WorkspaceState {
   notebookSections: NotebookSection[];
   notebookPages: NotebookPage[];
   recentFiles: CanvasFile[];
-  
+
   // Trash
   deletedWorkspaces: Workspace[];
   deletedFolders: Folder[];
@@ -126,7 +173,7 @@ interface WorkspaceState {
   toggleWorkspaceExpanded: (id: string) => void;
   expandWorkspace: (id: string) => void;
   reset: () => void;
-  
+
   // Trash Actions
   loadTrash: () => Promise<void>;
   restoreItem: (id: string, type: 'workspace' | 'folder' | 'canvas' | 'notebook' | 'section' | 'page') => Promise<void>;
@@ -433,20 +480,42 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   setActivePage: async (id: string | null, recordOpen = true) => {
-    const page = id ? get().notebookPages.find(item => item.id === id) : null;
-    const notebook = page ? get().notebooks.find(item => item.id === page.notebookId) : null;
-    const wsId = notebook?.workspaceId ?? get().activeWorkspaceId;
+    const prevState = get();
+    const page = id ? prevState.notebookPages.find(item => item.id === id) : null;
+    const notebook = page ? prevState.notebooks.find(item => item.id === page.notebookId) : null;
+    const wsId = notebook?.workspaceId ?? prevState.activeWorkspaceId;
+    const nextNotebookId = notebook?.id ?? prevState.activeNotebookId;
+    const nextSectionId = page?.sectionId ?? prevState.activeNotebookSectionId;
+
+    if (
+      !recordOpen
+      && prevState.activePageId === id
+      && prevState.activeCanvasId === null
+      && prevState.activeNotebookId === nextNotebookId
+      && prevState.activeNotebookSectionId === nextSectionId
+      && prevState.activeWorkspaceId === wsId
+    ) {
+      return;
+    }
 
     set({
       activePageId: id,
       activeCanvasId: null,
-      activeNotebookId: notebook?.id ?? get().activeNotebookId,
-      activeNotebookSectionId: page?.sectionId ?? get().activeNotebookSectionId,
+      activeNotebookId: nextNotebookId,
+      activeNotebookSectionId: nextSectionId,
       activeWorkspaceId: wsId,
     });
-    writeStoredId(ACTIVE_PAGE_KEY, id);
-    writeStoredId(ACTIVE_CANVAS_KEY, null);
-    if (notebook?.workspaceId) writeStoredId(ACTIVE_WORKSPACE_KEY, notebook.workspaceId);
+    if (recordOpen) {
+      writeStoredId(ACTIVE_PAGE_KEY, id);
+      writeStoredId(ACTIVE_CANVAS_KEY, null);
+      if (notebook?.workspaceId) writeStoredId(ACTIVE_WORKSPACE_KEY, notebook.workspaceId);
+    } else {
+      writeStoredIdDeferred(ACTIVE_PAGE_KEY, id);
+      if (prevState.activeCanvasId !== null) writeStoredIdDeferred(ACTIVE_CANVAS_KEY, null);
+      if (notebook?.workspaceId && notebook.workspaceId !== prevState.activeWorkspaceId) {
+        writeStoredIdDeferred(ACTIVE_WORKSPACE_KEY, notebook.workspaceId);
+      }
+    }
     if (page && notebook && wsId && recordOpen) {
       const now = Date.now();
       await Promise.all([
@@ -1021,7 +1090,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       provenance,
     );
     page.titleProvenance = provenance;
-    
+
     // Immediately initialize with canonical default settings to avoid black/missing page contents
     const owningNotebook = get().notebooks.find(item => item.id === section.notebookId);
     const defaults = getNotebookPageDefaults(owningNotebook);
@@ -1104,7 +1173,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   reorderPages: async (itemIds: string[]) => {
     const wsId = get().activeWorkspaceId;
     if (!wsId) return;
-    
+
     set(state => {
       const newPages = [...state.notebookPages];
       itemIds.forEach((id, index) => {
@@ -1113,7 +1182,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       });
       return { notebookPages: newPages };
     });
-    
+
     await workspaceRepository.reorderItems(wsId, 'page', itemIds);
 
     const affectedSectionIds = new Set(

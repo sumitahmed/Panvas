@@ -10,6 +10,7 @@ import {
   resolvePageGeometryScrollDelta,
   resolvePageProperties,
   resolvePageRenderProperties,
+  resolvePageSourceViewportFrame,
   resolvePageSurfaceGeometry,
   resolvePageTemplateRenderModel,
   resolveNotebookPaperColor,
@@ -386,8 +387,58 @@ test('orientation geometry resolves to one stable focal-position transition', as
   assert.match(renderer, /capturePageGeometryAnchor/);
   assert.match(renderer, /resolvePageGeometryScrollDelta/);
   assert.doesNotMatch(pageView, /\[isFocused, notebookEngine, width, height, page\.type, page\.id, renderScale\]/);
-  assert.match(pageView, /notebookEngine\.resize\(width, rasterHeight\)/);
-  assert.match(pageView, /const rasterHeight = expandedSurface \? renderWindow\.height : height/);
+  assert.match(pageView, /notebookEngine\.resize\(rasterWidth, rasterHeight\)/);
+  assert.match(pageView, /const rasterHeight = effectiveLive\.height/);
+});
+
+test('research space source-frame anchoring prevents scroll jumps and auto-fit omits paperDimensions.width', async () => {
+  const baseProps: PagePropertySet = { ...DEFAULT_PAGE_PROPERTY_SET, pageSize: 'A4', orientation: 'portrait' };
+  const scale = 1.25;
+  const baseDim = resolvePageDimensions(baseProps);
+  const beforeRect = { left: 100, top: 80, width: baseDim.width * scale, height: baseDim.height * scale };
+  const viewportCenter = { x: 500, y: 400 };
+  const anchor = capturePageGeometryAnchor(resolvePageSourceViewportFrame(beforeRect, baseProps), viewportCenter);
+
+  // Expanding extraTop by 140 keeps outer top at 80, shifting source content down by 140 * 1.25 = 175px.
+  const topProps: PagePropertySet = { ...baseProps, extraTop: 140 };
+  const topDim = resolvePageDimensions(topProps);
+  const topRect = { left: 100, top: 80, width: topDim.width * scale, height: topDim.height * scale };
+  assert.deepEqual(
+    resolvePageGeometryScrollDelta(anchor, resolvePageSourceViewportFrame(topRect, topProps)),
+    { x: 0, y: 175 },
+  );
+
+  // Expanding extraBottom leaves source content stationary -> delta { x: 0, y: 0 }.
+  const bottomProps: PagePropertySet = { ...baseProps, extraBottom: 140 };
+  const bottomDim = resolvePageDimensions(bottomProps);
+  const bottomRect = { left: 100, top: 80, width: bottomDim.width * scale, height: bottomDim.height * scale };
+  assert.deepEqual(
+    resolvePageGeometryScrollDelta(anchor, resolvePageSourceViewportFrame(bottomRect, bottomProps)),
+    { x: 0, y: 0 },
+  );
+
+  // Expanding extraLeft with outer left stationary shifts source right by 140 * 1.25 = 175px.
+  const leftProps: PagePropertySet = { ...baseProps, extraLeft: 140 };
+  const leftDim = resolvePageDimensions(leftProps);
+  const leftRect = { left: 100, top: 80, width: leftDim.width * scale, height: leftDim.height * scale };
+  assert.deepEqual(
+    resolvePageGeometryScrollDelta(anchor, resolvePageSourceViewportFrame(leftRect, leftProps)),
+    { x: 175, y: 0 },
+  );
+
+  // Expanding extraRight leaves source content stationary -> delta { x: 0, y: 0 }.
+  const rightProps: PagePropertySet = { ...baseProps, extraRight: 140 };
+  const rightDim = resolvePageDimensions(rightProps);
+  const rightRect = { left: 100, top: 80, width: rightDim.width * scale, height: rightDim.height * scale };
+  assert.deepEqual(
+    resolvePageGeometryScrollDelta(anchor, resolvePageSourceViewportFrame(rightRect, rightProps)),
+    { x: 0, y: 0 },
+  );
+
+  const renderer = await readFile(new URL('../src/components/notebook/NotebookRenderer.tsx', import.meta.url), 'utf8');
+  assert.match(renderer, /const fitKey = `\$\{dockFitViewport\}:\$\{layoutWidth\}:\$\{sectionKey\}`/);
+  assert.doesNotMatch(renderer, /fitKey\s*=\s*`[^`]*paperDimensions\.width/);
+  assert.doesNotMatch(renderer, /fittedPaperWidthRef[\s\S]*?\},\s*\[[^\]]*paperDimensions\.width/);
 });
 
 test('desktop persistence accepts note-space fields, pages use the chooser and canvas creation stays inline', async () => {

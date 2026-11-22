@@ -59,8 +59,8 @@ test('single sticky uses DOM chrome while mixed selection keeps generic controls
   assert.equal(selection.getHandleAt(96, 96), null);
   selection.select(image.id, 'image', true);
   selection.renderSelection(ctx);
-  assert.equal(boxes, 18);
-  assert.equal(selection.getHandleAt(96, 96)?.id, note.id);
+  assert.equal(boxes, 9);
+  assert.equal(selection.getHandleAt(96, 96)?.id, 'collective');
   selection.clearSelection();
   assert.equal(selection.getSelectedElements().length, 0);
   selection.select(note.id, 'text');

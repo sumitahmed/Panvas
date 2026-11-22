@@ -1,16 +1,39 @@
 import type { LocalSearchDocument } from './LocalSearchIndex.ts';
-import { extractPageSearchContent, normalizeSearchText } from './pageSearchContent.ts';
+import { extractPageSearchContent, normalizeSearchText, textFromTipTap, type PageSearchContent } from './pageSearchContent.ts';
 import { pdfAnnotationScopeKey, type PageSearchSaveEvent } from './searchIndexEvents.ts';
 
 export interface CachedSearchPagePayload {
-  content?: unknown;
-  drawing?: unknown;
+  contentText?: string;
+  drawingHandwritingText?: string;
+  drawingRichText?: string;
+}
+
+export interface CachedPdfAnnotationPayload {
+  handwritingText: string;
+  richText: string;
 }
 
 export interface SearchIndexMutationState {
   documents: LocalSearchDocument[];
   pagePayloads: Map<string, CachedSearchPagePayload>;
-  pdfAnnotationPayloads: Map<string, unknown>;
+  pdfAnnotationPayloads: Map<string, CachedPdfAnnotationPayload>;
+}
+
+/** Combine pre-extracted plain text from page rich text and drawing layers without retaining raw payloads. */
+export function mergePageSearchText(
+  contentText = '',
+  drawingHandwritingText = '',
+  drawingRichText = '',
+): PageSearchContent {
+  const handwritingText = normalizeSearchText(drawingHandwritingText);
+  const richText = normalizeSearchText(`${contentText} ${drawingRichText}`);
+  const content = normalizeSearchText(`${handwritingText} ${richText}`);
+  return {
+    handwritingText,
+    richText,
+    content,
+    snippet: content.slice(0, 220),
+  };
 }
 
 /** A populated index can be reused only for the exact source-record scope. */
@@ -28,8 +51,11 @@ export function applyPageSearchSave(state: SearchIndexMutationState, event: Page
     if (event.kind !== 'drawing') return;
     const sourcePage = event.pdfSourcePage as number;
     const annotationKey = pdfAnnotationScopeKey(event.workspaceId, event.notebookId, event.pdfOwnerPageId, sourcePage);
-    state.pdfAnnotationPayloads.set(annotationKey, event.data);
     const annotation = extractPageSearchContent(undefined, event.data);
+    state.pdfAnnotationPayloads.set(annotationKey, {
+      handwritingText: annotation.handwritingText,
+      richText: annotation.richText,
+    });
     state.documents = state.documents.map(document => {
       if (
         document.kind !== 'pdf'
@@ -53,15 +79,23 @@ export function applyPageSearchSave(state: SearchIndexMutationState, event: Page
   }
 
   const payloads = state.pagePayloads.get(event.pageId) ?? {};
-  payloads[event.kind] = event.data;
+  if (event.kind === 'content') {
+    payloads.contentText = normalizeSearchText(textFromTipTap(event.data));
+  } else {
+    const drawingExtracted = extractPageSearchContent(undefined, event.data);
+    payloads.drawingHandwritingText = drawingExtracted.handwritingText;
+    payloads.drawingRichText = drawingExtracted.richText;
+  }
   state.pagePayloads.set(event.pageId, payloads);
+
+  const extracted = mergePageSearchText(
+    payloads.contentText,
+    payloads.drawingHandwritingText,
+    payloads.drawingRichText,
+  );
 
   state.documents = state.documents.map(document => {
     if (document.kind !== 'page' || document.pageId !== event.pageId || document.workspaceId !== event.workspaceId) return document;
-    const extracted = extractPageSearchContent(
-      event.kind === 'content' ? event.data : payloads.content,
-      event.kind === 'drawing' ? event.data : payloads.drawing,
-    );
     return {
       ...document,
       ...extracted,

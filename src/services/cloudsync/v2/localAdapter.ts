@@ -14,46 +14,62 @@ export const syncV2LocalSource: SyncV2LocalSource = {
   beginCycle: () => payloadSource.beginCycle(),
   endCycle: () => payloadSource.endCycle(),
   canRepairMissingRemoteObjects: () => typeof window !== 'undefined' && Boolean(window.panvas),
-  listWorkspaceIds: () => payloadSource.listWorkspaceIds(),
-  scanWorkspace: workspaceId => payloadSource.scanWorkspace(workspaceId),
-  scanWorkspaceSnapshot: workspaceId => payloadSource.scanWorkspaceSnapshot(workspaceId),
-  scanWorkspaceIncludingUnowned: workspaceId => payloadSource.scanWorkspaceIncludingUnowned!(workspaceId),
-  scanFreshWorkspace: workspaceId => new LocalSyncPayloadSource().scanWorkspaceIncludingUnowned!(workspaceId),
+  listWorkspaceIds: (options) => payloadSource.listWorkspaceIds(options),
+  scanWorkspace: (workspaceId, options) => payloadSource.scanWorkspace(workspaceId, options),
+  scanWorkspaceSnapshot: (workspaceId, options) => payloadSource.scanWorkspaceSnapshot(workspaceId, options),
+  scanWorkspaceIncludingUnowned: (workspaceId, options) => payloadSource.scanWorkspaceIncludingUnowned!(workspaceId, options),
+  scanFreshWorkspace: (workspaceId, options) => new LocalSyncPayloadSource().scanWorkspaceIncludingUnowned!(workspaceId, options),
   getRecoveryWorkspaceRoot: workspaceId => payloadSource.getRecoveryWorkspaceRoot(workspaceId),
 };
 
 export const syncV2LocalAdapter: SyncV2LocalAdapter = {
-  async applyWorkspace({ workspaceId, expected, expectedHashes, downloads, allowStaleOwnershipRepair = false, assertCurrent = () => {} }) {
+  async applyWorkspace({ workspaceId, expected, expectedHashes, downloads, allowStaleOwnershipRepair = false, assertCurrent = () => {}, slicer }) {
     const skipped: Array<{ kind: SyncEntityKind; id: string }> = [];
     try {
       assertCurrent();
       traceSyncStage('adapter', 'apply-start', { workspace: anonymizeWorkspaceId(workspaceId), expected: expected.length, downloads: downloads.length, allowStaleOwnershipRepair });
       // Validate outside the write transaction. Chromium can return an empty
       // nested read transaction when the database is already being written.
-      const fresh = await new LocalSyncPayloadSource().scanWorkspaceIncludingUnowned(workspaceId);
+      const fresh = await new LocalSyncPayloadSource().scanWorkspaceIncludingUnowned(workspaceId, { slicer });
       const byKey = new Map(fresh.map(item => [`${item.entityType}:${item.entityId}`, item]));
       for (const item of expected) {
+        if (slicer?.shouldYield()) await slicer.checkpoint();
         const current = byKey.get(`${item.entityType}:${item.entityId}`);
         let unchanged = Boolean(current && current.tombstone === item.tombstone && item.tombstone);
-        if (current && item.bytes && current.bytes && !item.tombstone && !current.tombstone) {
-          const [currentHash, expectedHash] = await Promise.all([sha256Bytes(current.bytes), expectedHashes?.get(`${item.entityType}:${item.entityId}`) ?? sha256Bytes(item.bytes)]);
-          unchanged = currentHash === expectedHash;
+        if (current && !item.tombstone && !current.tombstone) {
+          const resolveHash = async (entity: typeof item, cachedHash?: string) => {
+            if (cachedHash) return cachedHash;
+            if (entity.precomputedHash) return entity.precomputedHash;
+            const bytes = entity.bytes ?? (await entity.loadBytes?.() ?? null);
+            return bytes ? sha256Bytes(bytes) : null;
+          };
+          const [currentHash, expectedHash] = await Promise.all([
+            resolveHash(current),
+            resolveHash(item, expectedHashes?.get(`${item.entityType}:${item.entityId}`) ?? undefined),
+          ]);
+          unchanged = Boolean(currentHash && expectedHash && currentHash === expectedHash);
           // The live browser writes row-level bookkeeping (updatedAt,
           // lastOpenedAt, isExpanded, syncStatus) between the cycle snapshot
           // and this check. That is not an edit of the content being replaced,
           // so compare semantic content identities before failing the whole
           // workspace apply. A genuine content change still mismatches here.
           if (!unchanged) {
-            const [currentIdentity, expectedIdentity] = await Promise.all([
-              contentIdentity(item.entityType, current.bytes),
-              contentIdentity(item.entityType, item.bytes),
+            const [currentBytes, itemBytes] = await Promise.all([
+              current.bytes ?? (await current.loadBytes?.() ?? null),
+              item.bytes ?? (await item.loadBytes?.() ?? null),
             ]);
-            unchanged = currentIdentity !== null && currentIdentity === expectedIdentity;
-          }
-          if (!unchanged && allowStaleOwnershipRepair
-            && (current.ownership === 'unowned-recovery' || current.ownership === 'foreign-recovery')
-            && (item.ownership === 'unowned-recovery' || item.ownership === 'foreign-recovery')) {
-            unchanged = await contentIdentity(item.entityType, current.bytes) === await contentIdentity(item.entityType, item.bytes);
+            if (currentBytes && itemBytes) {
+              const [currentIdentity, expectedIdentity] = await Promise.all([
+                contentIdentity(item.entityType, currentBytes, slicer),
+                contentIdentity(item.entityType, itemBytes, slicer),
+              ]);
+              unchanged = currentIdentity !== null && currentIdentity === expectedIdentity;
+              if (!unchanged && allowStaleOwnershipRepair
+                && (current.ownership === 'unowned-recovery' || current.ownership === 'foreign-recovery')
+                && (item.ownership === 'unowned-recovery' || item.ownership === 'foreign-recovery')) {
+                unchanged = currentIdentity !== null && currentIdentity === expectedIdentity;
+              }
+            }
           }
         }
         if (!unchanged) throw new CloudOperationError('conflict', { stage: 'local-recovery-check', reason: 'local-edit-during-sync', workspaceId, entityKind: item.entityType, entityId: item.entityId, retryable: false });

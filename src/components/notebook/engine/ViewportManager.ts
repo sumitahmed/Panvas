@@ -16,6 +16,165 @@ export type ViewportChangeListener = (state: Readonly<ViewportState>) => void;
 export const MAX_CANVAS_DIMENSION = 8192;
 export const MAX_ACTIVE_CANVAS_PIXELS = 28_000_000;
 export const MAX_INACTIVE_PAGE_RENDER_ZOOM = 1.25;
+const RENDER_WINDOW_OVERSCAN_RATIO = 0.45;
+const RENDER_WINDOW_EDGE_MARGIN_RATIO = 0.15;
+const RENDER_WINDOW_STEP_RATIO = 0.20;
+
+export interface RenderWindowRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  windowed: boolean;
+}
+
+export interface ResolveViewportRenderWindowOptions {
+  pageWidth: number;
+  pageHeight: number;
+  logicalBase?: number;
+  isInfinite?: boolean;
+  zoom: number;
+  dpr: number;
+  browserVisualScale?: number;
+  layerCount?: number;
+  viewportLocal: { left: number; top: number; width: number; height: number };
+  previous?: RenderWindowRect | null;
+  forceRebase?: boolean;
+}
+
+/**
+ * Resolve a screen-space 2D raster window for a page. Keeps full-page backing
+ * whenever the page fits inside GPU dimension & pixel budgets at target DPI,
+ * and seamlessly windows around the visible viewport at high zoom or large
+ * physical/Research-Space page dimensions.
+ */
+export function resolveViewportRenderWindow({
+  pageWidth,
+  pageHeight,
+  logicalBase = 0,
+  isInfinite = false,
+  zoom,
+  dpr,
+  browserVisualScale = 1,
+  layerCount = 1,
+  viewportLocal,
+  previous,
+  forceRebase = false,
+}: ResolveViewportRenderWindowOptions): RenderWindowRect {
+  const safeWidth = Math.max(1, Math.round(pageWidth));
+  const safeHeight = Math.max(1, Math.round(pageHeight));
+  const safeDpr = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+  const safeZoom = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+  const safeVisual = Number.isFinite(browserVisualScale) && browserVisualScale > 0 ? browserVisualScale : 1;
+  const targetScale = Math.max(0.25, safeDpr * safeZoom * safeVisual);
+  const layerPixelBudget = Math.floor(MAX_ACTIVE_CANVAS_PIXELS / Math.max(1, layerCount));
+
+  if (
+    !isInfinite
+    && safeWidth * safeHeight * targetScale * targetScale <= layerPixelBudget
+    && Math.max(safeWidth, safeHeight) * targetScale <= MAX_CANVAS_DIMENSION
+  ) {
+    if (
+      previous
+      && !previous.windowed
+      && previous.left === 0
+      && previous.top === logicalBase
+      && previous.width === safeWidth
+      && previous.height === safeHeight
+    ) {
+      return previous;
+    }
+    return { left: 0, top: logicalBase, width: safeWidth, height: safeHeight, windowed: false };
+  }
+
+  const visW = Math.max(1, viewportLocal.width);
+  const visH = Math.max(1, viewportLocal.height);
+  const maxPageH = isInfinite ? Number.POSITIVE_INFINITY : safeHeight;
+  const maxDimDoc = Math.max(64, Math.floor(MAX_CANVAS_DIMENSION / targetScale));
+
+  let desiredW = Math.min(safeWidth, Math.max(Math.min(safeWidth, Math.ceil(visW)), Math.ceil(visW * (1 + 2 * RENDER_WINDOW_OVERSCAN_RATIO))), maxDimDoc);
+  let desiredH = Math.min(maxPageH, Math.max(Math.min(maxPageH, Math.ceil(visH)), Math.ceil(visH * (1 + 2 * RENDER_WINDOW_OVERSCAN_RATIO))), maxDimDoc);
+
+  const budgetDocArea = layerPixelBudget / (targetScale * targetScale);
+  if (desiredW * desiredH > budgetDocArea && budgetDocArea > 0) {
+    const shrink = Math.sqrt(budgetDocArea / (desiredW * desiredH));
+    const minCoverW = Math.min(safeWidth, Math.ceil(visW * 1.05));
+    const minCoverH = Math.min(maxPageH, Math.ceil(visH * 1.05));
+    desiredW = Math.max(Math.min(desiredW, minCoverW), Math.floor(desiredW * shrink));
+    desiredH = Math.max(Math.min(desiredH, minCoverH), Math.floor(desiredH * shrink));
+  }
+  desiredW = Math.max(1, Math.min(safeWidth, Math.round(desiredW)));
+  desiredH = Math.max(1, Math.min(maxPageH, Math.round(desiredH)));
+
+  const pageVisLeft = Math.max(0, Math.min(safeWidth, viewportLocal.left));
+  const pageVisRight = Math.max(pageVisLeft, Math.min(safeWidth, viewportLocal.left + visW));
+  const pageVisTop = Math.max(0, Math.min(maxPageH, viewportLocal.top));
+  const pageVisBottom = Math.max(pageVisTop, Math.min(maxPageH, viewportLocal.top + visH));
+
+  if (!forceRebase && previous && previous.windowed) {
+    const prevRawTop = previous.top - logicalBase;
+    const reqLeft = Math.max(0, pageVisLeft - visW * RENDER_WINDOW_EDGE_MARGIN_RATIO);
+    const reqRight = Math.min(safeWidth, pageVisRight + visW * RENDER_WINDOW_EDGE_MARGIN_RATIO);
+    const reqTop = Math.max(0, pageVisTop - visH * RENDER_WINDOW_EDGE_MARGIN_RATIO);
+    const reqBottom = Math.min(maxPageH, pageVisBottom + visH * RENDER_WINDOW_EDGE_MARGIN_RATIO);
+    const coversX = desiredW >= safeWidth
+      ? (previous.left === 0 && previous.width === safeWidth)
+      : (previous.left <= reqLeft && previous.left + previous.width >= reqRight);
+    const coversY = (!isInfinite && desiredH >= safeHeight)
+      ? (prevRawTop === 0 && previous.height === safeHeight)
+      : (prevRawTop <= reqTop && prevRawTop + previous.height >= reqBottom);
+    const sizeMatches =
+      Math.abs(previous.width - desiredW) <= Math.max(16, desiredW * 0.15)
+      && Math.abs(previous.height - desiredH) <= Math.max(16, desiredH * 0.15);
+    if (coversX && coversY && sizeMatches) {
+      return previous;
+    }
+  }
+
+  const centerX = pageVisRight > pageVisLeft
+    ? (pageVisLeft + pageVisRight) / 2
+    : Math.max(0, Math.min(safeWidth, viewportLocal.left + visW / 2));
+  const centerY = pageVisBottom > pageVisTop
+    ? (pageVisTop + pageVisBottom) / 2
+    : Math.max(0, Math.min(maxPageH, viewportLocal.top + visH / 2));
+
+  const stepX = Math.max(16, Math.round(visW * RENDER_WINDOW_STEP_RATIO));
+  const stepY = Math.max(16, Math.round(visH * RENDER_WINDOW_STEP_RATIO));
+
+  let left = 0;
+  if (desiredW < safeWidth) {
+    const rawLeft = Math.max(0, Math.min(safeWidth - desiredW, centerX - desiredW / 2));
+    left = Math.max(0, Math.min(safeWidth - desiredW, Math.round(rawLeft / stepX) * stepX));
+    if (desiredW >= pageVisRight - pageVisLeft) {
+      left = Math.max(0, Math.min(left, Math.floor(pageVisLeft)));
+      left = Math.min(safeWidth - desiredW, Math.max(left, Math.ceil(pageVisRight - desiredW)));
+    }
+  }
+
+  let rawTop = 0;
+  if (isInfinite || desiredH < safeHeight) {
+    const maxTop = isInfinite ? Number.POSITIVE_INFINITY : safeHeight - desiredH;
+    const unclampedTop = Math.max(0, Math.min(maxTop, centerY - desiredH / 2));
+    rawTop = Math.max(0, Math.min(maxTop, Math.round(unclampedTop / stepY) * stepY));
+    if (desiredH >= pageVisBottom - pageVisTop) {
+      rawTop = Math.max(0, Math.min(rawTop, Math.floor(pageVisTop)));
+      rawTop = Math.min(maxTop, Math.max(rawTop, Math.ceil(pageVisBottom - desiredH)));
+    }
+  }
+  const top = logicalBase + rawTop;
+
+  if (
+    previous
+    && previous.windowed
+    && previous.left === left
+    && previous.top === top
+    && previous.width === desiredW
+    && previous.height === desiredH
+  ) {
+    return previous;
+  }
+  return { left, top, width: desiredW, height: desiredH, windowed: true };
+}
 
 /**
  * Resolve the highest useful backing-store scale that stays within browser/GPU
@@ -28,10 +187,12 @@ export function resolveCanvasBackingScale(
   cssWidth: number,
   cssHeight: number,
   browserVisualScale = 1,
+  maxPixels = MAX_ACTIVE_CANVAS_PIXELS,
 ): number {
   const dpr = Number.isFinite(devicePixelRatio) && devicePixelRatio > 0 ? devicePixelRatio : 1;
   const zoom = Number.isFinite(currentZoomScale) && currentZoomScale > 0 ? currentZoomScale : 1;
   const visualScale = Number.isFinite(browserVisualScale) && browserVisualScale > 0 ? browserVisualScale : 1;
+  const budget = Number.isFinite(maxPixels) && maxPixels > 0 ? maxPixels : MAX_ACTIVE_CANVAS_PIXELS;
   const desiredScale = dpr * zoom * visualScale;
   if (!(cssWidth > 0) || !(cssHeight > 0)) return desiredScale;
 
@@ -39,7 +200,7 @@ export function resolveCanvasBackingScale(
     MAX_CANVAS_DIMENSION / cssWidth,
     MAX_CANVAS_DIMENSION / cssHeight,
   );
-  const allowedByPixels = Math.sqrt(MAX_ACTIVE_CANVAS_PIXELS / (cssWidth * cssHeight));
+  const allowedByPixels = Math.sqrt(budget / (cssWidth * cssHeight));
   return Math.min(desiredScale, allowedByDimension, allowedByPixels);
 }
 
@@ -96,8 +257,13 @@ export class ViewportManager {
     return typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
   }
 
-  getCanvasBackingScale(currentZoomScale: number, cssWidth: number, cssHeight: number): number {
-    return resolveCanvasBackingScale(this.dpr, currentZoomScale, cssWidth, cssHeight, getBrowserCanvasVisualScale());
+  getCanvasBackingScale(
+    currentZoomScale: number,
+    cssWidth: number,
+    cssHeight: number,
+    maxPixels = MAX_ACTIVE_CANVAS_PIXELS,
+  ): number {
+    return resolveCanvasBackingScale(this.dpr, currentZoomScale, cssWidth, cssHeight, getBrowserCanvasVisualScale(), maxPixels);
   }
 
   /** Update DPR (e.g., when window moves between monitors). */
@@ -146,13 +312,60 @@ export class ViewportManager {
     this.pageHeight = pageHeight;
     this.contentOffsetX = offsetX;
     this.contentOffsetY = offsetY;
+    if (rotation !== 0) {
+      this.renderOriginX = 0;
+      this.renderOriginY = 0;
+      this.renderWindowWidth = undefined;
+      this.renderWindowHeight = undefined;
+    }
   }
+  private renderOriginX = 0;
   private renderOriginY = 0;
+  private renderWindowWidth?: number;
   private renderWindowHeight?: number;
+  private canvasBackingSignatures = new WeakMap<
+    HTMLCanvasElement,
+    { width: number; height: number; backingScale: number; cssWidth: number; cssHeight: number; originX: number; originY: number }
+  >();
+
+  /** Transient 2D raster window; persisted coordinates always remain logical. */
+  setRenderWindowRect(rect: { left?: number; top?: number; width?: number; height?: number } | null): void {
+    if (!rect || this.pageRotation !== 0) {
+      this.renderOriginX = 0;
+      this.renderOriginY = 0;
+      this.renderWindowWidth = undefined;
+      this.renderWindowHeight = undefined;
+      return;
+    }
+    this.renderOriginX = typeof rect.left === 'number' && Number.isFinite(rect.left) ? rect.left : 0;
+    this.renderOriginY = typeof rect.top === 'number' && Number.isFinite(rect.top) ? rect.top : 0;
+    this.renderWindowWidth = typeof rect.width === 'number' && Number.isFinite(rect.width) ? rect.width : undefined;
+    this.renderWindowHeight = typeof rect.height === 'number' && Number.isFinite(rect.height) ? rect.height : undefined;
+  }
+
   /** Transient raster window; persisted coordinates always remain logical. */
-  setRenderWindowOrigin(y: number, height?: number): void { this.renderOriginY = Number.isFinite(y) ? y : 0; this.renderWindowHeight = height; }
+  setRenderWindowOrigin(y: number, height?: number): void {
+    if (height === undefined && (!Number.isFinite(y) || y === 0)) {
+      this.setRenderWindowRect(null);
+      return;
+    }
+    this.setRenderWindowRect({ left: 0, top: Number.isFinite(y) ? y : 0, width: undefined, height });
+  }
+
+  getRenderWindowOrigin(): { x: number; y: number } {
+    return { x: this.renderOriginX, y: this.renderOriginY };
+  }
+
   getRenderWindowBounds(): { left: number; top: number; right: number; bottom: number } | null {
-    return this.renderWindowHeight === undefined ? null : { left: -this.contentOffsetX, top: this.renderOriginY - this.contentOffsetY, right: this.pageWidth - this.contentOffsetX, bottom: this.renderOriginY + this.renderWindowHeight - this.contentOffsetY };
+    if (this.renderWindowWidth === undefined && this.renderWindowHeight === undefined) return null;
+    const width = this.renderWindowWidth ?? this.pageWidth;
+    const height = this.renderWindowHeight ?? this.pageHeight;
+    return {
+      left: this.renderOriginX - this.contentOffsetX,
+      top: this.renderOriginY - this.contentOffsetY,
+      right: this.renderOriginX + width - this.contentOffsetX,
+      bottom: this.renderOriginY + height - this.contentOffsetY,
+    };
   }
   intersectsRenderWindow(object: { x: number; y: number; width: number; height: number; rotation?: number; strokeWidth?: number }): boolean {
     const bounds = this.getRenderWindowBounds();
@@ -213,13 +426,15 @@ export class ViewportManager {
   pageToCanvas(x: number, y: number): { x: number; y: number } {
     const point = sourceToVisual({ x: x + this.contentOffsetX, y: y + this.contentOffsetY }, { width: this.pageWidth, height: this.pageHeight }, this.pageRotation);
     const scale = this.renderScale ? this.state.scale : 1;
-    return { x: point.x * scale + (this.renderPan ? this.state.offsetX : 0),
-      y: (point.y - this.renderOriginY) * scale + (this.renderPan ? this.state.offsetY : 0) };
+    return {
+      x: (point.x - this.renderOriginX) * scale + (this.renderPan ? this.state.offsetX : 0),
+      y: (point.y - this.renderOriginY) * scale + (this.renderPan ? this.state.offsetY : 0),
+    };
   }
 
   canvasToPage(canvasX: number, canvasY: number): { x: number; y: number } {
     const scale = this.renderScale ? this.state.scale : 1;
-    const x = (canvasX - (this.renderPan ? this.state.offsetX : 0)) / scale;
+    const x = (canvasX - (this.renderPan ? this.state.offsetX : 0)) / scale + this.renderOriginX;
     const y = (canvasY - (this.renderPan ? this.state.offsetY : 0)) / scale + this.renderOriginY;
     const dimensions: PdfPageDimensions = { width: this.pageWidth, height: this.pageHeight };
     const point = visualToSource({ x, y }, dimensions, this.pageRotation);
@@ -238,24 +453,80 @@ export class ViewportManager {
     };
   }
 
+  /** Return true when `canvas` is already configured with identical dims, backingScale, CSS box, and render origin. */
+  isCanvasBackingUnchanged(
+    canvas: HTMLCanvasElement,
+    cssWidth: number,
+    cssHeight: number,
+    currentZoomScale = 1,
+    maxPixels = MAX_ACTIVE_CANVAS_PIXELS,
+  ): boolean {
+    this.updateDevicePixelRatio();
+    const backingScale = this.getCanvasBackingScale(currentZoomScale, cssWidth, cssHeight, maxPixels);
+    const targetWidth = Math.max(1, Math.floor(cssWidth * backingScale));
+    const targetHeight = Math.max(1, Math.floor(cssHeight * backingScale));
+    const prev = this.canvasBackingSignatures.get(canvas);
+    return Boolean(
+      prev
+      && canvas.width === targetWidth
+      && canvas.height === targetHeight
+      && prev.width === targetWidth
+      && prev.height === targetHeight
+      && Math.abs(prev.backingScale - backingScale) < 1e-6
+      && prev.cssWidth === cssWidth
+      && prev.cssHeight === cssHeight
+      && prev.originX === this.renderOriginX
+      && prev.originY === this.renderOriginY,
+    );
+  }
+
   /**
    * Configure an HTML5 canvas element for HiDPI rendering.
    * Sets canvas.width/height to CSS dimensions * devicePixelRatio * bounded zoom detail,
-   * and scales the context accordingly.
+   * and scales the context accordingly without reallocating if dimensions are unchanged.
    *
    * Returns the 2D context.
    */
-  configureCanvas(canvas: HTMLCanvasElement, cssWidth: number, cssHeight: number, currentZoomScale = 1): CanvasRenderingContext2D {
+  configureCanvas(
+    canvas: HTMLCanvasElement,
+    cssWidth: number,
+    cssHeight: number,
+    currentZoomScale = 1,
+    maxPixels = MAX_ACTIVE_CANVAS_PIXELS,
+  ): CanvasRenderingContext2D {
     this.updateDevicePixelRatio();
-    const backingScale = this.getCanvasBackingScale(currentZoomScale, cssWidth, cssHeight);
+    const backingScale = this.getCanvasBackingScale(currentZoomScale, cssWidth, cssHeight, maxPixels);
+    const targetWidth = Math.max(1, Math.floor(cssWidth * backingScale));
+    const targetHeight = Math.max(1, Math.floor(cssHeight * backingScale));
 
-    canvas.width = Math.floor(cssWidth * backingScale);
-    canvas.height = Math.floor(cssHeight * backingScale);
-    canvas.style.width = `${cssWidth}px`;
-    canvas.style.height = `${cssHeight}px`;
+    const dimsChanged = canvas.width !== targetWidth || canvas.height !== targetHeight;
+    if (dimsChanged) {
+      canvas.width = targetWidth;
+      canvas.height = targetHeight;
+    }
+    const cssWidthStr = `${cssWidth}px`;
+    const cssHeightStr = `${cssHeight}px`;
+    if (canvas.style.width !== cssWidthStr) canvas.style.width = cssWidthStr;
+    if (canvas.style.height !== cssHeightStr) canvas.style.height = cssHeightStr;
 
     const ctx = canvas.getContext('2d')!;
-    ctx.scale(backingScale, backingScale);
+    if (dimsChanged) {
+      ctx.scale(backingScale, backingScale);
+    } else if (typeof ctx.setTransform === 'function') {
+      ctx.setTransform(backingScale, 0, 0, backingScale, 0, 0);
+    } else {
+      ctx.scale(backingScale, backingScale);
+    }
+
+    this.canvasBackingSignatures.set(canvas, {
+      width: targetWidth,
+      height: targetHeight,
+      backingScale,
+      cssWidth,
+      cssHeight,
+      originX: this.renderOriginX,
+      originY: this.renderOriginY,
+    });
 
     return ctx;
   }
@@ -274,8 +545,24 @@ export class ViewportManager {
       ctx.scale(this.state.scale, this.state.scale);
     }
     applyPdfRotationTransform(ctx, this.pageRotation, { width: this.pageWidth, height: this.pageHeight });
-    if (this.renderOriginY) ctx.translate(0, -this.renderOriginY);
+    if (this.renderOriginX || this.renderOriginY) ctx.translate(-this.renderOriginX, -this.renderOriginY);
     if (this.contentOffsetX !== 0 || this.contentOffsetY !== 0) ctx.translate(this.contentOffsetX, this.contentOffsetY);
+  }
+
+  /** Apply full-page document transform (without 2D render-window crop) for overview backdrops. */
+  applyFullPageTransform(ctx: CanvasRenderingContext2D): void {
+    if (this.renderPan && (this.state.offsetX !== 0 || this.state.offsetY !== 0)) {
+      ctx.translate(this.state.offsetX, this.state.offsetY);
+    }
+    if (this.renderScale && this.state.scale !== 1) {
+      ctx.scale(this.state.scale, this.state.scale);
+    }
+    applyPdfRotationTransform(ctx, this.pageRotation, { width: this.pageWidth, height: this.pageHeight });
+    if (this.contentOffsetX !== 0 || this.contentOffsetY !== 0) ctx.translate(this.contentOffsetX, this.contentOffsetY);
+  }
+
+  hasRenderWindow(): boolean {
+    return this.renderWindowWidth !== undefined || this.renderWindowHeight !== undefined;
   }
 
   /** Get the CSS dimensions that the canvas should occupy, accounting for zoom. */

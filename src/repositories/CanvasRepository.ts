@@ -12,8 +12,13 @@ import type { SyncQueueItem } from '@/types/sync';
 import { buildCanonicalCanvasPayload, isValidCanvasScenePayload, selectCanonicalCanvasScene } from './canvasSceneStorage';
 import { recordLocalChangeDetached } from '@/services/cloudsync/recordLocalChange';
 import { gate0Profiler } from '@/dev/gate0Profiler';
+import { generateId } from '@/lib/utils/id';
+import { imageAssetCache } from '@/components/notebook/engine/ImageAssetCache';
+
+const isElectronRuntime = (): boolean => typeof window !== 'undefined' && Boolean(window.panvas);
 
 export class CanvasRepository {
+  private ownerWorkspaceCache = new Map<string, string>();
   // ---- Canvas File CRUD ----
 
   async create(userId: string | null, workspaceId: string, folderId: string | null, notebookId: string | null, sectionId: string | null, name: string): Promise<CanvasFile> {
@@ -66,6 +71,7 @@ export class CanvasRepository {
   }
 
   async move(userId: string | null, id: string, workspaceId: string, folderId: string | null, notebookId: string | null, sectionId: string | null): Promise<void> {
+    this.ownerWorkspaceCache.set(id, workspaceId);
     if (typeof window !== 'undefined' && window.panvas) {
       await window.panvas.canvasFile.update(workspaceId, id, { workspaceId, folderId, notebookId, sectionId });
       return;
@@ -102,6 +108,7 @@ export class CanvasRepository {
   }
 
   async permanentlyDelete(workspaceId: string, id: string): Promise<void> {
+    this.ownerWorkspaceCache.delete(id);
     if (typeof window !== 'undefined' && window.panvas) {
       await window.panvas.trash.permanentlyDelete(workspaceId, id, 'canvas');
       return;
@@ -193,22 +200,36 @@ export class CanvasRepository {
     return null;
   }
 
-  private async resolveAssetWorkspaceId(ownerId: string): Promise<string | null> {
-    if (typeof window !== 'undefined' && window.panvas) {
+  private async resolveAssetWorkspaceId(ownerId: string, workspaceId?: string): Promise<string | null> {
+    if (workspaceId) {
+      this.ownerWorkspaceCache.set(ownerId, workspaceId);
+      return workspaceId;
+    }
+    const cached = this.ownerWorkspaceCache.get(ownerId);
+    if (cached) return cached;
+
+    if (isElectronRuntime()) {
       const workspaces = await window.panvas.workspace.getAll();
       for (const workspace of workspaces) {
         const [canvases, pages] = await Promise.all([
           window.panvas.canvasFile.getAll(workspace.id), window.panvas.notebookPage.getAll(workspace.id),
         ]);
-        if (canvases.some(item => item.id === ownerId) || pages.some(item => item.id === ownerId)) return workspace.id;
+        for (const item of canvases) this.ownerWorkspaceCache.set(item.id, workspace.id);
+        for (const item of pages) this.ownerWorkspaceCache.set(item.id, workspace.id);
+        if (this.ownerWorkspaceCache.has(ownerId)) return this.ownerWorkspaceCache.get(ownerId)!;
       }
       return null;
     }
     const canvas = await db.canvasFiles.get(ownerId);
-    if (canvas) return canvas.workspaceId;
+    if (canvas) {
+      this.ownerWorkspaceCache.set(ownerId, canvas.workspaceId);
+      return canvas.workspaceId;
+    }
     const page = await db.notebookPages.get(ownerId);
     if (!page) return null;
-    return (await db.notebooks.get(page.notebookId))?.workspaceId ?? null;
+    const nbWorkspaceId = (await db.notebooks.get(page.notebookId))?.workspaceId ?? null;
+    if (nbWorkspaceId) this.ownerWorkspaceCache.set(ownerId, nbWorkspaceId);
+    return nbWorkspaceId;
   }
 
   /** A loadable canonical scene must at least identify itself and carry elements. */
@@ -331,13 +352,13 @@ export class CanvasRepository {
    * database — so filesystem storage is what makes an imported PDF survive
    * restarts and profile changes.
    */
-  async storePdf(userId: string | null, canvasFileId: string, fileName: string, data: ArrayBuffer): Promise<PdfFileData> {
+  async storePdf(userId: string | null, canvasFileId: string, fileName: string, data: ArrayBuffer, workspaceId?: string): Promise<PdfFileData> {
     const pdfFile = await canvasDB.storePdfFile(userId, canvasFileId, fileName, data);
     if (typeof window !== 'undefined' && window.panvas) {
       await window.panvas.binary.storePdf(pdfFile.id, fileName, data);
     }
-    const workspaceId = await this.resolveAssetWorkspaceId(canvasFileId);
-    if (workspaceId) recordLocalChangeDetached({ entityType: 'asset', entityId: pdfFile.id, workspaceId, operation: 'create', payload: { ownerId: canvasFileId, fileName } });
+    const resolvedWorkspaceId = await this.resolveAssetWorkspaceId(canvasFileId, workspaceId);
+    if (resolvedWorkspaceId) recordLocalChangeDetached({ entityType: 'asset', entityId: pdfFile.id, workspaceId: resolvedWorkspaceId, operation: 'create', payload: { ownerId: canvasFileId, fileName } });
     return pdfFile;
   }
 
@@ -379,13 +400,18 @@ export class CanvasRepository {
   // immediate local cache (and the only store in browser mode), while
   // Electron also persists the bytes under Documents/Panvas/Assets so they
   // survive profile or origin changes.
-  async storeImage(userId: string | null, canvasFileId: string, fileName: string, mimeType: string, data: ArrayBuffer): Promise<ImageFileData> {
-    const imageFile = await canvasDB.storeImageFile(userId, canvasFileId, fileName, mimeType, data);
-    if (typeof window !== 'undefined' && window.panvas) {
-      await window.panvas.binary.storeImage(imageFile.id, fileName, mimeType, data);
+  async storeImage(userId: string | null, canvasFileId: string, fileName: string, mimeType: string, data: ArrayBuffer, workspaceId?: string): Promise<ImageFileData> {
+    let imageFile: ImageFileData;
+    if (isElectronRuntime() && window.panvas?.binary?.storeImage) {
+      const id = generateId('img');
+      const createdAt = Date.now();
+      await window.panvas.binary.storeImage(id, fileName, mimeType, data);
+      imageFile = { id, canvasFileId, fileName, mimeType, data, createdAt, userId: userId ?? '' };
+    } else {
+      imageFile = await canvasDB.storeImageFile(userId, canvasFileId, fileName, mimeType, data);
     }
-    const workspaceId = await this.resolveAssetWorkspaceId(canvasFileId);
-    if (workspaceId) recordLocalChangeDetached({ entityType: 'asset', entityId: imageFile.id, workspaceId, operation: 'create', payload: { ownerId: canvasFileId, fileName, mimeType } });
+    const resolvedWorkspaceId = await this.resolveAssetWorkspaceId(canvasFileId, workspaceId);
+    if (resolvedWorkspaceId) recordLocalChangeDetached({ entityType: 'asset', entityId: imageFile.id, workspaceId: resolvedWorkspaceId, operation: 'create', payload: { ownerId: canvasFileId, fileName, mimeType } });
     return imageFile;
   }
 
@@ -421,16 +447,20 @@ export class CanvasRepository {
   }
 
   async deleteImage(id: string): Promise<void> {
-    return canvasDB.deleteImageFile(id);
+    imageAssetCache.evictFile(id);
+    await canvasDB.deleteImageFile(id);
+    if (typeof window !== 'undefined' && (window as any).panvas?.binary?.deleteImage) {
+      await (window as any).panvas.binary.deleteImage(id);
+    }
   }
 
-  async storeAudio(userId: string | null, ownerId: string, fileName: string, mimeType: string, data: ArrayBuffer): Promise<ImageFileData> {
+  async storeAudio(userId: string | null, ownerId: string, fileName: string, mimeType: string, data: ArrayBuffer, workspaceId?: string): Promise<ImageFileData> {
     if (!/^audio\//i.test(mimeType)) throw new Error('Unsupported audio format.');
     if (data.byteLength > 100 * 1024 * 1024) throw new Error('Audio note exceeds the 100 MB local limit.');
     const asset = await canvasDB.storeImageFile(userId, ownerId, fileName, mimeType, data);
     if (typeof window !== 'undefined' && window.panvas) await window.panvas.binary.storeAudio(asset.id, fileName, mimeType, data);
-    const workspaceId = await this.resolveAssetWorkspaceId(ownerId);
-    if (workspaceId) recordLocalChangeDetached({ entityType: 'asset', entityId: asset.id, workspaceId, operation: 'create', payload: { ownerId, fileName, mimeType } });
+    const resolvedWorkspaceId = await this.resolveAssetWorkspaceId(ownerId, workspaceId);
+    if (resolvedWorkspaceId) recordLocalChangeDetached({ entityType: 'asset', entityId: asset.id, workspaceId: resolvedWorkspaceId, operation: 'create', payload: { ownerId, fileName, mimeType } });
     return asset;
   }
 

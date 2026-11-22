@@ -13,10 +13,11 @@ This list describes the current release scope. It is intentionally short; a beha
 - The web build stores workspace records in origin-scoped Dexie/IndexedDB. Browser quota, eviction, private browsing policies, and manual site-data clearing can remove or limit local data. Export important workspaces regularly.
 - The Windows Electron build is the primary release target. Chromium-based browsers are the main web target; Firefox and Safari are best-effort and may differ in pointer, storage, or handwriting capabilities.
 
-## Handwriting-to-text
+## Handwriting recognition and math OCR
 
-- Windows recognition uses the Windows Ink bridge when available. The web build uses the browser-native handwriting API only where that API is present. Unsupported environments preserve the original ink but do not convert it.
-- The experimental local neural recognition fallback is disabled because it has not met the project's accuracy bar.
+- Windows handwriting-to-text recognition uses the Windows Ink bridge when available. The web build uses the browser-native handwriting API where supported. Unsupported environments preserve raw ink.
+- Desktop offline handwriting-to-math conversion is powered by on-demand `TexTeller3-ONNX` running in an isolated Electron utility process. First-time execution loads model weights locally with bounded CPU threads. The web build provides manual LaTeX entry and KaTeX symbol helpers without local neural inference.
+- The experimental in-browser neural handwriting recognition fallback remains disabled in favor of native platform recognition APIs.
 
 ## PDFs and large documents
 

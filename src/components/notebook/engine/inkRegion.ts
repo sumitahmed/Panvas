@@ -1,7 +1,7 @@
 import clipping from 'polygon-clipping';
 import type { MultiPolygon, Pair } from 'polygon-clipping';
 import type { Stroke } from './drawingTypes.ts';
-import { getStrokeRenderHalfWidth } from './strokeGeometry.ts';
+import { strokeBoundsPadding } from './capsuleErase.ts';
 
 export type InkRegion = MultiPolygon;
 export type InkPoint = { x: number; y: number };
@@ -38,7 +38,7 @@ export function strokeRegion(stroke: Stroke): InkRegion {
   if (stroke.inkClip) return translateRegion(stroke.inkClip, origin.x, origin.y);
   // This domain contains the original rendered path, including pressure, grain,
   // curves and caps. Render that path once through the retained domain.
-  const pad = getStrokeRenderHalfWidth(stroke) + 2;
+  const pad = strokeBoundsPadding(stroke);
   let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
   for (const point of stroke.points) {
     left = Math.min(left, point.x - pad); right = Math.max(right, point.x + pad);

@@ -20,7 +20,6 @@ import {
 } from 'lucide-react';
 import { useUIStore } from '@/stores/uiStore';
 import { useWorkspaceStore } from '@/stores/workspaceStore';
-import { exportNotebookToPdf, exportPageToPdf, exportSectionToPdf, printNotebook, printPage, printSection } from '@/services/pdf/notebookExportCommands';
 
 export function ContextMenu() {
   const { contextMenu, closeContextMenu, setRenamingId, openCreateDialog } = useUIStore();
@@ -155,12 +154,22 @@ export function ContextMenu() {
     menuItems.push({
       label: 'Export Notebook to PDF',
       icon: <Download size={13} />,
-      action: () => { closeContextMenu(); void exportNotebookToPdf(exportTarget?.type === 'notebook' ? exportTarget : targetId); },
+      action: () => {
+        closeContextMenu();
+        void import('@/services/pdf/notebookExportCommands')
+          .then(({ exportNotebookToPdf }) => exportNotebookToPdf(exportTarget?.type === 'notebook' ? exportTarget : targetId))
+          .catch(err => console.error('[ContextMenu] Failed to load PDF export:', err));
+      },
     });
     menuItems.push({
       label: 'Print Notebook',
       icon: <Printer size={13} />,
-      action: () => { closeContextMenu(); void printNotebook(exportTarget?.type === 'notebook' ? exportTarget : targetId); },
+      action: () => {
+        closeContextMenu();
+        void import('@/services/pdf/notebookExportCommands')
+          .then(({ printNotebook }) => printNotebook(exportTarget?.type === 'notebook' ? exportTarget : targetId))
+          .catch(err => console.error('[ContextMenu] Failed to load PDF print:', err));
+      },
     });
   }
 
@@ -168,12 +177,22 @@ export function ContextMenu() {
     menuItems.push({
       label: 'Export Page to PDF',
       icon: <Download size={13} />,
-      action: () => { closeContextMenu(); void exportPageToPdf(exportTarget?.type === 'page' ? exportTarget : targetId); },
+      action: () => {
+        closeContextMenu();
+        void import('@/services/pdf/notebookExportCommands')
+          .then(({ exportPageToPdf }) => exportPageToPdf(exportTarget?.type === 'page' ? exportTarget : targetId))
+          .catch(err => console.error('[ContextMenu] Failed to load PDF export:', err));
+      },
     });
     menuItems.push({
       label: 'Print Page',
       icon: <Printer size={13} />,
-      action: () => { closeContextMenu(); void printPage(exportTarget?.type === 'page' ? exportTarget : targetId); },
+      action: () => {
+        closeContextMenu();
+        void import('@/services/pdf/notebookExportCommands')
+          .then(({ printPage }) => printPage(exportTarget?.type === 'page' ? exportTarget : targetId))
+          .catch(err => console.error('[ContextMenu] Failed to load PDF print:', err));
+      },
     });
   }
 
@@ -191,21 +210,31 @@ export function ContextMenu() {
     menuItems.push({
       label: 'Import PDF',
       icon: <FileText size={13} />,
-      action: () => { 
+      action: () => {
         // We trigger the hidden file input in NotebookSidebar by dispatching a custom event
         window.dispatchEvent(new CustomEvent('panvas:import-pdf', { detail: { sectionId: targetId } }));
-        closeContextMenu(); 
+        closeContextMenu();
       },
     });
     menuItems.push({
       label: 'Export Section to PDF',
       icon: <Download size={13} />,
-      action: () => { closeContextMenu(); void exportSectionToPdf(exportTarget?.type === 'section' ? exportTarget : targetId); },
+      action: () => {
+        closeContextMenu();
+        void import('@/services/pdf/notebookExportCommands')
+          .then(({ exportSectionToPdf }) => exportSectionToPdf(exportTarget?.type === 'section' ? exportTarget : targetId))
+          .catch(err => console.error('[ContextMenu] Failed to load PDF export:', err));
+      },
     });
     menuItems.push({
       label: 'Print Section',
       icon: <Printer size={13} />,
-      action: () => { closeContextMenu(); void printSection(exportTarget?.type === 'section' ? exportTarget : targetId); },
+      action: () => {
+        closeContextMenu();
+        void import('@/services/pdf/notebookExportCommands')
+          .then(({ printSection }) => printSection(exportTarget?.type === 'section' ? exportTarget : targetId))
+          .catch(err => console.error('[ContextMenu] Failed to load PDF print:', err));
+      },
     });
   }
 
@@ -232,8 +261,8 @@ export function ContextMenu() {
 
   // Delete
   if (
-    targetType === 'workspace' || 
-    targetType === 'folder' || 
+    targetType === 'workspace' ||
+    targetType === 'folder' ||
     targetType === 'canvas' ||
     targetType === 'notebook' ||
     targetType === 'section' ||

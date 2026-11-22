@@ -5,7 +5,7 @@ import { useWorkspaceStore } from '@/stores/workspaceStore';
 import { InactivePagePreview } from '@/components/notebook/InactivePagePreview';
 import { PdfPageRenderer } from '@/components/pdf/PdfPageRenderer';
 import { usePdfDocument } from '@/hooks/usePdfDocument';
-import { normalizePdfPageState } from '@/services/pdf/pdfPageOperations';
+import { normalizePdfPageState } from '@/services/pdf/pdfPageState';
 import type { NotebookPage, PdfPageRotation } from '@/types/notebook';
 
 /**

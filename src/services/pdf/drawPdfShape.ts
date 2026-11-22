@@ -1,13 +1,14 @@
 import { rgb, type PDFPage } from 'pdf-lib';
-import type { Shape } from '../../components/notebook/engine/drawingTypes.ts';
+import { isLinearShapeType, type Shape } from '../../components/notebook/engine/drawingTypes.ts';
+import { getShapePolygonVertices } from '../../components/notebook/engine/shapePolygonGeometry.ts';
 import { drawPdfLine } from './drawPdfLine.ts';
 export function drawPdfShape(page: PDFPage, shape: Shape, sx = 1, sy = 1) {
-  if (shape.shapeType === 'line' || shape.shapeType === 'arrow') { drawPdfLine(page, shape, sx, sy); return; }
+  if (isLinearShapeType(shape.shapeType)) { drawPdfLine(page, shape, sx, sy); return; }
   const cx = shape.x + shape.width / 2, cy = shape.y + shape.height / 2;
+  const polyVertices = getShapePolygonVertices(shape.shapeType, shape.x, shape.y, shape.width, shape.height);
   let points: { x: number; y: number }[];
-  if (shape.shapeType === 'ellipse') points = Array.from({ length: 96 }, (_, i) => ({ x: cx + Math.cos(i * Math.PI / 48) * shape.width / 2, y: cy + Math.sin(i * Math.PI / 48) * shape.height / 2 }));
-  else if (shape.shapeType === 'triangle') points = [{ x: cx, y: shape.y }, { x: shape.x + shape.width, y: shape.y + shape.height }, { x: shape.x, y: shape.y + shape.height }];
-  else if (shape.shapeType === 'diamond') points = [{ x: cx, y: shape.y }, { x: shape.x + shape.width, y: cy }, { x: cx, y: shape.y + shape.height }, { x: shape.x, y: cy }];
+  if (polyVertices) points = polyVertices;
+  else if (shape.shapeType === 'ellipse') points = Array.from({ length: 96 }, (_, i) => ({ x: cx + Math.cos(i * Math.PI / 48) * shape.width / 2, y: cy + Math.sin(i * Math.PI / 48) * shape.height / 2 }));
   else if (shape.shapeType === 'rounded-rectangle') {
     const r = Math.min(16, Math.abs(shape.width) / 4, Math.abs(shape.height) / 4);
     const corners = [[shape.x + shape.width - r, shape.y + r, -Math.PI / 2], [shape.x + shape.width - r, shape.y + shape.height - r, 0], [shape.x + r, shape.y + shape.height - r, Math.PI / 2], [shape.x + r, shape.y + r, Math.PI]];

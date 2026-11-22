@@ -5,9 +5,9 @@ import { recropImageGeometry } from './imageAppearance.ts';
 // ============================================
 // Handles selecting, moving, resizing, and deleting strokes/shapes.
 
-import type { SelectedElement, BoundingBox, ImageObject, Shape, Stroke, StrokePoint, TextObject } from './drawingTypes.ts';
+import { isLinearShapeType, type SelectedElement, type BoundingBox, type ImageObject, type Shape, type Stroke, type StrokePoint, type TextObject } from './drawingTypes.ts';
 import type { DrawingEngine } from './DrawingEngine.ts';
-import type { EraseBounds } from './capsuleErase.ts';
+import { strokeBoundsPadding, type EraseBounds } from './capsuleErase.ts';
 import type { ShapeManager } from './ShapeManager.ts';
 import type { HistoryManager } from './HistoryManager.ts';
 import type { ViewportManager } from './ViewportManager.ts';
@@ -18,6 +18,7 @@ import { generateId } from '../../../lib/utils/id.ts';
 import { isPointInsideLoop } from './circleSelectGesture.ts';
 import { applyGroupedTranslation, reorderQueueWithinLayers, type MixedPlacementObject, type ZOrderAction } from './mixedPlacement.ts';
 import { buildLineStyleGeometry } from './lineStyleGeometry.ts';
+import { hitTestPolygonShape, isPolygonShapeType } from './shapePolygonGeometry.ts';
 // Keep this engine import relative: the focused Node interaction suite runs
 // without Vite's `@` alias resolver.
 import { createHandwritingConversionCommand } from '../../../services/recognition/conversion.ts';
@@ -30,6 +31,45 @@ type ResizeHandle = 'tl' | 'tc' | 'tr' | 'ml' | 'mr' | 'bl' | 'bc' | 'br' | 'rot
 // units. Handle rendering and handle hit-testing MUST derive from the same
 // frame, or the visible handle and its grab area drift apart.
 const SELECTION_FRAME_EXPANSION = 4;
+
+function normalizeBox(box: BoundingBox): BoundingBox {
+  const x = Math.min(box.x, box.x + box.width);
+  const y = Math.min(box.y, box.y + box.height);
+  return { x, y, width: Math.abs(box.width), height: Math.abs(box.height) };
+}
+
+function rotatedBoxAabb(box: BoundingBox, rotationDeg: number, pad = 0): EraseBounds {
+  const norm = normalizeBox(box);
+  if (!rotationDeg) {
+    return {
+      left: norm.x - pad,
+      top: norm.y - pad,
+      right: norm.x + norm.width + pad,
+      bottom: norm.y + norm.height + pad,
+    };
+  }
+  const cx = norm.x + norm.width / 2;
+  const cy = norm.y + norm.height / 2;
+  const angle = (rotationDeg * Math.PI) / 180;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+  for (const [px, py] of [
+    [norm.x - pad, norm.y - pad],
+    [norm.x + norm.width + pad, norm.y - pad],
+    [norm.x + norm.width + pad, norm.y + norm.height + pad],
+    [norm.x - pad, norm.y + norm.height + pad],
+  ]) {
+    const dx = px - cx, dy = py - cy;
+    const rx = cx + dx * cos - dy * sin;
+    const ry = cy + dx * sin + dy * cos;
+    if (rx < left) left = rx;
+    if (rx > right) right = rx;
+    if (ry < top) top = ry;
+    if (ry > bottom) bottom = ry;
+  }
+  return { left, top, right, bottom };
+}
 
 /** The dashed selection frame drawn around an element's logical box. */
 function selectionFrameFor(box: BoundingBox): BoundingBox {
@@ -246,6 +286,14 @@ export class SelectionEngine {
     this.pendingSelectRedraw = null;
   }
 
+  /** Synchronously flush any deferred selection repaint before taking a canvas snapshot. */
+  flushPendingSelectionRedraw(): void {
+    if (!this.pendingSelectRedrawScheduled) return;
+    const pending = this.pendingSelectRedraw;
+    this.cancelPendingSelectionRedraw();
+    this.drawingEngine.redraw(pending ?? undefined);
+  }
+
   hasSelectedStrokes(): boolean {
     if (this.selectedElements.length === 0) return false;
     for (const el of this.selectedElements) {
@@ -302,9 +350,6 @@ export class SelectionEngine {
   clearSelection(repaint = true): void {
     const damage = (repaint && this.selectedElements.length > 0) ? this.getSelectionDamage() : null;
     this.drawingEngine.endSelectionDrag?.();
-    for (const el of this.selectedElements) {
-      if (el.type === 'image') this.imageManager.commitImageOverlay?.(el.id);
-    }
     this.selectedIds.clear();
     this.selectedElements = [];
     this.selectionOutline = null;
@@ -332,29 +377,33 @@ export class SelectionEngine {
     return (this.viewport as any)?.scale ?? 1;
   }
 
-  private getSelectionDamage(): EraseBounds | null {
+  private getOutlineDamage(): EraseBounds | null {
+    if (!this.selectionOutline || this.selectionOutline.length < 3) return null;
+    const scale = Math.max(0.05, this.getViewportScale());
+    const padding = Math.max(40, 40 / scale);
+    const previewDx = this.isDragging && this.currentDragTransform?.mode === 'move' ? this.currentDragTransform.dx : 0;
+    const previewDy = this.isDragging && this.currentDragTransform?.mode === 'move' ? this.currentDragTransform.dy : 0;
+    let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+    for (const point of this.selectionOutline) {
+      left = Math.min(left, point.x + previewDx);
+      top = Math.min(top, point.y + previewDy);
+      right = Math.max(right, point.x + previewDx);
+      bottom = Math.max(bottom, point.y + previewDy);
+    }
+    return { left: left - padding, top: top - padding, right: right + padding, bottom: bottom + padding };
+  }
+
+  getSelectionDamage(): EraseBounds | null {
     if (this.selectedElements.length === 0) return null;
     const scale = Math.max(0.05, this.getViewportScale());
     const padding = 40 / scale;
 
     // The drawn freeform region can extend past every selected box; repaint it
     // too (including its live move-preview offset).
-    let outlineDamage: EraseBounds | null = null;
-    if (this.selectionOutline && this.selectionOutline.length >= 3) {
-      const previewDx = this.isDragging && this.currentDragTransform?.mode === 'move' ? this.currentDragTransform.dx : 0;
-      const previewDy = this.isDragging && this.currentDragTransform?.mode === 'move' ? this.currentDragTransform.dy : 0;
-      let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
-      for (const point of this.selectionOutline) {
-        left = Math.min(left, point.x + previewDx);
-        top = Math.min(top, point.y + previewDy);
-        right = Math.max(right, point.x + previewDx);
-        bottom = Math.max(bottom, point.y + previewDy);
-      }
-      outlineDamage = { left: left - padding, top: top - padding, right: right + padding, bottom: bottom + padding };
-    }
+    const outlineDamage = this.getOutlineDamage();
 
     if (this.selectedElements.length > 1) {
-      const group = this.getCollectiveBoundingBox();
+      const group = this.getCollectiveSelectionBox() ?? this.getCollectiveBoundingBox();
       if (group) {
         let left = group.x - padding;
         let top = group.y - padding - 36 / scale;
@@ -367,57 +416,27 @@ export class SelectionEngine {
           if (rot !== 0) {
             const box = this.getBoundingBox(el);
             if (box) {
-              const cx = box.x + box.width / 2;
-              const cy = box.y + box.height / 2;
-              const angle = rot * Math.PI / 180;
-              const cos = Math.cos(angle);
-              const sin = Math.sin(angle);
-              const corners = [
-                [box.x - padding, box.y - padding],
-                [box.x + box.width + padding, box.y - padding],
-                [box.x + box.width + padding, box.y + box.height + padding],
-                [box.x - padding, box.y + box.height + padding],
-              ];
-              for (const [x, y] of corners) {
-                const dx = x - cx, dy = y - cy;
-                const px = cx + dx * cos - dy * sin;
-                const py = cy + dx * sin + dy * cos;
-                left = Math.min(left, px);
-                top = Math.min(top, py);
-                right = Math.max(right, px);
-                bottom = Math.max(bottom, py);
-              }
+              const b = rotatedBoxAabb(box, rot, padding);
+              left = Math.min(left, b.left);
+              top = Math.min(top, b.top);
+              right = Math.max(right, b.right);
+              bottom = Math.max(bottom, b.bottom);
             }
           }
         }
-        return { left, top, right, bottom };
+        return this.unionDamage({ left, top, right, bottom }, outlineDamage);
       }
     }
 
     let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
     for (const el of this.selectedElements) {
-      const box = this.getBoundingBox(el);
+      const box = this.getSelectionBox(el) ?? this.getBoundingBox(el);
       if (!box) continue;
-      const cx = box.x + box.width / 2;
-      const cy = box.y + box.height / 2;
-      const angle = this.getObjectRotation(el) * Math.PI / 180;
-      const cos = Math.cos(angle);
-      const sin = Math.sin(angle);
-      const corners = [
-        [box.x - padding, box.y - padding],
-        [box.x + box.width + padding, box.y - padding],
-        [box.x + box.width + padding, box.y + box.height + padding],
-        [box.x - padding, box.y + box.height + padding],
-      ];
-      for (const [x, y] of corners) {
-        const dx = x - cx, dy = y - cy;
-        const px = cx + dx * cos - dy * sin;
-        const py = cy + dx * sin + dy * cos;
-        left = Math.min(left, px);
-        top = Math.min(top, py);
-        right = Math.max(right, px);
-        bottom = Math.max(bottom, py);
-      }
+      const b = rotatedBoxAabb(box, this.getObjectRotation(el), padding);
+      left = Math.min(left, b.left);
+      top = Math.min(top, b.top);
+      right = Math.max(right, b.right);
+      bottom = Math.max(bottom, b.bottom);
     }
     return Number.isFinite(left) ? this.unionDamage({ left, top, right, bottom }, outlineDamage) : outlineDamage;
   }
@@ -832,7 +851,7 @@ export class SelectionEngine {
   }
 
   changeLineStyle(style: LineStyle): void {
-    const objects = this.selectedElements.filter(el => el.type === 'shape').map(el => this.shapeManager.getShapes().find(shape => shape.id === el.id)).filter((shape): shape is Shape => !!shape && this.layerManager.isEditable(shape.layerId) && (shape.shapeType === 'line' || shape.shapeType === 'arrow'));
+    const objects = this.selectedElements.filter(el => el.type === 'shape').map(el => this.shapeManager.getShapes().find(shape => shape.id === el.id)).filter((shape): shape is Shape => !!shape && this.layerManager.isEditable(shape.layerId) && isLinearShapeType(shape.shapeType));
     if (!objects.length) return;
     const before = objects.map(shape => shape.lineStyle);
     const apply = (undo = false) => { objects.forEach((entry, i) => { const shape = this.shapeManager.getShapes().find(item => item.id === entry.id); if (shape) { shape.lineStyle = undo ? before[i] : style; if (!shape.lineStyle) delete shape.lineStyle; } }); this.drawingEngine.redraw(); };
@@ -904,8 +923,9 @@ export class SelectionEngine {
     let maxX = -Infinity;
     let maxY = -Infinity;
     for (const el of this.selectedElements) {
-      const box = this.getBoundingBox(el);
-      if (!box) continue;
+      const raw = this.getBoundingBox(el);
+      if (!raw) continue;
+      const box = normalizeBox(raw);
       minX = Math.min(minX, box.x);
       minY = Math.min(minY, box.y);
       maxX = Math.max(maxX, box.x + box.width);
@@ -921,6 +941,23 @@ export class SelectionEngine {
     return this.cachedCollectiveBoundingBox;
   }
 
+  /** Collective visual frame using padded line/arrow bounds so handles and selection box align. */
+  private getCollectiveSelectionBox(): BoundingBox | null {
+    if (this.selectedElements.length === 0) return null;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const el of this.selectedElements) {
+      const raw = this.getSelectionBox(el);
+      if (!raw) continue;
+      const box = normalizeBox(raw);
+      minX = Math.min(minX, box.x);
+      minY = Math.min(minY, box.y);
+      maxX = Math.max(maxX, box.x + box.width);
+      maxY = Math.max(maxY, box.y + box.height);
+    }
+    if (!Number.isFinite(minX)) return null;
+    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+  }
+
   getHandleAt(x: number, y: number): { id: string, handle: Exclude<ResizeHandle, null> } | null {
     if (this.usesStickyDomControls()) return null;
     if (this.selectedElements.length === 0) return null;
@@ -929,9 +966,8 @@ export class SelectionEngine {
     const h2 = handleSize / 2;
     const padding = 36 / scale;
 
-    const allStrokes = this.selectedElements.every(el => el.type === 'stroke');
-    if (this.selectedElements.length > 1 && allStrokes) {
-      const box = this.getCollectiveBoundingBox();
+    if (this.selectedElements.length > 1) {
+      const box = this.getCollectiveSelectionBox() ?? this.getCollectiveBoundingBox();
       if (box && !(
         x < box.x - padding ||
         x > box.x + box.width + padding ||
@@ -939,7 +975,6 @@ export class SelectionEngine {
         y > box.y + box.height + padding
       )) {
         const midX = box.x + box.width / 2;
-        const midY = box.y + box.height / 2;
 
         const rotX = midX;
         const rotY = box.y - 32 / scale;
@@ -957,65 +992,22 @@ export class SelectionEngine {
         }
       }
 
-      // In multi-selection, only non-stroke elements (shapes, text, images) allow individual handle access.
-      // Strokes are skipped to avoid hundreds of handles cluttering the interior and hijacking drag.
-      for (let i = this.selectedElements.length - 1; i >= 0; i--) {
-        const el = this.selectedElements[i];
-        if (el.type === 'stroke') continue;
-        const box = this.getSelectionBox(el);
-        if (!box) continue;
-
-        if (
-          x < box.x - padding ||
-          x > box.x + box.width + padding ||
-          y < box.y - padding ||
-          y > box.y + box.height + padding
-        ) {
-          continue;
-        }
-
-        const midX = box.x + box.width / 2;
-        const midY = box.y + box.height / 2;
-
-        const rotation = this.getObjectRotation(el) * Math.PI / 180;
-        const transform = (px: number, py: number) => {
-          const dx = px - midX, dy = py - midY;
-          return {
-            cx: midX + dx * Math.cos(rotation) - dy * Math.sin(rotation),
-            cy: midY + dx * Math.sin(rotation) + dy * Math.cos(rotation),
-          };
-        };
-
-        const rotPoint = transform(midX, box.y - 32 / scale);
-        const rotDistSq = (x - rotPoint.cx) ** 2 + (y - rotPoint.cy) ** 2;
-        if (rotDistSq <= (8 / scale) ** 2) {
-          return { id: el.id, handle: 'rotate' };
-        }
-
-        const handles = handleAnchorsFor(box);
-
-        for (const h of handles) {
-          const pt = transform(h.x, h.y);
-          if (x >= pt.cx - h2 && x <= pt.cx + h2 && y >= pt.cy - h2 && y <= pt.cy + h2) {
-            return { id: el.id, handle: h.handle };
-          }
-        }
-      }
-
       return null;
     }
 
     // Check backwards (top-most elements first) for single element
     for (let i = this.selectedElements.length - 1; i >= 0; i--) {
       const el = this.selectedElements[i];
-      const box = this.getSelectionBox(el);
-      if (!box) continue;
-
+      const rawBox = this.getSelectionBox(el);
+      if (!rawBox) continue;
+      const box = normalizeBox(rawBox);
+      const rotationDeg = this.getObjectRotation(el);
+      const fastBounds = rotatedBoxAabb(box, rotationDeg, padding);
       if (
-        x < box.x - padding ||
-        x > box.x + box.width + padding ||
-        y < box.y - padding ||
-        y > box.y + box.height + padding
+        x < fastBounds.left ||
+        x > fastBounds.right ||
+        y < fastBounds.top ||
+        y > fastBounds.bottom
       ) {
         continue;
       }
@@ -1023,7 +1015,7 @@ export class SelectionEngine {
       const midX = box.x + box.width / 2;
       const midY = box.y + box.height / 2;
 
-      const rotation = this.getObjectRotation(el) * Math.PI / 180;
+      const rotation = rotationDeg * Math.PI / 180;
       const transform = (px: number, py: number) => {
         const dx = px - midX, dy = py - midY;
         return {
@@ -1060,15 +1052,28 @@ export class SelectionEngine {
 
     const topHit = this.hitTest(x, y);
     if (this.selectedElements.length > 1) {
-      const group = this.getCollectiveBoundingBox();
+      const group = this.getCollectiveSelectionBox() ?? this.getCollectiveBoundingBox();
       if ((!topHit || this.selectedIds.has(topHit.id)) && !shiftKey && group && x >= group.x && x <= group.x + group.width && y >= group.y && y <= group.y + group.height) {
         return true;
       }
     } else {
       for (const el of this.selectedElements) {
-        const box = this.getBoundingBox(el);
-        if ((!topHit || this.selectedIds.has(topHit.id)) && !shiftKey && box && x >= box.x && x <= box.x + box.width && y >= box.y && y <= box.y + box.height) {
-          return true;
+        const rawBox = this.getBoundingBox(el);
+        if ((!topHit || this.selectedIds.has(topHit.id)) && !shiftKey && rawBox) {
+          const nbox = normalizeBox(rawBox);
+          const cx = nbox.x + nbox.width / 2;
+          const cy = nbox.y + nbox.height / 2;
+          const angle = -this.getObjectRotation(el) * Math.PI / 180;
+          const dx = x - cx, dy = y - cy;
+          const lx = dx * Math.cos(angle) - dy * Math.sin(angle);
+          const ly = dx * Math.sin(angle) + dy * Math.cos(angle);
+          const shape = el.type === 'shape' ? this.shapeManager.getShapes().find(s => s.id === el.id) : undefined;
+          const inside = shape && isPolygonShapeType(shape.shapeType)
+            ? hitTestPolygonShape(shape, x, y, 5)
+            : shape?.shapeType === 'ellipse'
+              ? (lx / Math.max(1, nbox.width / 2)) ** 2 + (ly / Math.max(1, nbox.height / 2)) ** 2 <= 1
+              : Math.abs(lx) <= nbox.width / 2 && Math.abs(ly) <= nbox.height / 2;
+          if (inside) return true;
         }
       }
     }
@@ -1108,12 +1113,26 @@ export class SelectionEngine {
   /** Same stack as rendering: layer first, then text / shape / stroke / image. */
   hitTest(x: number, y: number): SelectedElement | null {
     const shapeHits = new Set(this.shapeManager.findShapesNearPoint(x, y, 5));
-    const contains = (item: { x: number; y: number; width: number; height?: number; rotation?: number }) => {
-      const h = item.height || 100, cx = item.x + item.width / 2, cy = item.y + h / 2;
+    const contains = (item: { x: number; y: number; width: number; height?: number; rotation?: number; shapeType?: string }) => {
+      const rawH = item.height ?? 100;
+      const x0 = Math.min(item.x, item.x + item.width), w = Math.abs(item.width);
+      const y0 = Math.min(item.y, item.y + rawH), h = Math.abs(rawH);
+      const cx = x0 + w / 2, cy = y0 + h / 2;
       const angle = -(item.rotation ?? 0) * Math.PI / 180, dx = x - cx, dy = y - cy;
-      const localX = cx + dx * Math.cos(angle) - dy * Math.sin(angle);
-      const localY = cy + dx * Math.sin(angle) + dy * Math.cos(angle);
-      return localX >= item.x && localX <= item.x + item.width && localY >= item.y && localY <= item.y + h;
+      const lx = dx * Math.cos(angle) - dy * Math.sin(angle);
+      const ly = dx * Math.sin(angle) + dy * Math.cos(angle);
+      if (item.shapeType === 'ellipse') {
+        const rx = Math.max(1, w / 2) + 5;
+        const ry = Math.max(1, h / 2) + 5;
+        return (lx / rx) ** 2 + (ly / ry) ** 2 <= 1;
+      }
+      if (item.shapeType === 'triangle') {
+        if (ly < -h / 2 - 5 || ly > h / 2 + 5) return false;
+        const t = Math.max(0, Math.min(1, (ly + h / 2) / Math.max(1, h)));
+        const slopePad = 5 * Math.hypot(1, w / (2 * Math.max(1, h)));
+        return Math.abs(lx) <= t * (w / 2) + slopePad;
+      }
+      return Math.abs(lx) <= w / 2 && Math.abs(ly) <= h / 2;
     };
 
     const layers = this.layerManager.getLayers();
@@ -1133,7 +1152,7 @@ export class SelectionEngine {
       const shapes = this.shapeManager.getShapes();
       for (let i = shapes.length - 1; i >= 0; i--) {
         const item = shapes[i];
-        if (onLayer(item) && (shapeHits.has(item.id) || (item.shapeType !== 'line' && item.shapeType !== 'arrow' && contains(item)))) {
+        if (onLayer(item) && (shapeHits.has(item.id) || (!isLinearShapeType(item.shapeType) && !isPolygonShapeType(item.shapeType) && contains(item)))) {
           return { type: 'shape', id: item.id };
         }
       }
@@ -1324,9 +1343,10 @@ export class SelectionEngine {
     }
 
     const enclosed: SelectedElement[] = [];
-    const consider = (element: SelectedElement, box: BoundingBox | null, layerId?: string) => {
+    const consider = (element: SelectedElement, rawBox: BoundingBox | null, layerId?: string) => {
       if (!this.layerManager.isEditable(layerId)) return;
-      if (!box) return;
+      if (!rawBox) return;
+      const box = normalizeBox(rawBox);
       if (box.x + box.width < loopMinX || box.x > loopMaxX || box.y + box.height < loopMinY || box.y > loopMaxY) return;
       const centerX = box.x + box.width / 2;
       const centerY = box.y + box.height / 2;
@@ -1513,9 +1533,11 @@ export class SelectionEngine {
     if (this.dragMode !== 'move') this.selectionOutline = null;
     if (this.dragMode !== 'move') {
       if (this.selectedElements.length === 1) {
-        this.originalBox = this.getBoundingBox(this.selectedElements[0]);
+        const box = this.getBoundingBox(this.selectedElements[0]);
+        this.originalBox = box && (box.width < 1 || box.height < 1) ? this.getSelectionBox(this.selectedElements[0]) : box;
       } else {
-        this.originalBox = this.getCollectiveBoundingBox();
+        const group = this.getCollectiveBoundingBox();
+        this.originalBox = group && (group.width < 1 || group.height < 1) ? this.getCollectiveSelectionBox() : group;
       }
     } else {
       this.originalBox = null;
@@ -1563,7 +1585,7 @@ export class SelectionEngine {
     // damage instead of replaying the page just to draw an identity transform.
     if (!this.currentDragTransform && x === this.dragStartX && y === this.dragStartY) return;
     // The drag repaint covers the pending pointerdown selection damage.
-    this.cancelPendingSelectionRedraw();
+    this.flushPendingSelectionRedraw();
 
     if (this.dragMode === 'move') {
       const dx = x - this.dragStartX;
@@ -1578,16 +1600,8 @@ export class SelectionEngine {
         if (object) {
           applyGroupedTranslation(object, orig, dx, dy);
         }
-        if (el.type === 'image') {
-          // Keep the DOM image overlay locked to the moving raster preview so
-          // no stale copy of the image remains at its previous position.
-          this.imageManager.previewImageOverlay?.(el.id, dx, dy);
-        }
       }
     } else if (this.originalBox) {
-      for (const el of this.selectedElements) {
-        if (el.type === 'image') this.imageManager.hideImageOverlay?.(el.id);
-      }
       const dx = x - this.dragStartX;
       const dy = y - this.dragStartY;
       const box = this.originalBox;
@@ -1707,9 +1721,7 @@ export class SelectionEngine {
   }
 
   finishDrag(x: number, y: number): boolean {
-    for (const el of this.selectedElements) {
-      if (el.type === 'image') this.imageManager.commitImageOverlay?.(el.id);
-    }
+    const oldOutlineDamage = this.getOutlineDamage();
     // Bake the committed move into the drawn region so the polygon stays
     // aligned with the content it selected. Resize/rotate already cleared it.
     if (this.dragMode === 'move' && this.selectionOutline) {
@@ -1733,24 +1745,30 @@ export class SelectionEngine {
     let damage: EraseBounds | null = null;
     let damageComplete = !isClick;
     if (!isClick) {
-      const margin = 48 / Math.max(0.05, this.getViewportScale());
-      const include = (box: BoundingBox | null | undefined) => {
-        if (!box) { damageComplete = false; return; }
-        const next = {
-          left: box.x - margin,
-          top: box.y - margin,
-          right: box.x + box.width + margin,
-          bottom: box.y + box.height + margin,
-        };
-        damage = damage ? {
-          left: Math.min(damage.left, next.left),
-          top: Math.min(damage.top, next.top),
-          right: Math.max(damage.right, next.right),
-          bottom: Math.max(damage.bottom, next.bottom),
-        } : next;
+      const margin = Math.max(48, 48 / Math.max(0.05, this.getViewportScale()));
+      const includeBounds = (next: EraseBounds | null | undefined) => {
+        if (!next) return;
+        damage = this.unionDamage(damage, next);
       };
-      for (const el of elements) include(this.originalElementBoxes.get(el.id));
-      for (const el of elements) include(this.getBoundingBox(el));
+      const include = (box: BoundingBox | null | undefined, rotationDeg = 0, extraPad = 0) => {
+        if (!box) { damageComplete = false; return; }
+        includeBounds(rotatedBoxAabb(box, rotationDeg, margin + extraPad));
+      };
+      includeBounds(oldOutlineDamage);
+      includeBounds(this.getOutlineDamage());
+      for (const el of elements) {
+        const origPos = this.originalPositions.get(el.id);
+        const origRot = el.type !== 'stroke' && origPos && typeof origPos === 'object' && !Array.isArray(origPos) ? (origPos.rotation ?? 0) : 0;
+        const stroke = el.type === 'stroke' ? this.getStroke(el.id) : undefined;
+        const strokePad = stroke ? strokeBoundsPadding(stroke) : 0;
+        include(this.originalElementBoxes.get(el.id), origRot, strokePad);
+        include(this.getBoundingBox(el), el.type === 'stroke' ? 0 : this.getObjectRotation(el), strokePad);
+        if (stroke && typeof this.drawingEngine.getStrokeBounds === 'function') {
+          const b = this.drawingEngine.getStrokeBounds(stroke);
+          includeBounds({ left: b.left - margin, top: b.top - margin, right: b.right + margin, bottom: b.bottom + margin });
+        }
+      }
+      includeBounds(this.getSelectionDamage());
     }
 
     this.isDragging = false;
@@ -1966,7 +1984,14 @@ export class SelectionEngine {
     ctx.save();
     this.viewport?.applyTransform?.(ctx);
 
-    const scale = this.getViewportScale();
+    const viewportScale = this.getViewportScale();
+    const dpr = Math.max(
+      1,
+      (this.viewport as unknown as { getDevicePixelRatio?: () => number } | undefined)?.getDevicePixelRatio?.()
+        ?? (typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1),
+    );
+    const matrix = typeof ctx.getTransform === 'function' ? ctx.getTransform() : null;
+    const scale = matrix ? Math.min(viewportScale, Math.max(0.25, Math.hypot(matrix.a, matrix.b) / dpr)) : viewportScale;
 
     ctx.strokeStyle = '#3b82f6'; // Panvas blue
     ctx.lineWidth = 1.5 / scale;
@@ -1988,8 +2013,8 @@ export class SelectionEngine {
       ctx.setLineDash([5 / scale, 5 / scale]);
     }
 
-    if (this.selectedElements.length > 1 && this.selectedElements.every(el => el.type === 'stroke')) {
-      const box = this.getCollectiveBoundingBox();
+    if (this.selectedElements.length > 1) {
+      const box = this.getCollectiveSelectionBox() ?? this.getCollectiveBoundingBox();
       if (box) {
         const frame = selectionFrameFor(box);
         if (!freeformOutline) ctx.strokeRect(frame.x, frame.y, frame.width, frame.height);
@@ -2107,6 +2132,7 @@ export class SelectionEngine {
     replace(this.shapeManager.getShapes(), order.shapes);
     replace(this.textManager.getTexts(), order.texts);
     replace(this.imageManager.getImages(), order.images);
+    this.drawingEngine.syncStrokesIndex?.();
     this.drawingEngine.redraw();
   }
 
@@ -2181,7 +2207,7 @@ export class SelectionEngine {
   private getSelectionBox(el: SelectedElement): BoundingBox | null {
     if (el.type === 'shape') {
       const shape = (typeof this.shapeManager.getShape === 'function' ? this.shapeManager.getShape(el.id) : undefined) ?? this.shapeManager.getShapes().find(s => s.id === el.id);
-      if (shape && (shape.shapeType === 'line' || shape.shapeType === 'arrow')) {
+      if (shape && isLinearShapeType(shape.shapeType)) {
         const bounds = buildLineStyleGeometry(shape).bounds;
         return { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
       }

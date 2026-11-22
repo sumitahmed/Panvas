@@ -12,7 +12,11 @@ export function useDocumentTextPresentation(ref: RefObject<HTMLElement | null>, 
     document.head.append(stylesheet);
     const update = () => {
       const rules = new Set<string>();
-      const prefix = `.dark.full-dark-view [data-document-view="${CSS.escape(scope)}"]`;
+      const escScope = CSS.escape(scope);
+      const prefixes = [
+        `.dark.full-dark-view [data-document-view="${escScope}"]`,
+        `[data-panvas-dark-paper="true"][data-document-view="${escScope}"]`,
+      ];
       for (const element of [root, ...root.querySelectorAll<HTMLElement>('[style]')]) {
         if (element.tagName === 'IMG' || element.tagName === 'VIDEO') continue;
         for (const property of ['color', 'background-color']) {
@@ -20,7 +24,9 @@ export function useDocumentTextPresentation(ref: RefObject<HTMLElement | null>, 
           if (!original || original === 'transparent') continue;
           const value = CSS.escape(`${property}: ${original}`);
           const display = property === 'color' ? fullDarkInkColor(original) : fullDarkSurfaceColor(original, true);
-          rules.add(`${prefix} [style^="${value}"],${prefix} [style*="; ${value}"]{${property}:${display}!important}`);
+          for (const prefix of prefixes) {
+            rules.add(`${prefix} [style^="${value}"],${prefix} [style*="; ${value}"]{${property}:${display}!important}`);
+          }
         }
       }
       const css = [...rules].join('\n');

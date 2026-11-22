@@ -2,19 +2,22 @@
 // Panvas — Notebook Tool Properties Panel
 // ============================================
 
-import React, { useState, useRef } from 'react';
+import React, { Suspense, lazy, useState, useRef, useEffect } from 'react';
 import type { ViewportManager } from './engine/ViewportManager';
-import { 
-  type PageOrientationOption, 
-  type PageSizeOption, 
+import {
+  type PageOrientationOption,
+  type PageSizeOption,
   type PageMarginOption,
   useNotebookSettingsStore
 } from '@/stores/notebookSettingsStore';
 import type { PageProperties, PageTemplate } from './engine/drawingTypes';
 import { Palette, CheckCheck, LayoutGrid, AlertCircle, X, ChevronDown } from 'lucide-react';
 import { TEMPLATE_CATEGORIES, TEMPLATE_REGISTRY } from './templates/TemplateRegistry.tsx';
-import { TemplateGalleryModal } from './templates/TemplateGalleryModal';
 import { useWorkspaceStore } from '@/stores/workspaceStore';
+
+const TemplateGalleryModal = lazy(() =>
+  import('./templates/TemplateGalleryModal').then((module) => ({ default: module.TemplateGalleryModal })),
+);
 import { useUIStore } from '@/stores/uiStore';
 import type { NotebookPropertyBatchSnapshot } from '@/types/notebook';
 import { WorkspaceViewInspector } from '@/components/workspace/WorkspaceViewControls';
@@ -38,6 +41,17 @@ interface NotebookToolPropertiesPanelProps {
    * (container-relative), enabling anchor-based scroll correction.
    */
   onZoom?: (factor: number) => void;
+}
+
+function ZoomPercentReadout({ viewportEngine, fallbackZoom }: { viewportEngine: ViewportManager; fallbackZoom: number }) {
+  const [scale, setScale] = useState(() => viewportEngine.getState().scale || fallbackZoom);
+  useEffect(() => {
+    setScale(viewportEngine.getState().scale || fallbackZoom);
+    return viewportEngine.subscribe(state => {
+      setScale(prev => (prev === state.scale ? prev : state.scale));
+    });
+  }, [viewportEngine, fallbackZoom]);
+  return <span className="text-panvas-text-secondary">{Math.round(scale * 100)}%</span>;
 }
 
 const colorSwatches: { label: string; color: string }[] = [
@@ -64,10 +78,10 @@ const lineColorSwatches: { label: string; color: string }[] = [
 const pageSizes: PageSizeOption[] = ['A3', 'A4', 'A5', 'Letter', 'Infinite'];
 const marginsOptions: PageMarginOption[] = ['No Margin', 'Narrow', 'Normal', 'Wide'];
 
-export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelProps> = ({ 
-  viewportEngine, 
-  zoom, 
-  properties, 
+export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelProps> = ({
+  viewportEngine,
+  zoom,
+  properties,
   onUpdateProperties,
   onConvertText,
   canConvertText,
@@ -175,16 +189,16 @@ export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelPr
         <div className="border-b border-panvas-border-subtle p-4">
           <WorkspaceViewInspector />
         </div>
-        
+
         <div className="p-4 space-y-5 text-xs">
           {/* Zoom */}
           <div>
             <div className="mb-2 flex items-center justify-between">
               <span className="font-medium text-panvas-text-primary">Zoom</span>
-              <span className="text-panvas-text-secondary">{Math.round(zoom * 100)}%</span>
+              <ZoomPercentReadout viewportEngine={viewportEngine} fallbackZoom={zoom} />
             </div>
             <div className="flex gap-2">
-              <button 
+              <button
                 onClick={() => {
                   if (onZoom) {
                     onZoom(0.9);
@@ -196,11 +210,11 @@ export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelPr
               >
                 Out
               </button>
-              <button 
+              <button
                 onClick={() => {
                   if (onZoom) {
                     // Reach exactly 100% while still anchoring around the viewport center.
-                    onZoom(1 / zoom);
+                    onZoom(1 / (viewportEngine.getState().scale || 1));
                   } else {
                     viewportEngine.reset();
                   }
@@ -209,7 +223,7 @@ export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelPr
               >
                 100%
               </button>
-              <button 
+              <button
                 onClick={() => {
                   if (onZoom) {
                     onZoom(1.1);
@@ -291,8 +305,8 @@ export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelPr
                   key={item.color}
                   onClick={() => handleColorSelect(item.color)}
                   className={`h-6 w-6 rounded-full border transition-transform hover:scale-110 focus-ring ${
-                    properties.paperColor.toLowerCase() === item.color.toLowerCase() 
-                      ? 'ring-2 ring-panvas-text-primary ring-offset-2 ring-offset-panvas-bg-primary border-transparent' 
+                    properties.paperColor.toLowerCase() === item.color.toLowerCase()
+                      ? 'ring-2 ring-panvas-text-primary ring-offset-2 ring-offset-panvas-bg-primary border-transparent'
                       : 'border-panvas-border-default'
                   }`}
                   style={{ backgroundColor: item.color }}
@@ -302,8 +316,8 @@ export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelPr
               ))}
               <label className="relative flex h-6 w-6 cursor-pointer items-center justify-center rounded-full border border-panvas-border-default bg-panvas-bg-secondary transition-transform hover:scale-110 hover:bg-panvas-bg-hover focus-ring" title="Custom color picker">
                 <Palette size={12} className="text-panvas-text-secondary" />
-                <input 
-                  type="color" 
+                <input
+                  type="color"
                   value={properties.paperColor}
                   onChange={(e) => {
                     handleColorSelect(e.target.value);
@@ -321,8 +335,8 @@ export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelPr
                     key={`recent-${color}`}
                     onClick={() => handleColorSelect(color)}
                     className={`h-5 w-5 rounded-full border transition-transform hover:scale-110 focus-ring ${
-                      properties.paperColor.toLowerCase() === color.toLowerCase() 
-                        ? 'ring-2 ring-panvas-text-primary ring-offset-1 ring-offset-panvas-bg-primary border-transparent' 
+                      properties.paperColor.toLowerCase() === color.toLowerCase()
+                        ? 'ring-2 ring-panvas-text-primary ring-offset-1 ring-offset-panvas-bg-primary border-transparent'
                         : 'border-panvas-border-default'
                     }`}
                     style={{ backgroundColor: color }}
@@ -343,8 +357,8 @@ export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelPr
             </div>
 
             <div className="flex gap-1.5 mb-2">
-              <select 
-                value={properties.template} 
+              <select
+                value={properties.template}
                 onChange={(e) => handleTemplateSelect(e.target.value as PageTemplate)}
                 className="flex-1 min-w-0 rounded-md border border-panvas-border-default bg-panvas-bg-secondary px-2.5 py-1.5 text-xs text-panvas-text-primary focus-ring"
               >
@@ -438,7 +452,7 @@ export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelPr
               )}
             </div>
             <div className="flex gap-2">
-              <button 
+              <button
                 disabled={properties.pageSize === 'Infinite'}
                 onClick={() => handleUpdate({ orientation: 'portrait' })}
                 className={`flex-1 rounded-md border px-2 py-1.5 text-xs transition-colors focus-ring ${
@@ -449,7 +463,7 @@ export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelPr
               >
                 Portrait
               </button>
-              <button 
+              <button
                 disabled={properties.pageSize === 'Infinite'}
                 onClick={() => handleUpdate({ orientation: 'landscape' })}
                 className={`flex-1 rounded-md border px-2 py-1.5 text-xs transition-colors focus-ring ${
@@ -476,9 +490,9 @@ export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelPr
                 <span className="text-[10px] font-medium text-panvas-accent-blue bg-panvas-accent-blue/10 px-1.5 py-0.5 rounded">Global</span>
               )}
             </div>
-            <select 
+            <select
               aria-label="Page Size"
-              value={properties.pageSize} 
+              value={properties.pageSize}
               onChange={(e) => handleUpdate({ pageSize: e.target.value as PageSizeOption })}
               className="w-full rounded-md border border-panvas-border-default bg-panvas-bg-secondary px-2.5 py-1.5 text-xs text-panvas-text-primary focus-ring"
             >
@@ -502,8 +516,8 @@ export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelPr
                 <span className="text-[10px] font-medium text-panvas-accent-blue bg-panvas-accent-blue/10 px-1.5 py-0.5 rounded">Global</span>
               )}
             </div>
-            <select 
-              value={properties.margins} 
+            <select
+              value={properties.margins}
               onChange={(e) => handleUpdate({ margins: e.target.value as PageMarginOption })}
               className="w-full rounded-md border border-panvas-border-default bg-panvas-bg-secondary px-2.5 py-1.5 text-xs text-panvas-text-primary focus-ring"
             >
@@ -515,14 +529,18 @@ export const NotebookToolPropertiesPanel: React.FC<NotebookToolPropertiesPanelPr
       </aside>
 
       {/* Visual Template Gallery Modal */}
-      <TemplateGalleryModal
-        isOpen={isGalleryOpen}
-        onClose={() => setIsGalleryOpen(false)}
-        currentTemplate={properties.template}
-        properties={properties}
-        onSelectTemplate={(t) => handleTemplateSelect(t)}
-        onApplyToAllPages={(t) => executeBatchApply({ template: t })}
-      />
+      {isGalleryOpen && (
+        <Suspense fallback={null}>
+          <TemplateGalleryModal
+            isOpen={isGalleryOpen}
+            onClose={() => setIsGalleryOpen(false)}
+            currentTemplate={properties.template}
+            properties={properties}
+            onSelectTemplate={(t) => handleTemplateSelect(t)}
+            onApplyToAllPages={(t) => executeBatchApply({ template: t })}
+          />
+        </Suspense>
+      )}
 
       <ConfirmDialog
         open={isScopeConfirmationOpen}

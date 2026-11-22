@@ -255,7 +255,8 @@ try {
     assert.ok(zoomAfter > zoomBefore * 1.4, 'pinch must actually zoom');
     const zoom = await page.evaluate(() => window.performanceReport());
     const activeRasterAfterPinch = await page.evaluate(() => {
-      const canvas = window.navigationEngine().drawing.getCanvasElement();
+      const drawing = window.navigationEngine().drawing;
+      const canvas = drawing.getActiveLayerCanvasElement?.() ?? drawing.getCanvasElement();
       return { width: canvas.width, height: canvas.height, cssWidth: canvas.style.width, cssHeight: canvas.style.height };
     });
     // Continue panning after pinch, including reversals, to catch accumulating work.

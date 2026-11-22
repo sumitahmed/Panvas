@@ -4,6 +4,7 @@ import { useLocation } from 'wouter';
 import { useWorkspaceStore } from '@/stores/workspaceStore';
 import { useBookmarkStore } from '@/stores/bookmarkStore';
 import { useUIStore } from '@/stores/uiStore';
+import { useShallow } from 'zustand/react/shallow';
 import type { Notebook, NotebookPage, NotebookSection } from '@/types/notebook';
 import type { CanvasFile, Folder as WorkspaceFolder } from '@/types/workspace';
 import { createNotebookExportTarget, createPageExportTarget, createSectionExportTarget } from '@/services/pdf/notebookExportTargets';
@@ -22,14 +23,28 @@ export function getReorderedIds(items: any[], draggedId: string, targetId: strin
   return filtered.map(i => i.id);
 }
 
-export function WorkspaceTree({ workspaceId }: { workspaceId: string }) {
-  const { folders, notebooks, canvasFiles, moveCanvas, moveNotebook, moveFolder, reorderItems } = useWorkspaceStore();
+export const WorkspaceTree = React.memo(function WorkspaceTree({ workspaceId }: { workspaceId: string }) {
+  const { folders, notebooks, canvasFiles } = useWorkspaceStore(useShallow(state => ({
+    folders: state.folders,
+    notebooks: state.notebooks,
+    canvasFiles: state.canvasFiles,
+  })));
+  const { moveCanvas, moveNotebook, moveFolder, reorderItems } = useWorkspaceStore.getState();
   const [isDragOverRoot, setIsDragOverRoot] = React.useState(false);
   const inlineCreate = useUIStore(state => state.inlineCreate);
 
-  const rootFolders = folders.filter(folder => folder.workspaceId === workspaceId && folder.parentId === null);
-  const rootNotebooks = notebooks.filter(notebook => notebook.workspaceId === workspaceId && notebook.folderId === null);
-  const rootCanvases = canvasFiles.filter(canvas => canvas.workspaceId === workspaceId && canvas.folderId === null && !canvas.notebookId && !canvas.sectionId);
+  const rootFolders = React.useMemo(
+    () => folders.filter(folder => folder.workspaceId === workspaceId && folder.parentId === null),
+    [folders, workspaceId],
+  );
+  const rootNotebooks = React.useMemo(
+    () => notebooks.filter(notebook => notebook.workspaceId === workspaceId && notebook.folderId === null),
+    [notebooks, workspaceId],
+  );
+  const rootCanvases = React.useMemo(
+    () => canvasFiles.filter(canvas => canvas.workspaceId === workspaceId && canvas.folderId === null && !canvas.notebookId && !canvas.sectionId),
+    [canvasFiles, workspaceId],
+  );
 
   const handleRootDrop = async (event: React.DragEvent) => {
     event.preventDefault();
@@ -69,20 +84,28 @@ export function WorkspaceTree({ workspaceId }: { workspaceId: string }) {
       )}
     </div>
   );
-}
+});
 
-function FolderNode({ folder, depth }: { folder: WorkspaceFolder; depth: number }) {
-  const { folders, notebooks, canvasFiles, toggleFolderExpanded, moveCanvas, renameFolder, moveNotebook, moveFolder, reorderItems } = useWorkspaceStore();
-  const { openContextMenu, renamingId, setRenamingId } = useUIStore();
+const FolderNode = React.memo(function FolderNode({ folder, depth }: { folder: WorkspaceFolder; depth: number }) {
+  const { folders, notebooks, canvasFiles } = useWorkspaceStore(useShallow(state => ({
+    folders: state.folders,
+    notebooks: state.notebooks,
+    canvasFiles: state.canvasFiles,
+  })));
+  const { toggleFolderExpanded, moveCanvas, renameFolder, moveNotebook, moveFolder, reorderItems } = useWorkspaceStore.getState();
+  const isRenaming = useUIStore(state => state.renamingId === folder.id);
+  const inlineCreate = useUIStore(state => state.inlineCreate);
+  const { openContextMenu, setRenamingId } = useUIStore.getState();
   const [value, setValue] = React.useState(folder.name);
-  const isRenaming = renamingId === folder.id;
   const save = async () => { if (value.trim() && value !== folder.name) await renameFolder(folder.id, value.trim()); setRenamingId(null); };
 
-  const childFolders = folders.filter(item => item.parentId === folder.id);
-  const childNotebooks = notebooks.filter(item => item.folderId === folder.id);
-  const childCanvases = canvasFiles.filter(item => item.folderId === folder.id && !item.notebookId && !item.sectionId);
+  const childFolders = React.useMemo(() => folders.filter(item => item.parentId === folder.id), [folders, folder.id]);
+  const childNotebooks = React.useMemo(() => notebooks.filter(item => item.folderId === folder.id), [notebooks, folder.id]);
+  const childCanvases = React.useMemo(
+    () => canvasFiles.filter(item => item.folderId === folder.id && !item.notebookId && !item.sectionId),
+    [canvasFiles, folder.id],
+  );
   const isExpanded = folder.isExpanded !== false;
-  const inlineCreate = useUIStore(state => state.inlineCreate);
 
   const handleDropItem = async (data: any, position: DropPosition) => {
     if (position === 'inside') {
@@ -128,20 +151,41 @@ function FolderNode({ folder, depth }: { folder: WorkspaceFolder; depth: number 
       </Collapsible>
     </div>
   );
-}
+});
 
-function NotebookNode({ notebook, depth }: { notebook: Notebook; depth: number }) {
+const NotebookNode = React.memo(function NotebookNode({ notebook, depth }: { notebook: Notebook; depth: number }) {
   const [, navigate] = useLocation();
-  const { notebooks, notebookSections, notebookPages, canvasFiles, toggleNotebookExpanded, setActiveNotebook, renameNotebook, activeNotebookId, moveNotebookSection, moveCanvas, reorderItems, moveNotebook } = useWorkspaceStore();
-  const { openContextMenu, renamingId, setRenamingId } = useUIStore();
-  const [value, setValue] = React.useState(notebook.name);
-  const isRenaming = renamingId === notebook.id;
-  const isActive = activeNotebookId === notebook.id;
+  const { notebooks, notebookSections, notebookPages, canvasFiles, isActive } = useWorkspaceStore(useShallow(state => ({
+    notebooks: state.notebooks,
+    notebookSections: state.notebookSections,
+    notebookPages: state.notebookPages,
+    canvasFiles: state.canvasFiles,
+    isActive: state.activeNotebookId === notebook.id,
+  })));
+  const { toggleNotebookExpanded, setActiveNotebook, renameNotebook, moveNotebookSection, moveCanvas, reorderItems, moveNotebook } = useWorkspaceStore.getState();
+  const isRenaming = useUIStore(state => state.renamingId === notebook.id);
   const inlineCreate = useUIStore(state => state.inlineCreate);
+  const { openContextMenu, setRenamingId } = useUIStore.getState();
+  const [value, setValue] = React.useState(notebook.name);
   const save = async () => { if (value.trim() && value !== notebook.name) await renameNotebook(notebook.id, value.trim()); setRenamingId(null); };
-  
-  const sections = notebookSections.filter(section => section.notebookId === notebook.id);
-  const childCanvases = canvasFiles.filter(canvas => canvas.notebookId === notebook.id && !canvas.sectionId);
+
+  const sections = React.useMemo(
+    () => notebookSections.filter(section => section.notebookId === notebook.id),
+    [notebookSections, notebook.id],
+  );
+  const childCanvases = React.useMemo(
+    () => canvasFiles.filter(canvas => canvas.notebookId === notebook.id && !canvas.sectionId),
+    [canvasFiles, notebook.id],
+  );
+  const pagesBySection = React.useMemo(() => {
+    const map = new Map<string, NotebookPage[]>();
+    for (const section of sections) map.set(section.id, []);
+    for (const page of notebookPages) {
+      const list = map.get(page.sectionId);
+      if (list) list.push(page);
+    }
+    return map;
+  }, [sections, notebookPages]);
 
   const handleNotebookClick = async () => {
     // Last-opened writes and tree expansion share native workspace metadata.
@@ -200,27 +244,35 @@ function NotebookNode({ notebook, depth }: { notebook: Notebook; depth: number }
         trailing={notebook.isPinned ? <Star size={12} className="text-panvas-accent-amber fill-panvas-accent-amber" /> : undefined}
       />
       <Collapsible id={`tree-children-${notebook.id}`} depth={depth} open={notebook.isExpanded || (inlineCreate?.parentType === 'notebook' && inlineCreate.parentId === notebook.id)}>
-        {sections.map(section => <SectionNode key={section.id} section={section} pages={notebookPages.filter(page => page.sectionId === section.id)} depth={depth + 1} />)}
+        {sections.map(section => <SectionNode key={section.id} section={section} pages={pagesBySection.get(section.id) ?? []} depth={depth + 1} />)}
         {childCanvases.map(canvas => <CanvasNode key={canvas.id} canvas={canvas} depth={depth + 1} />)}
         {inlineCreate?.type === 'canvas' && inlineCreate.parentType === 'notebook' && inlineCreate.parentId === notebook.id && <InlineCreateRow type="canvas" depth={depth + 1} />}
         {sections.length === 0 && childCanvases.length === 0 && !(inlineCreate?.parentType === 'notebook' && inlineCreate.parentId === notebook.id) && <TreeEmptyState depth={depth + 1} label="No items" />}
       </Collapsible>
     </div>
   );
-}
+});
 
-function SectionNode({ section, pages, depth }: { section: NotebookSection; pages: NotebookPage[]; depth: number }) {
+const SectionNode = React.memo(function SectionNode({ section, pages, depth }: { section: NotebookSection; pages: NotebookPage[]; depth: number }) {
   const [, navigate] = useLocation();
-  const { notebooks, notebookSections, notebookPages, canvasFiles, toggleNotebookSectionExpanded, setActiveNotebookSection, renameNotebookSection, activeNotebookSectionId, moveNotebookPage, moveCanvas, reorderItems, moveNotebookSection } = useWorkspaceStore();
-  const { openContextMenu, renamingId, setRenamingId } = useUIStore();
-  const [value, setValue] = React.useState(section.name);
-  const isRenaming = renamingId === section.id;
-  const isActive = activeNotebookSectionId === section.id;
+  const { notebooks, notebookSections, canvasFiles, isActive } = useWorkspaceStore(useShallow(state => ({
+    notebooks: state.notebooks,
+    notebookSections: state.notebookSections,
+    canvasFiles: state.canvasFiles,
+    isActive: state.activeNotebookSectionId === section.id,
+  })));
+  const { toggleNotebookSectionExpanded, setActiveNotebookSection, renameNotebookSection, moveNotebookPage, moveCanvas, reorderItems, moveNotebookSection } = useWorkspaceStore.getState();
+  const isRenaming = useUIStore(state => state.renamingId === section.id);
   const inlineCreate = useUIStore(state => state.inlineCreate);
+  const { openContextMenu, setRenamingId } = useUIStore.getState();
+  const [value, setValue] = React.useState(section.name);
   const save = async () => { if (value.trim() && value !== section.name) await renameNotebookSection(section.id, value.trim()); setRenamingId(null); };
 
   const workspaceId = notebooks.find(n => n.id === section.notebookId)?.workspaceId || '';
-  const childCanvases = canvasFiles.filter(canvas => canvas.sectionId === section.id);
+  const childCanvases = React.useMemo(
+    () => canvasFiles.filter(canvas => canvas.sectionId === section.id),
+    [canvasFiles, section.id],
+  );
 
   const handleSectionClick = async () => {
     await setActiveNotebookSection(section.id);
@@ -236,7 +288,6 @@ function SectionNode({ section, pages, depth }: { section: NotebookSection; page
     if (position === 'inside') {
       if (data.type === 'page') await moveNotebookPage(data.id, workspaceId, section.id);
       else if (data.type === 'canvas') {
-        const notebook = notebooks.find(n => n.id === section.notebookId);
         await moveCanvas(data.id, workspaceId, null, null, section.id); // For section canvases, Notebook ancestry is derived
       }
     } else {
@@ -289,7 +340,7 @@ function SectionNode({ section, pages, depth }: { section: NotebookSection; page
       </Collapsible>
     </div>
   );
-}
+});
 
 const PageNode = React.memo(function PageNode({ page, depth }: { page: NotebookPage; depth: number }) {
   const [, navigate] = useLocation();
@@ -387,10 +438,11 @@ const CanvasNode = React.memo(function CanvasNode({ canvas, depth }: { canvas: C
   );
 });
 
-function InlineCreateRow({ type, depth, sectionId }: { type: 'page' | 'canvas'; depth: number; sectionId?: string }) {
+const InlineCreateRow = React.memo(function InlineCreateRow({ type, depth, sectionId }: { type: 'page' | 'canvas'; depth: number; sectionId?: string }) {
   const [, navigate] = useLocation();
-  const { createNotebookPage, createCanvas, setActivePage, setActiveCanvas } = useWorkspaceStore();
-  const { inlineCreate, closeInlineCreate, showToast } = useUIStore();
+  const { createNotebookPage, createCanvas, setActivePage, setActiveCanvas } = useWorkspaceStore.getState();
+  const inlineCreate = useUIStore(state => state.inlineCreate);
+  const { closeInlineCreate, showToast } = useUIStore.getState();
   const [value, setValue] = React.useState(type === 'page' ? 'New page' : 'New canvas');
   const inputRef = React.useRef<HTMLInputElement>(null);
   const committingRef = React.useRef(false);
@@ -430,7 +482,7 @@ function InlineCreateRow({ type, depth, sectionId }: { type: 'page' | 'canvas'; 
       if (event.key === 'Escape') { event.preventDefault(); closeInlineCreate(); }
     }} />
   </div>;
-}
+});
 
 function TreeRow({ itemId, groupId, name, depth, label, icon, expanded, active = false, ancestor = false, onClick, onToggle, onContextMenu, trailing, badge, draggable, onDragStart, onDropItem, acceptsDropInside = false }: { itemId: string; groupId?: string; name: string; depth: number; label: React.ReactNode; icon: React.ReactNode; expanded?: boolean; active?: boolean; ancestor?: boolean; onClick?: () => void; onToggle?: () => void; onContextMenu?: (event: React.MouseEvent) => void; trailing?: React.ReactNode; badge?: number; draggable?: boolean; onDragStart?: (event: React.DragEvent) => void; onDropItem?: (data: any | null, position: DropPosition, files?: FileList) => void; acceptsDropInside?: boolean }) {
   const activate = () => onClick?.();

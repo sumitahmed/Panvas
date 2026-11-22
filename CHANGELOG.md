@@ -2,6 +2,39 @@
 
 All notable Panvas changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.1.16] - 2026-11-22
+
+### Added
+
+- Offline Handwriting-to-Math recognition powered by local TexTeller3-ONNX executed in an isolated Electron utilityProcess (mathOcrWorker.mjs), featuring KaTeX live preview, 5 symbol category insertion tabs (Basic, Calculus, Linear Algebra, Greek, Logic/Sets), structure-aware multi-line segmentation with integral limit attachment and orphan merging, and graceful offline fallback.
+- Multi-line Handwriting-to-Text conversion featuring reading-order stroke sorting, scrollable editable review bottom bar, in-place text block placement across layouts, and single-step undo/redo.
+- 11 expanded note-taking shapes in the tool palette and draw-and-hold-to-snap recognition: straight line, single arrow, double arrow, rectangle, square, rounded rectangle, ellipse/circle, triangle, diamond (rhombus), 5-point star, pentagon, and hexagon, with zero false snaps on cursive handwriting.
+- Hole-punched 1x overview backdrop canvas beneath the 2D high-DPI viewport window, eliminating blank canvas flashes during rapid zoom-outs from 800%.
+- Scalable asynchronous ImageAssetCache with multi-tier mipmaps (MipTier.FULL, MipTier.HALF, MipTier.THUMB) and asynchronous ImageBitmap decoding, preventing main-thread UI jank on image-dense pages.
+- Dirty-epoch tracking (markCloudSyncWorkspaceDirty) enabling O(1) skipping of unchanged workspaces during background cloud synchronization cycles.
+
+### Fixed
+
+- Background Cloud Sync execution lag: hard-suspended cloud sync operations during active pen/drawing contact (+2.5 s cooldown) and viewport scrolling/zooming (+1 s cooldown), with 3 ms cooperative time-slicing and read-only entity stat checks to preserve 60-120 FPS interaction.
+- Lasso selection visuals and translation afterimages (Bug 1): unified selection boundary rendering, correct stroke translation during drag, and zero ghosting.
+- Scribble recognition and erase gestures (Bug 2): normalized frequency and amplitude detection across zoom levels, preventing accidental stroke erasure during handwriting.
+- Shape hold-to-snap recognition (Bug 3): eliminated false snaps on cursive loops and handwriting strokes.
+- Highlighter and eraser layer compositing (Bug 4): corrected DPR scaling, accurate capsule hit-testing, and proper blend mode ordering.
+- Zoom instability and Research Space panning jumps (Bug 5): stabilized coordinate mapping and scroll boundaries across high zoom levels.
+- Image rendering ink-layer priority and single-representation ghosting: pasted and imported images remain reliably below ink strokes, and preview dragging does not duplicate image instances.
+- Document layout multi-sheet Apply: clicking Apply in Convert to Text or Convert to Math now places text/math in-place across multi-sheet documents (Sheet 2..N) without vanishing or snapping to Sheet 1.
+- Dark paper contrast: mapped high-contrast text and KaTeX font rendering (#dce3eb) for readability on dark backgrounds in Document and Freeform modes.
+- Removed persistent idle blue outline box around applied Text and Math objects in both Document and Freeform layouts.
+- Electron custom titlebar window dragging behavior.
+- Paper color switch redraw: immediately invalidates and repaints rendered surfaces upon background color changes.
+
+### Performance
+
+- Reduced Electron idle and active RAM consumption by lazily loading fonts on demand, rendering lightweight static previews for idle text and math blocks, and eliminating React re-renders during active pen strokes.
+- 800% zoom rendering delivering 1.000x native sharpness with bounded 2D viewport windowing.
+- Multi-page virtualization and LRU canvas surface eviction for smooth 60 FPS scrolling on large notebooks.
+- Capped ONNX Runtime CPU threads (intraOpNumThreads <= 4, interOpNumThreads = 1) in mathOcrWorker and reduced worker idle termination timeout to 90 seconds.
+
 ## [0.1.15] - 2026-11-01
 
 - Fixed Google Drive Cloud Sync conflict resolution: resolving a workspace conflict with "Use this device" or "Use Google Drive" now deterministically converges local and remote manifests, clearing review items and restoring the workspace to healthy synced state.

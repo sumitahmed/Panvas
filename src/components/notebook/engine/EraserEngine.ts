@@ -31,7 +31,7 @@ export class EraserEngine {
 
   present(): void {
     if (this.fullPresentation || !this.dirty) this.drawingEngine.redraw();
-    else this.drawingEngine.redraw(this.dirty, this.getBounds);
+    else this.drawingEngine.redraw(this.dirty);
     this.dirty = null;
     this.fullPresentation = false;
   }
@@ -84,6 +84,7 @@ export class EraserEngine {
     const index = strokes.findIndex(candidate => candidate.id === stroke.id);
     // Keep object order: translucent overlaps must not change after an erase.
     if (index >= 0) strokes.splice(index, 1, ...(next ? [next] : []));
+    this.drawingEngine.syncStrokesIndex?.();
     return true;
   }
 
@@ -108,6 +109,7 @@ export class EraserEngine {
     this.applyCut(stroke, replacements[0] ?? null);
     replacements.slice(1).forEach(next => this.changes.set(next.id, { before: null, after: next }));
     if (replacements.length > 1) strokes.splice(index + 1, 0, ...replacements.slice(1));
+    this.drawingEngine.syncStrokesIndex?.();
     return true;
   }
 
@@ -130,7 +132,10 @@ export class EraserEngine {
     const layers = this.drawingEngine.getLayerManager?.();
     const sweepBounds = { left: Math.min(start.x,end.x)-radius, right: Math.max(start.x,end.x)+radius,
       top: Math.min(start.y,end.y)-radius, bottom: Math.max(start.y,end.y)+radius };
-    for (const stroke of [...this.drawingEngine.getStrokes()]) {
+    const candidateStrokes = this.drawingEngine.queryStrokesInBounds
+      ? [...this.drawingEngine.queryStrokesInBounds(sweepBounds)]
+      : [...this.drawingEngine.getStrokes()];
+    for (const stroke of candidateStrokes) {
       if (layers && !layers.isEditable(stroke.layerId)) continue;
       if (mode === 'highlighter' && stroke.tool !== 'highlighter') continue;
       if (this.rulerProtected.has(stroke.id)) continue;
@@ -217,6 +222,7 @@ export class EraserEngine {
       }
       const positions = redo ? finalOrder : order;
       strokes.sort((a, b) => (positions.get(a.id) ?? Infinity) - (positions.get(b.id) ?? Infinity));
+      this.drawingEngine.syncStrokesIndex?.();
       if (redo) this.shapeManager?.removeShapes(new Set(shapes.map(shape => shape.id)));
       else shapes.forEach(shape => this.shapeManager?.addShape(structuredClone(shape)));
       this.drawingEngine.redraw();

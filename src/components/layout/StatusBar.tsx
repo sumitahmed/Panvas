@@ -13,8 +13,8 @@ import { getBrowserStorageDurabilityState, subscribeBrowserStorageDurability } f
 import { version as appVersion } from '../../../package.json';
 
 export function StatusBar() {
-  const { saveStatus } = useCanvasStore();
-  const { activeCanvasId } = useWorkspaceStore();
+  const saveStatus = useCanvasStore(state => state.saveStatus);
+  const activeCanvasId = useWorkspaceStore(state => state.activeCanvasId);
   const cloudStatus = useCloudSyncStore(state => state.statusByProvider.googledrive);
   const cloudConnection = useCloudSyncStore(state => state.connectionByProvider.googledrive);
   const cloudError = useCloudSyncStore(state => state.lastError);

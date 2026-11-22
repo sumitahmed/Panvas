@@ -82,6 +82,7 @@ contextBridge.exposeInMainWorld('panvas', {
     getPdf: (id: string) => ipcRenderer.invoke('binary:getPdf', id) as Promise<{ id: string; fileName: string; createdAt: number; data: ArrayBuffer } | null>,
     storeImage: (id: string, fileName: string, mimeType: string, data: ArrayBuffer) => ipcRenderer.invoke('binary:storeImage', id, fileName, mimeType, data),
     getImage: (id: string) => ipcRenderer.invoke('binary:getImage', id) as Promise<{ id: string; fileName: string; mimeType: string; createdAt: number; data: ArrayBuffer } | null>,
+    deleteImage: (id: string) => ipcRenderer.invoke('binary:deleteImage', id),
     storeAudio: (id: string, fileName: string, mimeType: string, data: ArrayBuffer) => ipcRenderer.invoke('binary:storeAudio', id, fileName, mimeType, data),
     getAudio: (id: string) => ipcRenderer.invoke('binary:getAudio', id) as Promise<{ id: string; fileName: string; mimeType: string; createdAt: number; data: ArrayBuffer } | null>,
     deleteAudio: (id: string) => ipcRenderer.invoke('binary:deleteAudio', id),
@@ -148,6 +149,22 @@ contextBridge.exposeInMainWorld('panvas', {
       { success: true } | { success: false; errorCode: import('../src/services/cloudsync/errors').CloudErrorCode; diagnostic: import('../src/services/cloudsync/types').SafeCloudDiagnostic }
     >,
     listPageDrawingRecords: (workspaceId: string) => ipcRenderer.invoke('cloudsync:listPageDrawingRecords', workspaceId) as Promise<Array<{ id: string; notebookId: string; ownerPageId: string }>>,
+    getWorkspaceEntityStats: (workspaceId: string) => ipcRenderer.invoke('cloudsync:getWorkspaceEntityStats', workspaceId) as Promise<Record<string, { mtimeMs: number; size: number }>>,
+    statBinaryAssets: (refs: Array<{ kind: 'pdf' | 'image' | 'audio'; id: string }>) => ipcRenderer.invoke('cloudsync:statBinaryAssets', refs) as Promise<Record<string, { mtimeMs: number; size: number }>>,
     logDiagnostic: (diagnostic: import('../src/services/cloudsync/types').SafeCloudDiagnostic) => ipcRenderer.send('cloudsync:diagnostic', diagnostic),
+  },
+  mathOcr: {
+    getStatus: () => ipcRenderer.invoke('mathOcr:getStatus'),
+    downloadModel: () => ipcRenderer.invoke('mathOcr:downloadModel'),
+    recognizeImage: (pngBytes: Uint8Array) => ipcRenderer.invoke('mathOcr:recognizeImage', pngBytes),
+    cancel: () => ipcRenderer.invoke('mathOcr:cancel'),
+    removeModel: () => ipcRenderer.invoke('mathOcr:removeModel'),
+    onProgress: (listener: (progress: { phase: string; percent: number; downloadedBytes: number; totalBytes: number; file?: string }) => void) => {
+      const wrapped = (_event: unknown, payload: any) => listener(payload);
+      ipcRenderer.on('mathOcr:progress', wrapped);
+      return () => {
+        ipcRenderer.removeListener('mathOcr:progress', wrapped);
+      };
+    },
   },
 });

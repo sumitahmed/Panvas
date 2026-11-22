@@ -186,7 +186,7 @@ test('shared interaction handoff preserves page-owned visual and ownership guard
   assert.match(pageView, /data-scene-owner-page-id=\{sceneOwnerPageId\}/);
   assert.match(pageView, /visibility: liveSceneReady \? 'visible' : 'hidden'/);
   assert.match(pageView, /const liveSceneReady = isFocused && sceneReady/);
-  assert.match(pageView, /\{liveSceneReady && layeredDrawing && orderedLayers\.map/);
+  assert.match(pageView, /\{liveSceneReady && liveLayers\.map/);
   assert.match(pageView, /\{liveSceneReady && liveTextObjects\.filter/);
   assert.match(pageView, /if \(!liveSceneReady/);
   assert.match(pageView, /getCanvasElement\(\) === canvas/);

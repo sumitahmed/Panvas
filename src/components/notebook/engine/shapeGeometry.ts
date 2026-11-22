@@ -1,4 +1,4 @@
-import type { ShapeType } from './drawingTypes.ts';
+import { isLinearShapeType, type ShapeType } from './drawingTypes.ts';
 
 export interface ShapeDragGeometry { x: number; y: number; width: number; height: number }
 
@@ -10,7 +10,7 @@ export function constrainShapeDrag(
 ): ShapeDragGeometry {
   let dx = point.x - start.x;
   let dy = point.y - start.y;
-  if (shapeType === 'line' || shapeType === 'arrow') {
+  if (isLinearShapeType(shapeType)) {
     if (constrain) {
       const length = Math.hypot(dx, dy);
       const angle = Math.round(Math.atan2(dy, dx) / (Math.PI / 12)) * (Math.PI / 12);

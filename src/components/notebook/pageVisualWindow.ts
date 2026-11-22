@@ -8,13 +8,34 @@ export function reuseResidentPageIds(previous: Set<string>, next: Set<string>): 
 /** Geometry is in document coordinates. Retain the visible rows and one row
  * on either side; focus never removes a visible page from this window. */
 export function residentPageIds(positions: PagePosition[], top: number, height: number): Set<string> {
-  const visible = positions.filter(p => p.y + p.height >= top && p.y <= top + height);
-  if (!visible.length) return new Set();
-  const first = Math.min(...visible.map(p => p.y));
-  const last = Math.max(...visible.map(p => p.y));
-  const before = Math.max(-Infinity, ...positions.filter(p => p.y < first).map(p => p.y));
-  const after = Math.min(Infinity, ...positions.filter(p => p.y > last).map(p => p.y));
-  return new Set(positions.filter(p => p.y >= before && p.y <= after).map(p => p.id));
+  const bottom = top + height;
+  let first = Infinity;
+  let last = -Infinity;
+  let hasVisible = false;
+  for (let i = 0; i < positions.length; i += 1) {
+    const p = positions[i];
+    if (p.y + p.height >= top && p.y <= bottom) {
+      hasVisible = true;
+      if (p.y < first) first = p.y;
+      if (p.y > last) last = p.y;
+    }
+  }
+  if (!hasVisible) return new Set();
+
+  let before = -Infinity;
+  let after = Infinity;
+  for (let i = 0; i < positions.length; i += 1) {
+    const y = positions[i].y;
+    if (y < first && y > before) before = y;
+    if (y > last && y < after) after = y;
+  }
+
+  const resident = new Set<string>();
+  for (let i = 0; i < positions.length; i += 1) {
+    const p = positions[i];
+    if (p.y >= before && p.y <= after) resident.add(p.id);
+  }
+  return resident;
 }
 
 export function dominantPageId(positions: PagePosition[], center: number, currentId: string, deadband: number): string | undefined {

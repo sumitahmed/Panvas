@@ -109,7 +109,8 @@ function createWindow() {
     titleBarStyle: 'hidden',
     titleBarOverlay: {
       color: '#00000000', // Transparent overlay so native buttons blend seamlessly with any header theme
-      symbolColor: '#ffffff' // corrected to the active theme by the renderer's theme sync
+      symbolColor: '#ffffff', // corrected to the active theme by the renderer's theme sync
+      height: 44,
     },
     autoHideMenuBar: true, // Remove default Electron menu bar
     icon: appIconPath, // Configure the correct Panvas app icon
@@ -209,7 +210,11 @@ if (!gotSingleInstanceLock) {
     }
   });
 
+  let mathOcrPromise: Promise<typeof import('./ipc/math-ocr-handlers.js')> | null = null;
+  const loadMathOcr = () => (mathOcrPromise ??= import('./ipc/math-ocr-handlers.js'));
+
   app.on('before-quit', (event) => {
+    if (mathOcrPromise) void mathOcrPromise.then(m => m.shutdownMathOcrWorker());
     gracefulShutdown.handleBeforeQuit(event);
   });
 
@@ -219,6 +224,11 @@ if (!gotSingleInstanceLock) {
     registerRecognitionHandlers();
     registerCloudSyncHandlers(ipcMain);
     registerCloudSyncDiagnosticHandler(ipcMain);
+    ipcMain.handle('mathOcr:getStatus', (e) => loadMathOcr().then(m => m.handleMathOcrGetStatus(e)));
+    ipcMain.handle('mathOcr:downloadModel', (e) => loadMathOcr().then(m => m.handleMathOcrDownloadModel(e)));
+    ipcMain.handle('mathOcr:recognizeImage', (e, png) => loadMathOcr().then(m => m.handleMathOcrRecognizeImage(e, png)));
+    ipcMain.handle('mathOcr:cancel', (e) => loadMathOcr().then(m => m.handleMathOcrCancel(e)));
+    ipcMain.handle('mathOcr:removeModel', (e) => loadMathOcr().then(m => m.handleMathOcrRemoveModel(e)));
     initDiscordRpc({
       debugLogs: !app.isPackaged,
     });

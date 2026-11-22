@@ -1,10 +1,13 @@
 import { promises as fsPromises } from 'fs';
 
 export type AtomicWriteData = string | Uint8Array;
+export type WritePriority = 'foreground' | 'background';
 
 interface WriteTask {
   filePath: string;
   data: AtomicWriteData;
+  priority: WritePriority;
+  seq: number;
   resolve: () => void;
   reject: (err: Error) => void;
 }
@@ -15,17 +18,28 @@ interface FlushWaiter {
 }
 
 export class WriteQueue {
-  private queue: WriteTask[] = [];
+  private foregroundQueue: WriteTask[] = [];
+  private backgroundQueue: WriteTask[] = [];
   private isWriting = false;
   private tempSequence = 0;
+  private taskSequence = 0;
   private acceptingWrites = true;
   private lastFailure: Error | null = null;
   private flushWaiters: FlushWaiter[] = [];
 
-  async enqueue(filePath: string, data: AtomicWriteData): Promise<void> {
+  private get totalQueued(): number {
+    return this.foregroundQueue.length + this.backgroundQueue.length;
+  }
+
+  async enqueue(filePath: string, data: AtomicWriteData, priority: WritePriority = 'foreground'): Promise<void> {
     if (!this.acceptingWrites) throw new Error('Write queue is shutting down.');
     return new Promise((resolve, reject) => {
-      this.queue.push({ filePath, data, resolve, reject });
+      const task: WriteTask = { filePath, data, priority, seq: ++this.taskSequence, resolve, reject };
+      if (priority === 'foreground') {
+        this.foregroundQueue.push(task);
+      } else {
+        this.backgroundQueue.push(task);
+      }
       this.processNext();
     });
   }
@@ -35,7 +49,7 @@ export class WriteQueue {
   }
 
   async flush(): Promise<void> {
-    if (!this.isWriting && this.queue.length === 0) {
+    if (!this.isWriting && this.totalQueued === 0) {
       const failure = this.takeFailure();
       if (failure) throw failure;
       return;
@@ -46,19 +60,41 @@ export class WriteQueue {
   }
 
   private async processNext(): Promise<void> {
-    if (this.isWriting || this.queue.length === 0) return;
+    if (this.isWriting || this.totalQueued === 0) return;
     this.isWriting = true;
     try {
-      // Coalesce writes to the same file while preserving each caller's result.
+      // Drain foreground interactive writes before background sync writes while
+      // preserving exact sequence-ordered latest-writer-wins per target path.
+      const isForegroundPass = this.foregroundQueue.length > 0;
+      const batch = isForegroundPass
+        ? this.foregroundQueue.splice(0)
+        : this.backgroundQueue.splice(0);
+
       const taskMap = new Map<string, WriteTask[]>();
-      while (this.queue.length > 0) {
-        const task = this.queue.shift()!;
+      const maxSeqByPath = new Map<string, number>();
+      for (const task of batch) {
         const tasks = taskMap.get(task.filePath) ?? [];
         tasks.push(task);
         taskMap.set(task.filePath, tasks);
+        const prevSeq = maxSeqByPath.get(task.filePath) ?? 0;
+        if (task.seq > prevSeq) maxSeqByPath.set(task.filePath, task.seq);
+      }
+
+      if (isForegroundPass && this.backgroundQueue.length > 0) {
+        const remainingBg: WriteTask[] = [];
+        for (const bgTask of this.backgroundQueue) {
+          const maxFgSeq = maxSeqByPath.get(bgTask.filePath);
+          if (maxFgSeq !== undefined && bgTask.seq < maxFgSeq) {
+            taskMap.get(bgTask.filePath)!.unshift(bgTask);
+          } else {
+            remainingBg.push(bgTask);
+          }
+        }
+        this.backgroundQueue = remainingBg;
       }
 
       for (const [filePath, tasks] of taskMap.entries()) {
+        tasks.sort((a, b) => a.seq - b.seq);
         const latest = tasks[tasks.length - 1];
         try {
           await this.atomicWrite(filePath, latest.data);
@@ -71,7 +107,7 @@ export class WriteQueue {
       }
     } finally {
       this.isWriting = false;
-      if (this.queue.length > 0) void this.processNext();
+      if (this.totalQueued > 0) void this.processNext();
       else this.settleFlushWaiters();
     }
   }
@@ -83,7 +119,7 @@ export class WriteQueue {
   }
 
   private settleFlushWaiters(): void {
-    if (this.isWriting || this.queue.length > 0 || this.flushWaiters.length === 0) return;
+    if (this.isWriting || this.totalQueued > 0 || this.flushWaiters.length === 0) return;
     const waiters = this.flushWaiters.splice(0);
     const failure = this.takeFailure();
     for (const waiter of waiters) {

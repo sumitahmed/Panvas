@@ -25,11 +25,18 @@ import {
 } from './stickyNotes';
 import type { NotebookPage, PagePropertySet } from '@/types/notebook';
 import type { NotebookEngine } from './engine/NotebookEngine';
-import { getBrowserCanvasVisualScale, MAX_INACTIVE_PAGE_RENDER_ZOOM, resolveCanvasBackingScale, ViewportManager } from './engine/ViewportManager';
+import {
+  getBrowserCanvasVisualScale,
+  MAX_ACTIVE_CANVAS_PIXELS,
+  MAX_CANVAS_DIMENSION,
+  MAX_INACTIVE_PAGE_RENDER_ZOOM,
+  resolveCanvasBackingScale,
+  resolveViewportRenderWindow,
+  ViewportManager,
+  type RenderWindowRect,
+} from './engine/ViewportManager';
 import { ShapeManager } from './engine/ShapeManager';
 import { ImageManager } from './engine/ImageManager';
-import { getImageCrop, getImageRenderAppearance } from './engine/imageAppearance';
-import type { ImageObject } from './engine/drawingTypes';
 import { DrawingEngine } from './engine/DrawingEngine';
 import type { Editor } from '@tiptap/react';
 import { StaticTextPreview } from './StaticTextPreview';
@@ -46,9 +53,27 @@ import { gate0Profiler } from '@/dev/gate0Profiler';
 import { useFullDarkView } from '@/hooks/useFullDarkView';
 import { FULL_DARK_PDF_FILTER, isBrightDocumentCanvas } from '@/lib/fullDarkView';
 import { useUIStore } from '@/stores/uiStore';
-import { isDrawingRecentlyActive } from '@/services/cloudsync/drawingActivity';
 
 const ignoreTextEditorBlur = () => {};
+const NOOP_VOICE_CHANGE = () => {};
+const NOOP_VOICE_DELETE = (_note: AudioNote) => {};
+const NOOP_VOICE_RENAME = (_note: AudioNote, _title: string) => {};
+
+const createStaticPageEngine = (fullDarkView: boolean) => {
+  const viewport = new ViewportManager();
+  viewport.setZoom(1);
+  const layers = new LayerManager();
+  const shapes = new ShapeManager(viewport, layers);
+  const images = new ImageManager(viewport, layers);
+  const drawing = new DrawingEngine(viewport, shapes, images, layers);
+  drawing.setCoalesceRedraws(true);
+  drawing.setUseLayerPresentationOnly(true);
+  drawing.setFullDarkView(fullDarkView);
+  // Geometry caches outlive this component. Avoid capturing render/effect state
+  // closures in the redraw callback.
+  images.setRedrawCallback(drawing.scheduleRedraw.bind(drawing));
+  return { drawing, viewport, layers, images, shapes };
+};
 
 export interface NotebookPageViewProps {
   page: NotebookPage;
@@ -77,47 +102,53 @@ export interface NotebookPageViewProps {
   onVoiceNoteRename?: (note: AudioNote, title: string) => void;
   onUpdateProperties?: (updates: Partial<PagePropertySet>) => void;
   onImageManagerReady?: (pageId: string, images: ImageManager | null, drawing?: DrawingEngine) => void;
+  onEditMathObject?: (object: TextObject) => void;
   logicalBase?: number;
   onLogicalRebase?: (base: number, delta: number) => void;
+  pageX?: number;
+  pageY?: number;
+  layoutTotalWidth?: number;
+  horizontalPadding?: number;
 }
 
 
-function LayerCanvas({ drawing, id, width, height, scale, order, top = 0 }: { drawing: DrawingEngine; id: string; width: number; height: number; scale: number; order: number; top?: number }) {
+function LayerCanvas({
+  drawing,
+  id,
+  width,
+  height,
+  scale,
+  layerCount,
+  order,
+  left = 0,
+  top = 0,
+  visible = true,
+  ready = true,
+}: {
+  drawing: DrawingEngine;
+  id: string;
+  width: number;
+  height: number;
+  scale: number;
+  layerCount: number;
+  order: number;
+  left?: number;
+  top?: number;
+  visible?: boolean;
+  ready?: boolean;
+}) {
   const ref = useRef<HTMLCanvasElement>(null);
-  useLayoutEffect(() => ref.current ? drawing.attachLayerCanvas(id, ref.current, width, height, scale) : undefined, [drawing, id, width, height, scale]);
-  return <canvas ref={ref} aria-hidden="true" className="absolute inset-0 pointer-events-none" style={{ top, zIndex: 20 + order * 3 }} />;
+  useLayoutEffect(() => (ref.current ? drawing.registerLayerCanvas(id, ref.current) : undefined), [drawing, id]);
+  useLayoutEffect(() => {
+    if (ref.current && ready) drawing.configureLayerCanvas(id, ref.current, width, height, scale, layerCount);
+  }, [drawing, id, width, height, scale, layerCount, ready]);
+  // Presentation surfaces sit above the page text so images and ink retain the
+  // existing image-over-text contract. They stay pointer-events:none, leaving
+  // the lower interaction canvas responsible for hit testing and text editing.
+  return <canvas ref={ref} data-panvas-presentation-layer={id} aria-hidden="true" className="absolute pointer-events-none" style={{ left, top, zIndex: 23 + order * 4, visibility: visible ? 'inherit' : 'hidden' }} />;
 }
 
-/** DOM rendering for page images: the raster canvas sits below the text DOM,
- *  so a canvas-painted image could never appear above an older text object.
- *  The overlay stacks above its layer's text (zIndex 22+order*3 vs 21+order*3)
- *  while staying below the next layer's canvas (23+order*3). Interactions are
- *  untouched — pointerEvents none keeps canvas hit-testing authoritative. */
-function PageImageOverlay({ object, url, zIndex, imageManager }: { object: ImageObject; url?: string; zIndex: number; imageManager?: ImageManager | null }) {
-  // Not memoized: selection drags mutate ImageObject geometry in place, so the
-  // overlay must re-read object.x/y whenever the owning page re-renders, or a
-  // stale copy of the image would remain at its previous position.
-  if (!url) return null;
-  const crop = getImageCrop(object);
-  const appearance = getImageRenderAppearance(object);
-  return (
-    <div aria-hidden="true" data-image-overlay={object.id} ref={element => { imageManager?.registerOverlayElement(object.id, element); }} className="absolute overflow-hidden" style={{
-      left: object.x, top: object.y, width: object.width, height: object.height,
-      opacity: appearance.opacity,
-      transform: `rotate(${appearance.rotationRadians}rad)`,
-      zIndex,
-      pointerEvents: 'none',
-    }}>
-      <img src={url} alt="" draggable={false} style={{
-        width: object.width / crop.width, height: object.height / crop.height,
-        marginLeft: -crop.x * object.width / crop.width, marginTop: -crop.y * object.height / crop.height,
-        maxWidth: 'none', maxHeight: 'none', display: 'block', userSelect: 'none',
-      }} />
-    </div>
-  );
-}
-
-export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
+const NotebookPageViewComponent: React.FC<NotebookPageViewProps> = ({
   page,
   data,
   properties,
@@ -130,19 +161,24 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
   notebookEngine,
   sceneOwnerPageId = '',
   previewSource,
-  activeEditor,
+  activeEditor: _activeEditor,
   setActiveEditor,
   onActivatePage,
   handleDrop,
   handleDragOver,
   editable = true,
-  onVoiceNoteChange = () => {},
-  onVoiceNoteDelete = () => {},
-  onVoiceNoteRename = () => {},
+  onVoiceNoteChange = NOOP_VOICE_CHANGE,
+  onVoiceNoteDelete = NOOP_VOICE_DELETE,
+  onVoiceNoteRename = NOOP_VOICE_RENAME,
   onUpdateProperties,
   onImageManagerReady,
+  onEditMathObject,
   logicalBase = 0,
   onLogicalRebase,
+  pageX,
+  pageY,
+  layoutTotalWidth,
+  horizontalPadding,
 }) => {
   gate0Profiler.resource('reactRenders.NotebookPageView', 1);
   useEffect(() => {
@@ -159,94 +195,264 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pageRootRef = useRef<HTMLDivElement>(null);
   const expandedSurface = properties.pageSize === 'Infinite' || properties.layoutMode === 'document';
-  const [renderWindow, setRenderWindow] = useState({ top: 0, height: Math.min(height, 2048) });
+  const inactiveRenderScale = Math.min(renderScale, MAX_INACTIVE_PAGE_RENDER_ZOOM);
+  const sceneReady = !isFocused || sceneOwnerPageId === page.id;
+  const liveSceneReady = isFocused && sceneReady;
+  const activeCanvasRef = useRef<HTMLCanvasElement>(null);
+  const overviewCanvasRef = useRef<HTMLCanvasElement>(null);
+  const activeCanvasConfigurationRef = useRef<string | null>(null);
+  const activeRasterOriginRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const staticCanvasConfigurationRef = useRef<string | null>(null);
+  const fullDarkView = useFullDarkView();
+  const [initialStaticEngine] = useState(() => (page.type === 'pdf' ? null : createStaticPageEngine(fullDarkView)));
+  const staticEngineRef = useRef<{ drawing: DrawingEngine; viewport: ViewportManager; layers: LayerManager; images: ImageManager; shapes: ShapeManager } | null>(initialStaticEngine);
+  const registeredStaticDrawingRef = useRef<DrawingEngine | null>(null);
+  const pendingPreviewAdoptionRef = useRef<{ source: DrawingEngine; data: DrawingData } | null>(null);
+  const [staticDrawing, setStaticDrawing] = useState<DrawingEngine | null>(() => initialStaticEngine?.drawing ?? null);
+  const [layerRevision, setLayerRevision] = useState(0);
+  // The page-owned preview stays visible until the shared live surface has
+  // actual pixels. Deferred handoffs and sliced fallback paints would otherwise
+  // expose a transparent canvas for the duration of the paint.
+  const [liveSurfacePainted, setLiveSurfacePainted] = useState(false);
+  const contentBottomRef = useRef(0);
+  const drawingGestureActiveRef = useRef(false);
+
+  const staticLayers = (data?.layers?.length ? data.layers : staticDrawing?.getLayerManager().getLayers()) ?? [];
+  const liveLayers = notebookEngine.layers.getLayers();
+  const activeLayerCount = Math.max(1, (liveSceneReady ? liveLayers.length : staticLayers.length) || 1);
+  const targetWindowScale = isFocused ? renderScale : inactiveRenderScale;
+  const currentWindowKey = `${targetWindowScale}:${width}:${height}:${activeLayerCount}:${logicalBase}:${isFocused}:${expandedSurface}`;
+
+  const [windowState, setWindowState] = useState<{ rect: RenderWindowRect; key: string }>(() => ({
+    rect: {
+      left: 0,
+      top: logicalBase,
+      width,
+      height: expandedSurface ? Math.min(height, 2048) : height,
+      windowed: false,
+    },
+    key: (!isFocused && !expandedSurface) ? currentWindowKey : '',
+  }));
+  const renderWindowRef = useRef<RenderWindowRect>(windowState.rect);
+  const renderWindow = windowState.rect;
+  const windowAligned = windowState.key === currentWindowKey;
+
   useLayoutEffect(() => {
-    if (!expandedSurface) { setRenderWindow({ top: 0, height }); return; }
+    const isInfinite = properties.pageSize === 'Infinite';
     const root = pageRootRef.current;
     const scroller = root?.closest('.notebook-viewport');
-    if (!root || !(scroller instanceof HTMLElement)) return;
+    const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+    const targetBackingScale = Math.max(0.25, dpr * targetWindowScale * getBrowserCanvasVisualScale());
+    const safePageW = Math.max(1, Math.round(width));
+    const safePageH = Math.max(1, Math.round(height));
+    const layerPixelBudget = Math.floor(MAX_ACTIVE_CANVAS_PIXELS / Math.max(1, activeLayerCount));
+    const pageFitsFullBacking = !isInfinite
+      && safePageW * safePageH * targetBackingScale * targetBackingScale <= layerPixelBudget
+      && Math.max(safePageW, safePageH) * targetBackingScale <= MAX_CANVAS_DIMENSION;
+
+    if ((!isFocused && !expandedSurface) || (!expandedSurface && pageFitsFullBacking)) {
+      const fullRect: RenderWindowRect = { left: 0, top: logicalBase, width, height, windowed: false };
+      renderWindowRef.current = fullRect;
+      setWindowState(prev =>
+        prev.key === currentWindowKey
+        && prev.rect.left === fullRect.left
+        && prev.rect.top === fullRect.top
+        && prev.rect.width === fullRect.width
+        && prev.rect.height === fullRect.height
+        && prev.rect.windowed === fullRect.windowed
+          ? prev
+          : { rect: fullRect, key: currentWindowKey },
+      );
+      return;
+    }
+    if (!root || !(scroller instanceof HTMLElement)) {
+      const fallback: RenderWindowRect = {
+        left: 0,
+        top: logicalBase,
+        width,
+        height: expandedSurface ? Math.min(height, 2048) : height,
+        windowed: false,
+      };
+      renderWindowRef.current = fallback;
+      setWindowState(prev => (prev.key === currentWindowKey ? prev : { rect: fallback, key: currentWindowKey }));
+      return;
+    }
     let frame = 0;
-    const update = () => {
+    const update = (forceRebase = false) => {
       frame = 0;
-      if (notebookEngine.input.navigationGestures.active) return;
-      notebookEngine.input.refreshCanvasGeometry();
-      const rect = root.getBoundingClientRect(), scale = rect.width / width || 1;
-      const localY = (scroller.getBoundingClientRect().top - rect.top) / scale;
-      // Scrolling never grows the page: layoutExtent is owned by content
-      // (scene mutations and document text layout), which keeps about a
-      // quarter-page of trailing blank space past the latest content.
-      // Live drawing growth: while the pen is down, the active stroke's points
-      // are part of the document extent. One logical infinite page grows
-      // continuously (256-aligned, ~quarter-page trailing buffer); scrolling
-      // alone never grows it. Also keep the raster window covering the stroke
-      // so an in-progress stroke is never clipped at the old boundary.
-      if (properties.pageSize === 'Infinite' && editable && isFocused && notebookEngine.getDrawingOwnership().pageId === page.id) {
+      if (notebookEngine.input.navigationGestures.active && windowState.key !== '') return;
+      if (drawingGestureActiveRef.current && !isInfinite) return;
+
+      let liveScale = notebookEngine.viewport.getState().scale || 1;
+      let localLeft: number;
+      let localY: number;
+      if (
+        pageX !== undefined
+        && pageY !== undefined
+        && layoutTotalWidth !== undefined
+        && horizontalPadding !== undefined
+        && scroller.clientWidth > 0
+      ) {
+        if (drawingGestureActiveRef.current) notebookEngine.input.refreshCanvasGeometry();
+        const sizerWidth = Math.max(scroller.clientWidth, layoutTotalWidth * liveScale + horizontalPadding);
+        const pageScreenLeft = (sizerWidth - layoutTotalWidth * liveScale) / 2 + pageX * liveScale;
+        const pageScreenTop = pageY * liveScale;
+        localLeft = (scroller.scrollLeft - pageScreenLeft) / liveScale;
+        localY = (scroller.scrollTop - pageScreenTop) / liveScale;
+      } else {
+        notebookEngine.input.refreshCanvasGeometry();
+        const rootRect = root.getBoundingClientRect();
+        const scrollerRect = scroller.getBoundingClientRect();
+        liveScale = notebookEngine.viewport.getState().scale || (rootRect.width / width) || 1;
+        localLeft = (scrollerRect.left - rootRect.left) / liveScale;
+        localY = (scrollerRect.top - rootRect.top) / liveScale;
+      }
+
+      if (isInfinite && editable && isFocused && notebookEngine.getDrawingOwnership().pageId === page.id) {
         const liveBottom = Math.max(0, notebookEngine.input.getLiveStrokeBottom());
         const contentBottom = Math.max(contentBottomRef.current, liveBottom);
         const baseHeight = resolveBasePageDimensions(properties).height;
         const required = Math.max(baseHeight, Math.ceil((contentBottom + baseHeight / 4) / 256) * 256);
         if (required > (properties.layoutExtent ?? height)) notebookEngine.setProperties({ layoutExtent: required });
+        if (drawingGestureActiveRef.current) {
+          const prev = renderWindowRef.current;
+          const prevBottom = prev.top - logicalBase + prev.height;
+          if (liveBottom <= prevBottom - 64) return;
+        }
       }
-      const nextBase = nextLogicalScrollBase(logicalBase, localY, properties.layoutExtent ?? height);
-      if (nextBase !== logicalBase && onLogicalRebase && isFocused && notebookEngine.getDrawingOwnership().pageId === page.id) { onLogicalRebase(nextBase, nextBase - logicalBase); return; }
-      // Infinite pages keep a viewport-following drawing window that may
-      // overhang below the paper: the pen must be able to start past the
-      // current extent, and the paper then grows to cover committed content.
-      const isInfinite = properties.pageSize === 'Infinite';
-      const viewportTopLocal = (scroller.getBoundingClientRect().top - rect.top) / scale;
-      const rawTop = Math.max(0, Math.floor((viewportTopLocal - 512) / 512) * 512);
-      const windowHeight = isInfinite
-        ? Math.max(2048, Math.ceil(scroller.clientHeight / scale) + 1536)
-        : Math.min(height, Math.max(2048, Math.ceil(scroller.clientHeight / scale) + 1536));
-      const top = logicalBase + (isInfinite
-        ? rawTop
-        : Math.max(0, Math.min(height - windowHeight, rawTop)));
-      setRenderWindow(previous => previous.top === top && previous.height === windowHeight ? previous : { top, height: windowHeight });
+      if (expandedSurface) {
+        const nextBase = nextLogicalScrollBase(logicalBase, localY, properties.layoutExtent ?? height);
+        if (nextBase !== logicalBase && onLogicalRebase && isFocused && notebookEngine.getDrawingOwnership().pageId === page.id) {
+          onLogicalRebase(nextBase, nextBase - logicalBase);
+          return;
+        }
+      }
+
+      const next = resolveViewportRenderWindow({
+        pageWidth: width,
+        pageHeight: height,
+        logicalBase,
+        isInfinite,
+        zoom: targetWindowScale,
+        dpr,
+        browserVisualScale: getBrowserCanvasVisualScale(),
+        layerCount: activeLayerCount,
+        viewportLocal: {
+          left: localLeft,
+          top: localY,
+          width: scroller.clientWidth / liveScale,
+          height: scroller.clientHeight / liveScale,
+        },
+        previous: renderWindowRef.current,
+        forceRebase,
+      });
+      renderWindowRef.current = next;
+      setWindowState(prev =>
+        prev.rect === next && prev.key === currentWindowKey
+          ? prev
+          : { rect: next, key: currentWindowKey },
+      );
     };
-    const schedule = () => { if (!frame) frame = requestAnimationFrame(update); };
-    const idle = notebookEngine.input.navigationGestures.onIdle(schedule);
+    const schedule = () => { if (!frame) frame = requestAnimationFrame(() => update(false)); };
+    const idle = notebookEngine.input.navigationGestures.onIdle(() => {
+      if (Math.abs(notebookEngine.viewport.getState().scale - renderScale) > 0.001) return;
+      update(true);
+    });
     scroller.addEventListener('scroll', schedule, { passive: true });
-    schedule();
-    // While the stylus is down the document extent must track the live stroke
-    // even when no scroll event fires; rAF-batched so each frame costs one pass.
+    update(true);
+
     let gestureFrame = 0;
     const unsubscribeGesture = notebookEngine.onDrawingGestureLifecycle(active => {
+      drawingGestureActiveRef.current = active;
       if (active) {
-        if (!gestureFrame) gestureFrame = requestAnimationFrame(function gestureLoop() {
-          update();
-          gestureFrame = requestAnimationFrame(gestureLoop);
-        });
-      } else if (gestureFrame) {
-        cancelAnimationFrame(gestureFrame);
-        gestureFrame = 0;
-        update();
+        if (isInfinite && !gestureFrame) {
+          gestureFrame = requestAnimationFrame(function gestureLoop() {
+            update(false);
+            gestureFrame = requestAnimationFrame(gestureLoop);
+          });
+        }
+      } else {
+        if (gestureFrame) {
+          cancelAnimationFrame(gestureFrame);
+          gestureFrame = 0;
+        }
+        update(false);
       }
     });
     return () => {
+      drawingGestureActiveRef.current = false;
       cancelAnimationFrame(frame);
       if (gestureFrame) cancelAnimationFrame(gestureFrame);
       unsubscribeGesture();
       idle();
       scroller.removeEventListener('scroll', schedule);
     };
-  }, [expandedSurface, height, width, renderScale, notebookEngine, logicalBase, properties.layoutExtent, onLogicalRebase, editable, isFocused, page.id]);
-  const rasterTop = expandedSurface ? renderWindow.top : 0;
-  const rasterHeight = expandedSurface ? renderWindow.height : height;
-  const canvasStyle = expandedSurface ? { top: rasterTop - logicalBase, height: rasterHeight } : undefined;
-  const activeCanvasRef = useRef<HTMLCanvasElement>(null);
-  const activeCanvasConfigurationRef = useRef<string | null>(null);
-  const activeRasterOriginRef = useRef(0);
-  const staticCanvasConfigurationRef = useRef<string | null>(null);
-  const staticEngineRef = useRef<{ drawing: DrawingEngine; viewport: ViewportManager; layers: LayerManager; images: ImageManager; shapes: ShapeManager } | null>(null);
-  const pendingPreviewAdoptionRef = useRef<{ source: DrawingEngine; data: DrawingData } | null>(null);
-  const [staticDrawing, setStaticDrawing] = useState<DrawingEngine | null>(null);
-  // The static engine's image manager owns the object URLs the DOM image
-  // overlay renders from while this page is unfocused.
-  const [staticImages, setStaticImages] = useState<ImageManager | null>(null);
-  // The page-owned preview stays visible until the shared live surface has
-  // actual pixels. Deferred handoffs and sliced fallback paints would otherwise
-  // expose a transparent canvas for the duration of the paint.
-  const [liveSurfacePainted, setLiveSurfacePainted] = useState(false);
+  }, [
+    currentWindowKey,
+    expandedSurface,
+    height,
+    width,
+    targetWindowScale,
+    activeLayerCount,
+    notebookEngine,
+    logicalBase,
+    properties.pageSize,
+    properties.layoutExtent,
+    onLogicalRebase,
+    editable,
+    isFocused,
+    page.id,
+    pageX,
+    pageY,
+    layoutTotalWidth,
+    horizontalPadding,
+  ]);
+
+  const lastLivePropsRef = useRef<{
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+    scale: number;
+    layerCount: number;
+    windowed: boolean;
+  } | null>(null);
+  if (windowAligned || !liveSceneReady) {
+    if (liveSceneReady) {
+      lastLivePropsRef.current = {
+        left: renderWindow.left,
+        top: renderWindow.top,
+        width: renderWindow.width,
+        height: renderWindow.height,
+        scale: renderScale,
+        layerCount: liveLayers.length,
+        windowed: renderWindow.windowed,
+      };
+    } else {
+      lastLivePropsRef.current = null;
+    }
+  }
+  const mountReady = liveSceneReady && (windowAligned || lastLivePropsRef.current !== null);
+  const effectiveLive = (windowAligned ? null : lastLivePropsRef.current) ?? {
+    left: renderWindow.left,
+    top: renderWindow.top,
+    width: renderWindow.width,
+    height: renderWindow.height,
+    scale: windowAligned ? renderScale : Math.min(renderScale, MAX_INACTIVE_PAGE_RENDER_ZOOM),
+    layerCount: liveLayers.length,
+    windowed: renderWindow.windowed,
+  };
+  const rasterLeft = effectiveLive.left;
+  const rasterTop = effectiveLive.top;
+  const rasterWidth = effectiveLive.width;
+  const rasterHeight = effectiveLive.height;
+  const staticRasterTop = expandedSurface ? renderWindow.top : 0;
+  const staticRasterHeight = expandedSurface ? renderWindow.height : height;
+  const canvasStyle = expandedSurface ? { top: staticRasterTop - logicalBase, height: staticRasterHeight } : undefined;
+  const liveCanvasStyle = (expandedSurface || effectiveLive.windowed)
+    ? { left: rasterLeft, top: rasterTop - logicalBase, width: rasterWidth, height: rasterHeight }
+    : undefined;
+
   const instanceIdRef = useRef<string>('');
   if (!instanceIdRef.current) {
     instanceIdRef.current = 'inst_' + Math.random().toString(36).substring(2, 8);
@@ -259,17 +465,22 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
     () => ({ x: pageGeometry.source.left, y: pageGeometry.source.top - logicalBase }),
     [pageGeometry.source.left, pageGeometry.source.top, logicalBase],
   );
-  const sceneReady = !isFocused || sceneOwnerPageId === page.id;
-  const liveSceneReady = isFocused && sceneReady;
-  const fullDarkView = useFullDarkView();
   const [brightPdfPreview, setBrightPdfPreview] = useState(false);
   useLayoutEffect(() => {
     if (fullDarkView && page.type === 'pdf' && canvasRef.current) setBrightPdfPreview(isBrightDocumentCanvas(canvasRef.current));
   }, [fullDarkView, page.type]);
+  const prevPaperColorRef = useRef(properties.paperColor);
   useLayoutEffect(() => {
-    if (liveSceneReady) notebookEngine.drawing.setFullDarkView(fullDarkView);
+    const paperChanged = prevPaperColorRef.current !== properties.paperColor;
+    prevPaperColorRef.current = properties.paperColor;
+    if (liveSceneReady) {
+      notebookEngine.drawing.setFullDarkView(fullDarkView);
+      if (paperChanged) notebookEngine.drawing.redraw();
+      notebookEngine.drawing.flushPendingLayerRedraw();
+    }
     staticEngineRef.current?.drawing.setFullDarkView(fullDarkView);
-  }, [fullDarkView, liveSceneReady, notebookEngine]);
+    if (paperChanged) staticEngineRef.current?.drawing.redraw();
+  }, [fullDarkView, properties.paperColor, liveSceneReady, notebookEngine]);
 
   // The committed surface belongs to this page, independent of the shared
   // interaction engine. Only data/geometry changes repaint it.
@@ -280,33 +491,27 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
     if (!data || page.type === 'pdf' || !canvasRef.current) return;
     let engine = staticEngineRef.current;
     if (!engine) {
-      const viewport = new ViewportManager();
-      viewport.setZoom(1);
-      const layers = new LayerManager();
-      const shapes = new ShapeManager(viewport, layers);
-      const images = new ImageManager(viewport, layers);
-      const drawing = new DrawingEngine(viewport, shapes, images, layers);
-      drawing.setCoalesceRedraws(true);
-      // Geometry caches outlive this component. A closure created here also
-      // retains the render/effect contexts and their old page payloads.
-      images.setRedrawCallback(drawing.scheduleRedraw.bind(drawing));
-      engine = { drawing, viewport, layers, images, shapes };
+      engine = createStaticPageEngine(fullDarkView);
       staticEngineRef.current = engine;
-      drawing.setFullDarkView(fullDarkView);
-      onImageManagerReady?.(page.id, images, drawing);
-      setStaticDrawing(drawing);
-      setStaticImages(images);
+      setStaticDrawing(engine.drawing);
+    }
+    if (registeredStaticDrawingRef.current !== engine.drawing) {
+      registeredStaticDrawingRef.current = engine.drawing;
+      engine.drawing.setFullDarkView(fullDarkView);
+      onImageManagerReady?.(page.id, engine.images, engine.drawing);
     }
     if (liveSceneReady) return;
-    const staticConfiguration = `${width}:${rasterHeight}:${renderScale}`;
+    const staticConfiguration = `${width}:${staticRasterHeight}:${inactiveRenderScale}:${pageGeometry.source.left}:${pageGeometry.source.top}`;
     const canvasMatches = engine.drawing.getCanvasElement() === canvasRef.current;
     if (!canvasMatches || staticCanvasConfigurationRef.current !== staticConfiguration) {
       engine.drawing.setScaleMultiplier(Math.min(renderScale, MAX_INACTIVE_PAGE_RENDER_ZOOM));
-      engine.drawing.setCanvas(canvasRef.current, width, rasterHeight);
+      engine.drawing.setCanvas(canvasRef.current, width, staticRasterHeight);
       staticCanvasConfigurationRef.current = staticConfiguration;
     }
     engine.viewport.setPageCoordinateTransform(0, width, height, pageGeometry.source.left, pageGeometry.source.top);
-    engine.viewport.setRenderWindowOrigin(rasterTop, expandedSurface ? rasterHeight : undefined);
+    engine.viewport.setRenderWindowRect(
+      expandedSurface ? { left: 0, top: staticRasterTop, width, height: staticRasterHeight } : null,
+    );
     // Page handoff already blitted the live pixels into this page-owned
     // surface. Reusing them avoids replaying the whole scene twice per
     // boundary (once for the outgoing preview, once for the incoming live
@@ -325,15 +530,18 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
       && previewSource.getCanvasElement() && previewSource.isSurfaceCurrent(data));
     engine.drawing.setStrokes((data.version === 1 ? data.strokes || [] : objects.filter(o => o.type === 'stroke')).map(withLayer), previewSource ?? notebookEngine.drawing, false);
     engine.shapes.setShapes((data.version === 1 ? data.shapes || [] : objects.filter(o => o.type === 'shape')).map(withLayer));
-    engine.images.adoptDecodedImages(notebookEngine.images, objects.filter(o => o.type === 'image').map(o => o.fileId));
-    engine.images.setImages(objects.filter(o => o.type === 'image').map(withLayer));
-    if (previewCurrent && previewSource!.copySurfacesTo(engine.drawing, data)) {
+    const imageObjs = objects.filter(o => o.type === 'image').map(withLayer);
+    const copiedSurface = Boolean(previewCurrent && previewSource!.copySurfacesTo(engine.drawing, data));
+    engine.images.adoptDecodedImages(notebookEngine.images, imageObjs.map(o => o.fileId));
+    if (copiedSurface) {
+      engine.images.setImages(imageObjs, { skipPreload: true });
       return;
     }
+    engine.images.setImages(imageObjs, { skipPreload: previewCurrent && !staticDrawing });
     // Multi-layer previews attach their layer canvases in child layout effects.
     // Defer the adoption attempt until those canvases exist, then fall back to
     // the sliced paint if the retained pixels are not usable.
-    if (previewCurrent && !staticDrawing && (data.layers?.length ?? 0) > 1) {
+    if (previewCurrent && !staticDrawing) {
       pendingPreviewAdoptionRef.current = { source: previewSource!, data };
       return;
     }
@@ -350,10 +558,11 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
     data?.activeLayerId,
     width,
     height,
-    rasterTop,
-    rasterHeight,
+    staticRasterTop,
+    staticRasterHeight,
+    expandedSurface,
     page.type,
-    renderScale,
+    inactiveRenderScale,
     pageGeometry.source.left,
     pageGeometry.source.top,
     notebookEngine,
@@ -369,6 +578,7 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
       && pending.source.copySurfacesTo(staticDrawing, pending.data)) {
       return;
     }
+    engine.images.setImages(engine.images.getImages());
     staticDrawing.schedulePreviewPaint(pending.data);
   }, [staticDrawing]);
 
@@ -386,10 +596,11 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
       // React removes the canvas element, but the engine can still source a
       // handoff blit when the user scrolls back, avoiding a full preview
       // repaint. The renderer detaches it when the engine leaves that window.
+      staticEngineRef.current?.drawing.setRetainedOffscreen(true);
       staticEngineRef.current?.images.destroy();
       onImageManagerReady?.(page.id, null);
+      registeredStaticDrawingRef.current = null;
       staticEngineRef.current = null;
-      setStaticImages(null);
       staticCanvasConfigurationRef.current = null;
     };
   }, [notebookEngine, page.id]);
@@ -397,13 +608,16 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
   // Ownership guards protect only the disposable interaction surface. The
   // correct page's committed canvas stays visible throughout a pending load.
   useLayoutEffect(() => {
-    if (!liveSceneReady || page.type === 'pdf' || !activeCanvasRef.current) return;
+    if (!mountReady || page.type === 'pdf' || !activeCanvasRef.current) return;
     const canvas = activeCanvasRef.current;
     const preview = staticEngineRef.current;
     if (preview) notebookEngine.images.adoptDecodedImages(preview.images);
+    notebookEngine.drawing.setUseLayerPresentationOnly(true);
     notebookEngine.drawing.setScaleMultiplier(renderScale);
     notebookEngine.viewport.setPageCoordinateTransform(0, width, height, pageGeometry.source.left, pageGeometry.source.top);
-    notebookEngine.viewport.setRenderWindowOrigin(rasterTop, expandedSurface ? rasterHeight : undefined);
+    notebookEngine.viewport.setRenderWindowRect(
+      effectiveLive.windowed || expandedSurface ? { left: rasterLeft, top: rasterTop, width: rasterWidth, height: rasterHeight } : null,
+    );
     setLiveSurfacePainted(false);
     const markLiveSurfacePainted = () => {
       if (notebookEngine.drawing.getCanvasElement() !== canvas) return;
@@ -413,42 +627,123 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
       preview?.drawing.cancelPaint();
       setLiveSurfacePainted(true);
     };
-    notebookEngine.mount(canvas, width, rasterHeight, preview?.drawing, data, markLiveSurfacePainted);
-    activeRasterOriginRef.current = rasterTop;
-    activeCanvasConfigurationRef.current = `${width}:${rasterHeight}:${renderScale}:${pageGeometry.source.left}:${pageGeometry.source.top}`;
+    notebookEngine.mount(canvas, rasterWidth, rasterHeight, preview?.drawing, data, markLiveSurfacePainted);
+    activeRasterOriginRef.current = { x: rasterLeft, y: rasterTop };
+    activeCanvasConfigurationRef.current = `${rasterLeft}:${rasterTop}:${rasterWidth}:${rasterHeight}:${renderScale}:${liveLayers.length}:${pageGeometry.source.left}:${pageGeometry.source.top}`;
     return () => {
       activeCanvasConfigurationRef.current = null;
       // A different page may already own the engine during React cleanup.
       if (notebookEngine.drawing.getCanvasElement() === canvas) notebookEngine.unmount();
     };
-  }, [liveSceneReady, notebookEngine, page.type, page.id]);
+  }, [mountReady, notebookEngine, page.type, page.id]);
 
   useLayoutEffect(() => {
-    if (!liveSceneReady || page.type === 'pdf' || !activeCanvasConfigurationRef.current) return;
-    const nextConfiguration = `${width}:${rasterHeight}:${renderScale}:${pageGeometry.source.left}:${pageGeometry.source.top}`;
+    if (!liveSceneReady || page.type === 'pdf' || !activeCanvasConfigurationRef.current || !windowAligned) return;
+    const nextConfiguration = `${rasterLeft}:${rasterTop}:${rasterWidth}:${rasterHeight}:${renderScale}:${liveLayers.length}:${pageGeometry.source.left}:${pageGeometry.source.top}`;
     notebookEngine.viewport.setPageCoordinateTransform(0, width, height, pageGeometry.source.left, pageGeometry.source.top);
-    notebookEngine.viewport.setRenderWindowOrigin(rasterTop, expandedSurface ? rasterHeight : undefined);
-    const rebased = activeRasterOriginRef.current !== rasterTop;
-    activeRasterOriginRef.current = rasterTop;
+    notebookEngine.viewport.setRenderWindowRect(
+      effectiveLive.windowed || expandedSurface ? { left: rasterLeft, top: rasterTop, width: rasterWidth, height: rasterHeight } : null,
+    );
+    const rebased = activeRasterOriginRef.current.x !== rasterLeft || activeRasterOriginRef.current.y !== rasterTop;
+    activeRasterOriginRef.current = { x: rasterLeft, y: rasterTop };
     if (rebased) notebookEngine.input.refreshCanvasGeometry();
     if (activeCanvasConfigurationRef.current === nextConfiguration) {
       if (rebased) notebookEngine.drawing.rebaseLiveSurface();
+      notebookEngine.drawing.flushPendingLayerRedraw();
       return;
     }
     notebookEngine.drawing.setScaleMultiplier(renderScale);
-    notebookEngine.resize(width, rasterHeight);
-    if (rebased) notebookEngine.drawing.rebaseLiveSurface();
+    notebookEngine.resize(rasterWidth, rasterHeight);
+    if (rebased) notebookEngine.drawing.rebaseLiveSurface(true);
     activeCanvasConfigurationRef.current = nextConfiguration;
-  }, [liveSceneReady, notebookEngine, page.type, renderScale, width, height, rasterTop, rasterHeight, pageGeometry.source.left, pageGeometry.source.top]);
+  }, [liveSceneReady, notebookEngine, page.type, windowAligned, renderScale, width, height, rasterLeft, rasterTop, rasterWidth, rasterHeight, liveLayers.length, expandedSurface, pageGeometry.source.left, pageGeometry.source.top]);
 
-  const [layerRevision, setLayerRevision] = useState(0);
+  const liveSurfaceCropped = effectiveLive.windowed && (
+    rasterLeft > 0.5
+    || rasterTop > logicalBase + 0.5
+    || rasterWidth < width - 1
+    || rasterHeight < height - 1
+  );
+  const showOverviewBackdrop = liveSceneReady && liveSurfaceCropped && renderScale >= 3.0 && !expandedSurface && page.type !== 'pdf';
+
+  useLayoutEffect(() => {
+    const canvas = overviewCanvasRef.current;
+    if (!showOverviewBackdrop || !canvas) {
+      notebookEngine.drawing.setOverviewCanvas(null, 0, 0);
+      return;
+    }
+    notebookEngine.drawing.setOverviewCanvas(canvas, width, height);
+    return () => {
+      notebookEngine.drawing.setOverviewCanvas(null, 0, 0);
+    };
+  }, [
+    showOverviewBackdrop,
+    liveSurfacePainted,
+    width,
+    height,
+    pageGeometry.source.left,
+    pageGeometry.source.top,
+    fullDarkView,
+    notebookEngine,
+    page.id,
+  ]);
+
+  const renderedTextVersionRef = useRef(-1);
+  const [selectedTextKey, setSelectedTextKey] = useState('');
+  const [editingTextId, setEditingTextId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!liveSceneReady) {
+      setSelectedTextKey('');
+      setEditingTextId(null);
+      return;
+    }
+    const readKey = () => notebookEngine.selection.getSelectedElements()
+      .filter(el => el.type === 'text')
+      .map(el => el.id)
+      .sort()
+      .join('|');
+    setSelectedTextKey(prev => {
+      const next = readKey();
+      return prev === next ? prev : next;
+    });
+    return notebookEngine.selection.subscribe(() => {
+      const next = readKey();
+      setSelectedTextKey(prev => (prev === next ? prev : next));
+    });
+  }, [liveSceneReady, notebookEngine]);
+
+  useEffect(() => {
+    if (!liveSceneReady) return;
+    const handleFocusText = (e: Event) => {
+      const id = (e as CustomEvent<{ id?: string }>).detail?.id;
+      if (id && notebookEngine.texts.getTexts().some(t => t.id === id)) {
+        setEditingTextId(id);
+      }
+    };
+    document.addEventListener('panvas:focus-text', handleFocusText);
+    return () => document.removeEventListener('panvas:focus-text', handleFocusText);
+  }, [liveSceneReady, notebookEngine]);
+
+  useEffect(() => {
+    if (toolState.mode !== 'text' && editingTextId !== null) {
+      setEditingTextId(null);
+    }
+  }, [toolState.mode, editingTextId]);
+
   useEffect(() => {
     if (!isFocused) return;
+    renderedTextVersionRef.current = notebookEngine.texts.getVersion();
     const unsubLayers = notebookEngine.layers.subscribe(() => {
       setLayerRevision(rev => rev + 1);
+      if (showOverviewBackdrop) notebookEngine.drawing.scheduleOverviewSync();
     });
     const unsubMutation = notebookEngine.onSceneMutation(reason => {
-      if (reason !== 'document-text' && !isDrawingRecentlyActive(300)) {
+      if (reason === 'document-text') return;
+      if (showOverviewBackdrop) notebookEngine.drawing.scheduleOverviewSync();
+      const nextVersion = notebookEngine.texts.getVersion();
+      if (nextVersion !== renderedTextVersionRef.current) {
+        renderedTextVersionRef.current = nextVersion;
         setLayerRevision(rev => rev + 1);
       }
     });
@@ -456,7 +751,7 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
       unsubLayers();
       unsubMutation();
     };
-  }, [isFocused, notebookEngine]);
+  }, [isFocused, notebookEngine, showOverviewBackdrop]);
 
   // Text objects for non-focused pages
   // The live editor is authoritative while this preview is hidden. Generate
@@ -473,12 +768,16 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
 
   // Live text objects from notebookEngine when focused
   const liveTextObjects = useMemo(() => {
-    if (!liveSceneReady) return [];
+    if (!liveSceneReady) {
+      renderedTextVersionRef.current = -1;
+      return [];
+    }
+    const allTexts = notebookEngine.texts.getTexts();
+    renderedTextVersionRef.current = notebookEngine.texts.getVersion();
     const layers = notebookEngine.layers.getLayers();
     const orderMap = new Map<string, number>();
     layers.forEach((l, idx) => orderMap.set(l.id, idx));
-    return notebookEngine.texts
-      .getTexts()
+    return allTexts
       .filter(object => notebookEngine.layers.isVisible(object.layerId))
       .sort((a, b) => {
         const orderA = orderMap.get(a.layerId ?? DEFAULT_PAGE_LAYER_ID) ?? 0;
@@ -495,7 +794,6 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
   }, [liveSceneReady, properties.layoutMode, body?.id, notebookEngine]);
   // The committed content bottom feeds the live-drawing growth loop below, so
   // the per-frame extent check never rescans the whole scene.
-  const contentBottomRef = useRef(0);
   useEffect(() => {
     if (!liveSceneReady || !expandedSurface) return;
     const bottom = positionedContentBottom([...notebookEngine.drawing.getStrokes(), ...notebookEngine.shapes.getShapes(), ...notebookEngine.images.getImages(), ...notebookEngine.texts.getTexts()]);
@@ -558,7 +856,7 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
       render?.cancel();
       if (task) { void task.destroy(); task = undefined; }
     };
-  }, [page.type, page.pdfDataId, width, height, renderScale]);
+  }, [page.type, page.pdfDataId, width, height, inactiveRenderScale]);
 
   // Page activation must not fire while the Hand tool is active. Activating flips
   // focusedPageId, which runs this component's mount effect cleanup —
@@ -573,12 +871,13 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
     }
   };
 
-  const orderedLayers = liveSceneReady ? notebookEngine.layers.getLayers() : data?.layers ?? [];
-  const layeredDrawing = page.type !== 'pdf' && orderedLayers.length > 1 ? (liveSceneReady ? notebookEngine.drawing : staticDrawing) : null;
-  const textZIndex = (layerId?: string) => layeredDrawing ? 21 + Math.max(0, orderedLayers.findIndex(layer => layer.id === (layerId ?? DEFAULT_PAGE_LAYER_ID))) * 3 : undefined;
+  const presentationDrawing = page.type !== 'pdf' ? (liveSceneReady ? notebookEngine.drawing : staticDrawing) : null;
+  const textZIndexFor = (layerId: string | undefined, layers: typeof staticLayers) => page.type !== 'pdf' && presentationDrawing
+    ? 21 + Math.max(0, layers.findIndex(layer => layer.id === (layerId ?? DEFAULT_PAGE_LAYER_ID))) * 4
+    : undefined;
 
   return (
-    <div 
+    <div
       ref={pageRootRef}
       data-page-id={page.id}
       data-rendered-page-id={page.id}
@@ -604,16 +903,12 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
       >
         {/* This page-owned visual subtree survives every interaction handoff. */}
         <div data-stable-page-visual={page.id} style={{ visibility: liveSceneReady && page.type !== 'pdf' && liveSurfacePainted ? 'hidden' : 'visible' }}>
-        {staticDrawing && (data?.layers?.length ?? 0) > 1 && data!.layers!.map((layer, order) => <LayerCanvas key={layer.id} drawing={staticDrawing} id={layer.id} width={width} height={rasterHeight} top={rasterTop - logicalBase} scale={Math.min(renderScale, MAX_INACTIVE_PAGE_RENDER_ZOOM)} order={order} />)}
+        {staticDrawing && staticLayers.map((layer, order) => <LayerCanvas key={layer.id} drawing={staticDrawing} id={layer.id} width={width} height={staticRasterHeight} left={0} top={expandedSurface ? staticRasterTop - logicalBase : 0} scale={Math.min(renderScale, MAX_INACTIVE_PAGE_RENDER_ZOOM)} layerCount={Math.max(1, staticLayers.length)} order={order} />)}
         {/* Live text editors already render on focus; keep the static HTML
             hidden so the two copies never stack during a deferred ink handoff. */}
         <div style={{ visibility: liveSceneReady ? 'hidden' : 'visible' }}>
-          {staticTextObjects.filter(obj => !isDocumentBody(obj) && (!expandedSurface || obj.y + (obj.height ?? 100) > rasterTop && obj.y < rasterTop + rasterHeight)).map(obj => isVoiceNoteObject(obj) ? <StaticVoiceNote key={obj.id} object={obj} note={data?.audioNotes?.find(note => note.id === obj.metadata.audioNoteId)} offset={textPageOffset}/> : (
-            <StaticTextPreview key={obj.id} object={obj} scale={1} zIndex={textZIndex(obj.layerId)} offset={textPageOffset} />
-          ))}
-          {(data?.objects ?? []).filter((obj): obj is ImageObject => obj.type === 'image' && (!expandedSurface || obj.y + (obj.height ?? 0) > rasterTop && obj.y < rasterTop + rasterHeight)).map(obj => (
-            <PageImageOverlay key={`img-${obj.id}`} object={obj} url={staticImages?.getObjectUrl(obj.fileId)} imageManager={staticImages}
-              zIndex={layeredDrawing ? 22 + Math.max(0, (data?.layers ?? []).findIndex(layer => layer.id === (obj.layerId ?? DEFAULT_PAGE_LAYER_ID))) * 3 : 22} />
+          {staticTextObjects.filter(obj => !isDocumentBody(obj) && (!expandedSurface || (obj.y + pageGeometry.source.top + (obj.height ?? 160) > rasterTop && obj.y + pageGeometry.source.top < rasterTop + rasterHeight))).map(obj => isVoiceNoteObject(obj) ? <StaticVoiceNote key={obj.id} object={obj} note={data?.audioNotes?.find(note => note.id === obj.metadata.audioNoteId)} offset={textPageOffset}/> : (
+            <StaticTextPreview key={obj.id} object={obj} scale={1} zIndex={textZIndexFor(obj.layerId, staticLayers)} offset={textPageOffset} paperColor={properties.paperColor} />
           ))}
         </div>
 
@@ -623,28 +918,64 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
         {!data && <div role="status" className="absolute inset-0 flex items-center justify-center text-xs opacity-60">Loading page?</div>}
 
         {liveSceneReady && <div data-live-page-visual={page.id} style={{ visibility: 'visible' }}>
-        {/* Focused live TipTap text editors */}
-        {liveSceneReady && layeredDrawing && orderedLayers.map((layer, order) => <LayerCanvas key={layer.id} drawing={layeredDrawing} id={layer.id} width={width} height={rasterHeight} top={rasterTop - logicalBase} scale={renderScale} order={order} />)}
-        {liveSceneReady && liveTextObjects.filter(obj => !isDocumentBody(obj) && (!expandedSurface || obj.y + (obj.height ?? 100) > rasterTop && obj.y < rasterTop + rasterHeight)).map(obj => isVoiceNoteObject(obj) ? (
-          <NotebookVoiceNote key={obj.id} object={obj} note={notebookEngine.audio.getAll().find(note => note.id === obj.metadata.audioNoteId)} engine={notebookEngine} scale={1} offset={textPageOffset} bounds={{ x: -pageGeometry.source.left, y: -pageGeometry.source.top, width, height: expandedSurface ? Math.max(height, properties.layoutExtent ?? 0) : height }} editable={editable && notebookEngine.texts.isEditable(obj)} onChange={onVoiceNoteChange} onDelete={onVoiceNoteDelete} onRename={onVoiceNoteRename}/>
-        ) : (
-          <FloatingTextEditor
-            key={obj.id}
-            object={obj}
-            engine={notebookEngine}
-            scale={1}
-            pageOffset={textPageOffset}
-            zIndex={textZIndex(obj.layerId)}
-            toolMode={properties.layoutMode !== 'document' && notebookEngine.layers.isEditable(obj.layerId) ? toolState.mode : 'hand'}
-            onFocus={setActiveEditor}
-            onBlur={ignoreTextEditorBlur}
+        {showOverviewBackdrop && (
+          <canvas
+            ref={overviewCanvasRef}
+            data-panvas-overview-backdrop={page.id}
+            aria-hidden="true"
+            className="absolute pointer-events-none"
+            style={{
+              left: 0,
+              top: 0,
+              width: `${width}px`,
+              height: `${height}px`,
+              zIndex: 18,
+              visibility: liveSurfacePainted ? 'visible' : 'hidden',
+              clipPath: `polygon(evenodd, 0 0, 100% 0, 100% 100%, 0 100%, 0 0, ${rasterLeft}px ${rasterTop - logicalBase}px, ${rasterLeft + rasterWidth}px ${rasterTop - logicalBase}px, ${rasterLeft + rasterWidth}px ${rasterTop - logicalBase + rasterHeight}px, ${rasterLeft}px ${rasterTop - logicalBase + rasterHeight}px, ${rasterLeft}px ${rasterTop - logicalBase}px)`,
+            }}
           />
-        ))}
-
-        {liveSceneReady && notebookEngine.images.getImages().filter(obj => !expandedSurface || obj.y + (obj.height ?? 0) > rasterTop && obj.y < rasterTop + rasterHeight).map(obj => (
-          <PageImageOverlay key={`img-${obj.id}`} object={obj} url={notebookEngine.images.getObjectUrl(obj.fileId)} imageManager={notebookEngine.images}
-            zIndex={layeredDrawing ? 22 + Math.max(0, orderedLayers.findIndex(layer => layer.id === (obj.layerId ?? DEFAULT_PAGE_LAYER_ID))) * 3 : 22} />
-        ))}
+        )}
+        {/* Focused live TipTap editors only when selected or actively editing; idle text/math use StaticTextPreview */}
+        {liveSceneReady && liveLayers.map((layer, order) => <LayerCanvas key={layer.id} drawing={notebookEngine.drawing} id={layer.id} width={rasterWidth} height={rasterHeight} left={rasterLeft} top={rasterTop - logicalBase} scale={effectiveLive.scale} layerCount={effectiveLive.layerCount} order={order} visible={liveSurfacePainted} ready={mountReady} />)}
+        {liveSceneReady && liveTextObjects.filter(obj => !isDocumentBody(obj) && (!expandedSurface || (obj.y + pageGeometry.source.top + (obj.height ?? 160) > rasterTop && obj.y + pageGeometry.source.top < rasterTop + rasterHeight))).map(obj => {
+          const selectedTextSet = selectedTextKey ? new Set(selectedTextKey.split('|')) : null;
+          const idleInteractiveMode: 'select' | 'text' | 'none' = (editable && (toolState.mode === 'select' || toolState.mode === 'text')) ? toolState.mode : 'none';
+          if (isVoiceNoteObject(obj)) {
+              return <NotebookVoiceNote key={obj.id} object={obj} note={notebookEngine.audio.getAll().find(note => note.id === obj.metadata.audioNoteId)} engine={notebookEngine} scale={1} offset={textPageOffset} bounds={{ x: -pageGeometry.source.left, y: -pageGeometry.source.top, width, height: expandedSurface ? Math.max(height, properties.layoutExtent ?? 0) : height }} editable={editable && notebookEngine.texts.isEditable(obj)} onChange={onVoiceNoteChange} onDelete={onVoiceNoteDelete} onRename={onVoiceNoteRename}/>;
+            }
+            const needsTipTap = Boolean(selectedTextSet?.has(obj.id) || editingTextId === obj.id);
+            if (!needsTipTap) {
+              return (
+                <StaticTextPreview
+                  key={obj.id}
+                  object={obj}
+                  scale={1}
+                  zIndex={textZIndexFor(obj.layerId, liveLayers)}
+                  offset={textPageOffset}
+                  paperColor={properties.paperColor}
+                  engine={notebookEngine}
+                  interactiveMode={editable && notebookEngine.layers.isEditable(obj.layerId) ? idleInteractiveMode : 'none'}
+                  onActivateEdit={objToEdit => setEditingTextId(objToEdit.id)}
+                  onEditMathObject={onEditMathObject}
+                />
+              );
+            }
+            return (
+              <FloatingTextEditor
+                key={obj.id}
+                object={obj}
+                engine={notebookEngine}
+                scale={1}
+                pageOffset={textPageOffset}
+                paperColor={properties.paperColor}
+                zIndex={textZIndexFor(obj.layerId, liveLayers)}
+                toolMode={notebookEngine.layers.isEditable(obj.layerId) ? toolState.mode : 'hand'}
+                onFocus={setActiveEditor}
+                onBlur={ignoreTextEditorBlur}
+                onEditMathObject={onEditMathObject}
+              />
+            );
+          })}
 
         {/* Only this transient canvas is ever cleared by NotebookEngine. */}
         {liveSceneReady && page.type !== 'pdf' && <canvas
@@ -663,16 +994,16 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
           onDrop={handleDrop}
           onDragOver={handleDragOver}
           onDragEnter={handleDragOver}
-          className={`absolute inset-0 z-10 w-full h-full ${
+          className={`absolute ${liveCanvasStyle ? '' : 'inset-0 w-full h-full '}z-10 ${
             isFocused ? (
-              toolState.mode === 'hand' ? 'cursor-grab active:cursor-grabbing touch-none' : 
-              toolState.mode === 'text' ? 'cursor-text touch-none' : 
-              toolState.mode === 'select' ? 'cursor-default touch-none' : 
+              toolState.mode === 'hand' ? 'cursor-grab active:cursor-grabbing touch-none' :
+              toolState.mode === 'text' ? 'cursor-text touch-none' :
+              toolState.mode === 'select' ? 'cursor-default touch-none' :
               'touch-none'
             ) : 'pointer-events-none'
           }`}
           style={{
-            ...canvasStyle,
+            ...liveCanvasStyle,
             ...(pageCursor ? { cursor: pageCursor } : {}),
             // Do not expose the shared live surface until its ownership
             // marker has caught up with this physical page.
@@ -686,3 +1017,52 @@ export const NotebookPageView: React.FC<NotebookPageViewProps> = ({
     </div>
   );
 };
+
+export const NotebookPageView = React.memo(NotebookPageViewComponent, (prev, next) => {
+  if (prev.page !== next.page) {
+    if (prev.page.id !== next.page.id || prev.page.type !== next.page.type || prev.page.pdfDataId !== next.page.pdfDataId) {
+      return false;
+    }
+  }
+  if (prev.width !== next.width || prev.height !== next.height) return false;
+  if (prev.pageNumberText !== next.pageNumberText) return false;
+  if (prev.isFocused !== next.isFocused) return false;
+  if (prev.sceneOwnerPageId !== next.sceneOwnerPageId) return false;
+  if (prev.editable !== next.editable) return false;
+  if (prev.logicalBase !== next.logicalBase) return false;
+  if (prev.pageX !== next.pageX || prev.pageY !== next.pageY || prev.layoutTotalWidth !== next.layoutTotalWidth || prev.horizontalPadding !== next.horizontalPadding) {
+    return false;
+  }
+  if (prev.isFocused || next.isFocused) {
+    if (prev.renderScale !== next.renderScale) return false;
+  } else {
+    if (Math.min(prev.renderScale, MAX_INACTIVE_PAGE_RENDER_ZOOM) !== Math.min(next.renderScale, MAX_INACTIVE_PAGE_RENDER_ZOOM)) {
+      return false;
+    }
+  }
+  if (prev.data !== next.data) return false;
+  if (prev.properties !== next.properties && JSON.stringify(prev.properties) !== JSON.stringify(next.properties)) {
+    return false;
+  }
+  if (prev.toolState !== next.toolState) return false;
+  if (prev.notebookEngine !== next.notebookEngine) return false;
+  // `previewSource` is only read on initial mount/data adoption (never in JSX
+  // or effect dependencies), so self-registration into `residentDrawingEnginesRef`
+  // must not trigger neighbor re-renders during scroll.
+  if (
+    prev.onActivatePage !== next.onActivatePage
+    || prev.onUpdateProperties !== next.onUpdateProperties
+    || prev.onLogicalRebase !== next.onLogicalRebase
+    || prev.onImageManagerReady !== next.onImageManagerReady
+    || prev.setActiveEditor !== next.setActiveEditor
+    || prev.handleDrop !== next.handleDrop
+    || prev.handleDragOver !== next.handleDragOver
+    || prev.onVoiceNoteChange !== next.onVoiceNoteChange
+    || prev.onVoiceNoteDelete !== next.onVoiceNoteDelete
+    || prev.onVoiceNoteRename !== next.onVoiceNoteRename
+    || prev.onEditMathObject !== next.onEditMathObject
+  ) {
+    return false;
+  }
+  return true;
+});

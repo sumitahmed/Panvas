@@ -5,12 +5,12 @@
 import React, { useEffect, useState } from 'react';
 import { AppShell } from '@/components/layout/AppShell';
 import { WorkspaceContent } from '@/components/workspace/WorkspaceContent';
-import { CommandPalette } from '@/components/ui/CommandPalette';
 import { ContextMenu } from '@/components/ui/ContextMenu';
 import { Toast } from '@/components/ui/Toast';
 import { CreateDialog } from '@/components/workspace/CreateDialog';
 import { useWorkspaceStore } from '@/stores/workspaceStore';
 import { useAuthStore } from '@/stores/authStore';
+import { useUIStore } from '@/stores/uiStore';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import { initializeDatabase } from '@/database/schema';
 import { migrateFromDexieToFs, needsDexieToFsMigration } from '@/lib/migration';
@@ -27,11 +27,6 @@ import { TermsOfServicePage } from '@/components/legal/TermsOfServicePage';
 import { SecurityPage } from '@/components/legal/SecurityPage';
 // Auth Pages
 import { AuthGuard } from '@/components/auth/AuthGuard';
-import { AuthCallbackHandler } from '@/components/auth/AuthCallbackHandler';
-import { VerifyEmailPage } from '@/components/auth/VerifyEmailPage';
-import { SettingsLayout } from '@/components/settings/SettingsLayout';
-import { LibraryWorkspace } from '@/components/library/LibraryWorkspace';
-import { KnowledgeWorkspace } from '@/components/knowledge/KnowledgeWorkspace';
 import { CLOUD_SYNC_ENABLED, CLOUD_SYNC_V2_ENABLED } from '@/config/features';
 import { useCloudSyncStore } from '@/stores/cloudSyncStore';
 import { rememberAppRoute } from '@/services/library/libraryRouteState';
@@ -55,6 +50,20 @@ const LoginPage = React.lazy(() => import('@/components/auth/LoginPage').then(({
 const SignUpPage = React.lazy(() => import('@/components/auth/SignUpPage').then(({ SignUpPage }) => ({ default: SignUpPage })));
 const ForgotPasswordPage = React.lazy(() => import('@/components/auth/ForgotPasswordPage').then(({ ForgotPasswordPage }) => ({ default: ForgotPasswordPage })));
 const ResetPasswordPage = React.lazy(() => import('@/components/auth/ResetPasswordPage').then(({ ResetPasswordPage }) => ({ default: ResetPasswordPage })));
+const AuthCallbackHandler = React.lazy(() => import('@/components/auth/AuthCallbackHandler').then(({ AuthCallbackHandler }) => ({ default: AuthCallbackHandler })));
+const VerifyEmailPage = React.lazy(() => import('@/components/auth/VerifyEmailPage').then(({ VerifyEmailPage }) => ({ default: VerifyEmailPage })));
+const SettingsLayout = React.lazy(() => import('@/components/settings/SettingsLayout').then(({ SettingsLayout }) => ({ default: SettingsLayout })));
+const LazyLibraryWorkspace = React.lazy(() => import('@/components/library/LibraryWorkspace').then(({ LibraryWorkspace }) => ({ default: LibraryWorkspace })));
+const KnowledgeWorkspace = React.lazy(() => import('@/components/knowledge/KnowledgeWorkspace').then(({ KnowledgeWorkspace }) => ({ default: KnowledgeWorkspace })));
+const CommandPalette = React.lazy(() => import('@/components/ui/CommandPalette').then(({ CommandPalette }) => ({ default: CommandPalette })));
+
+function LibraryWorkspace() {
+  return (
+    <React.Suspense fallback={null}>
+      <LazyLibraryWorkspace />
+    </React.Suspense>
+  );
+}
 
 function LegacyAuthFallback() {
   return <div role="status" aria-live="polite" className="min-h-screen grid place-content-center p-8 text-sm text-panvas-text-secondary">Opening account page…</div>;
@@ -64,6 +73,7 @@ export function App() {
   const [isReady, setIsReady] = useState(false);
   const { loadWorkspaces, loadRecentFiles, loadTrash } = useWorkspaceStore();
   const { initAuth } = useAuthStore();
+  const isCommandPaletteOpen = useUIStore(state => state.isCommandPaletteOpen);
 
   // Register keyboard shortcuts
   useKeyboardShortcuts();
@@ -94,7 +104,7 @@ export function App() {
         } catch (e) {
           console.warn('[App] Dexie init failed. This is fine if using Electron IPC.', e);
         }
-        
+
         // 3. Load workspace data strictly scoped to this user
         const bootstrapSnapshot = await loadWorkspaces();
         // 3.1 Restore the persisted active document through the canonical
@@ -197,20 +207,24 @@ export function App() {
         {/* Auth routes */}
         <Route path="/auth/login"><React.Suspense fallback={<LegacyAuthFallback />}><LoginPage /></React.Suspense></Route>
         <Route path="/auth/signup"><React.Suspense fallback={<LegacyAuthFallback />}><SignUpPage /></React.Suspense></Route>
-        <Route path="/auth/verify-email" component={VerifyEmailPage} />
+        <Route path="/auth/verify-email"><React.Suspense fallback={null}><VerifyEmailPage /></React.Suspense></Route>
         <Route path="/auth/forgot-password"><React.Suspense fallback={<LegacyAuthFallback />}><ForgotPasswordPage /></React.Suspense></Route>
         <Route path="/auth/reset-password"><React.Suspense fallback={<LegacyAuthFallback />}><ResetPasswordPage /></React.Suspense></Route>
-        <Route path="/auth/callback" component={AuthCallbackHandler} />
+        <Route path="/auth/callback"><React.Suspense fallback={null}><AuthCallbackHandler /></React.Suspense></Route>
         <Route path="/private-beta" component={ComingSoonPage} />
         <Route path="/app/settings/:tab*">
           <AuthGuard>
-            <SettingsLayout />
+            <React.Suspense fallback={null}>
+              <SettingsLayout />
+            </React.Suspense>
           </AuthGuard>
         </Route>
         <Route path="/app/knowledge">
           <AuthGuard>
             <AppShell>
-              <KnowledgeWorkspace />
+              <React.Suspense fallback={null}>
+                <KnowledgeWorkspace />
+              </React.Suspense>
             </AppShell>
           </AuthGuard>
         </Route>
@@ -241,7 +255,11 @@ export function App() {
       </Switch>
 
       {/* Overlays */}
-      <CommandPalette />
+      {isCommandPaletteOpen && (
+        <React.Suspense fallback={null}>
+          <CommandPalette />
+        </React.Suspense>
+      )}
       <CreateDialog />
       <ContextMenu />
       <Toast />

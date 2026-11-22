@@ -29,6 +29,10 @@ npm run test:browser-integrity
 npm run test:cloud-workspace-flow
 npm run test:cloud-returning-browser
 npm run test:editor-regressions
+node --test tests/wet-ink-prediction.test.ts
+node --test tests/math-ocr-accuracy.test.ts
+node --test tests/handwriting-math-and-multiline.test.ts
+node --test tests/cloud-sync-drawing-deferral.test.ts tests/cloud-sync-performance.test.ts tests/exact-payload-hash-cache.test.ts
 ```
 
 The package-specific `test:package-a`, `test:package-b`, and `test:package-c` scripts are also useful for migration/storage, Electron/PDF, and cloud-sync changes. Run the narrowest relevant suite during iteration, then run the full `npm test` gate before review.

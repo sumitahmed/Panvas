@@ -9,20 +9,21 @@ import type { Editor } from '@tiptap/core';
 import { DocumentationControls } from './DocumentationControls';
 import type { NotebookEngine } from './engine/NotebookEngine';
 import { canUseDocumentLayoutHistory, runDocumentLayoutHistory } from './documentLayoutTransition';
-import { 
-  Undo2, 
-  Redo2, 
-  Scissors, 
-  Copy, 
-  ClipboardPaste, 
-  CopyPlus, 
-  Trash2, 
+import {
+  Undo2,
+  Redo2,
+  Scissors,
+  Copy,
+  ClipboardPaste,
+  CopyPlus,
+  Trash2,
   CheckSquare,
   ChevronUp,
   ChevronDown,
   ChevronsUp,
   ChevronsDown,
   Languages,
+  Sigma,
 } from 'lucide-react';
 
 export interface ContextMenuState {
@@ -42,7 +43,7 @@ export interface NotebookContextMenuProps {
   engine?: NotebookEngine;
   state: ContextMenuState;
   onClose: () => void;
-  onCommand: (command: 'undo' | 'redo' | 'cut' | 'copy' | 'paste' | 'duplicate' | 'delete' | 'selectAll' | 'bringToFront' | 'bringForward' | 'sendBackward' | 'sendToBack' | 'convertHandwriting') => void;
+  onCommand: (command: 'undo' | 'redo' | 'cut' | 'copy' | 'paste' | 'duplicate' | 'delete' | 'selectAll' | 'bringToFront' | 'bringForward' | 'sendBackward' | 'sendToBack' | 'convertHandwriting' | 'convertHandwritingMath') => void;
 }
 
 export const NotebookContextMenu: React.FC<NotebookContextMenuProps> = ({
@@ -72,7 +73,7 @@ export const NotebookContextMenu: React.FC<NotebookContextMenuProps> = ({
   const editor = state.editor && !state.editor.isDestroyed ? state.editor : null;
   const menuWidth = editor ? 310 : 190;
 
-  const handleAction = (cmd: 'undo' | 'redo' | 'cut' | 'copy' | 'paste' | 'duplicate' | 'delete' | 'selectAll' | 'bringToFront' | 'bringForward' | 'sendBackward' | 'sendToBack' | 'convertHandwriting') => {
+  const handleAction = (cmd: Parameters<NotebookContextMenuProps['onCommand']>[0]) => {
     onCommand(cmd);
     onClose();
   };
@@ -187,16 +188,28 @@ export const NotebookContextMenu: React.FC<NotebookContextMenuProps> = ({
         )}
 
         {state.canConvertHandwriting && !state.isTextEditing && (
-          <button
-            type="button"
-            onClick={() => handleAction('convertHandwriting')}
-            className="flex w-full items-center justify-between px-2.5 py-1.5 rounded-md text-panvas-text-primary hover:bg-panvas-bg-hover transition-colors"
-          >
-            <div className="flex items-center gap-2">
-              <Languages size={13} className="text-blue-400" />
-              <span>Convert to Text</span>
-            </div>
-          </button>
+          <>
+            <button
+              type="button"
+              onClick={() => handleAction('convertHandwriting')}
+              className="flex w-full items-center justify-between px-2.5 py-1.5 rounded-md text-panvas-text-primary hover:bg-panvas-bg-hover transition-colors"
+            >
+              <div className="flex items-center gap-2">
+                <Languages size={13} className="text-blue-400" />
+                <span>Convert to Text</span>
+              </div>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleAction('convertHandwritingMath')}
+              className="flex w-full items-center justify-between px-2.5 py-1.5 rounded-md text-panvas-text-primary hover:bg-panvas-bg-hover transition-colors"
+            >
+              <div className="flex items-center gap-2">
+                <Sigma size={13} className="text-purple-400" />
+                <span>Convert to Math</span>
+              </div>
+            </button>
+          </>
         )}
 
         {state.hasSelection && !state.isTextEditing && (

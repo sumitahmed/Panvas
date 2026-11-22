@@ -8,7 +8,7 @@ import { regionIntersects, eraserCapsule, strokeRegion } from '../src/components
 import type { EraserMode, Stroke } from '../src/components/notebook/engine/drawingTypes.ts';
 import { createEmptyDrawingData } from '../src/components/notebook/engine/drawingTypes.ts';
 import { captureFreshPageOwnedDrawing } from '../src/components/notebook/notebookPageRenderState.ts';
-import { capsuleInterval, splitOutsideCapsule } from '../src/components/notebook/engine/capsuleErase.ts';
+import { capsuleInterval, eraseBounds, splitOutsideCapsule } from '../src/components/notebook/engine/capsuleErase.ts';
 import { cutStroke } from '../src/components/notebook/engine/inkRegion.ts';
 import { cloneStrokeSnapshot } from '../src/components/notebook/engine/cloneStrokeSnapshot.ts';
 import { getInkFamilyMaximumHalfWidth, getInkFamilyRenderHalfWidth } from '../src/components/notebook/engine/inkFamilyGeometry.ts';
@@ -302,3 +302,37 @@ for (const ending of ['pointercancel','lostpointercapture','detach','destroy']) 
     f.engine.input.flushPendingErasing(); assert.equal(captures,1);
   });
 }
+
+test('highlighter dirty bounds cover every square-cap corner at horizontal, vertical and diagonal angles', () => {
+  for (const thickness of [0.5, 8, 20]) {
+    for (const angle of [0, Math.PI / 2, Math.PI / 4]) {
+      const start: InkPoint = { x: 100, y: 100 };
+      const end: InkPoint = { x: 100 + Math.cos(angle) * 250, y: 100 + Math.sin(angle) * 250 };
+      const half = Math.max(8, thickness * 6) / 2;
+      const stroke: Stroke = {
+        id: 'bounds-highlight', type: 'stroke', tool: 'highlighter', color: '#ffff00',
+        thickness, opacity: 1, createdAt: 0, points: [
+          { ...start, pressure: .5, t: 0 },
+          { ...end, pressure: .5, t: 20 },
+        ],
+      };
+      const bounds = eraseBounds(stroke);
+      const length = Math.hypot(end.x - start.x, end.y - start.y);
+      const ux = (end.x - start.x) / length, uy = (end.y - start.y) / length;
+      const nx = -uy, ny = ux;
+      const corners = [start, end].flatMap(point => {
+        const outward = point === start ? -1 : 1;
+        return [-1, 1].map(side => ({
+          x: point.x + outward * ux * half + side * nx * half,
+          y: point.y + outward * uy * half + side * ny * half,
+        }));
+      });
+      for (const corner of corners) {
+        assert.ok(corner.x >= bounds.left - 1e-6 && corner.x <= bounds.right + 1e-6,
+          `thickness ${thickness}, angle ${angle}: cap x ${corner.x} outside ${bounds.left}..${bounds.right}`);
+        assert.ok(corner.y >= bounds.top - 1e-6 && corner.y <= bounds.bottom + 1e-6,
+          `thickness ${thickness}, angle ${angle}: cap y ${corner.y} outside ${bounds.top}..${bounds.bottom}`);
+      }
+    }
+  }
+});

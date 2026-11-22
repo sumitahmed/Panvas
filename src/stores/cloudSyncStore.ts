@@ -29,7 +29,7 @@ import type { SyncV2ConflictChoice, SyncV2ConflictResolution, SyncV2ProfileState
 import { inspectAndMigrateLegacyPanvasRoot } from '@/services/cloudsync/v2/legacyMigration';
 import { migrateFromDexieToFs } from '@/lib/migration';
 import { completeDeviceResetHydration, resetBrowserLocalData } from '@/services/cloudsync/deviceReset';
-import { isDrawingRecentlyActive } from '@/services/cloudsync/drawingActivity';
+import { isDrawingRecentlyActive, isUserInteracting, waitUntilUserIdle } from '@/services/cloudsync/drawingActivity';
 
 export type SyncProviderId = CloudSyncProvider['id'];
 
@@ -59,7 +59,7 @@ interface CloudSyncState {
   initialize: () => Promise<void>;
   requestConnect: (provider: SyncProviderId, customClientId?: string) => Promise<boolean>;
   requestDisconnect: (provider: SyncProviderId) => Promise<void>;
-  triggerSync: (workspaceId?: string) => Promise<void>;
+  triggerSync: (workspaceId?: string, options?: { manual?: boolean }) => Promise<void>;
   resetThisDevice: () => Promise<boolean>;
   refreshRemoteWorkspaces: () => Promise<void>;
   attachRemoteWorkspace: (workspaceId: string) => Promise<boolean>;
@@ -81,6 +81,33 @@ let initialized = false;
 let autoSyncTimer: ReturnType<typeof setTimeout> | null = null;
 const v2SyncRunner = new SinglePendingRunner();
 const syncAuthority = new SyncRunAuthority();
+const MIN_PROGRESS_UPDATE_MS = 500;
+let lastProgressUpdateAt = 0;
+let lastProgressKey = '';
+let cleanRevisionsAccount: string | null = null;
+const cleanWorkspaceRevisions = new Map<string, number>();
+const dirtyWorkspaceIds = new Set<string>();
+const dirtyWorkspaceEpochs = new Map<string, number>();
+
+export function markCloudSyncWorkspaceDirty(workspaceId?: string | null): void {
+  if (!workspaceId) return;
+  dirtyWorkspaceIds.add(workspaceId);
+  dirtyWorkspaceEpochs.set(workspaceId, (dirtyWorkspaceEpochs.get(workspaceId) ?? 0) + 1);
+}
+
+function commitProgressIfChanged(
+  set: (partial: Partial<CloudSyncState>) => void,
+  next: CloudSyncProgress,
+): void {
+  const key = `${next.stage}|${next.completed}|${next.total}|${next.message}`;
+  const stageChanged = !lastProgressKey.startsWith(`${next.stage}|`);
+  const now = Date.now();
+  if (key === lastProgressKey) return;
+  if (!stageChanged && now - lastProgressUpdateAt < MIN_PROGRESS_UPDATE_MS) return;
+  lastProgressKey = key;
+  lastProgressUpdateAt = now;
+  set({ progress: next });
+}
 let v2ProviderSession: { connection: ProviderConnectionInfo; userId: string | null; provider: GoogleDriveSyncV2Provider } | null = null;
 function providerForAccount(connection: ProviderConnectionInfo, userId: string | null, assertCurrent: () => void): GoogleDriveSyncV2Provider {
   if (!v2ProviderSession || v2ProviderSession.connection !== connection || v2ProviderSession.userId !== userId) {
@@ -104,11 +131,19 @@ function getV2BaselineStore(): LocalStorageSyncV2BaselineStore {
  * the next navigation or app restart.
  */
 async function refreshWorkspaceProjectionAfterSync(): Promise<void> {
+  if (isUserInteracting()) {
+    await waitUntilUserIdle().catch(() => {});
+  }
   const workspaceStore = await import('@/stores/workspaceStore');
   const store = workspaceStore.useWorkspaceStore.getState();
   await store.loadWorkspaces();
   const activeWorkspaceId = workspaceStore.useWorkspaceStore.getState().activeWorkspaceId;
-  if (activeWorkspaceId) await workspaceStore.useWorkspaceStore.getState().loadWorkspaceContents(activeWorkspaceId);
+  if (activeWorkspaceId) {
+    if (isUserInteracting()) {
+      await waitUntilUserIdle().catch(() => {});
+    }
+    await workspaceStore.useWorkspaceStore.getState().loadWorkspaceContents(activeWorkspaceId);
+  }
 }
 
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -121,6 +156,10 @@ function clearRetry(): void { if (retryTimer) clearTimeout(retryTimer); retryTim
 function invalidateSync(): void {
   v2ProviderSession?.provider.getDriveProvider().clearCaches();
   v2ProviderSession = null;
+  cleanRevisionsAccount = null;
+  cleanWorkspaceRevisions.clear();
+  dirtyWorkspaceIds.clear();
+  dirtyWorkspaceEpochs.clear();
   syncAuthority.invalidate(); v2SyncRunner.cancelPending(); clearRetry(); retryAttempts = 0;
   if (autoSyncTimer) clearTimeout(autoSyncTimer);
   autoSyncTimer = null;
@@ -131,7 +170,7 @@ function scheduleRetry(diagnostic: SafeCloudDiagnostic | null | undefined): void
   const delay = Math.min(60_000, 5_000 * 2 ** retryAttempts++);
   retryTimer = setTimeout(() => {
     retryTimer = null;
-    if (useCloudSyncStore.getState().autoSync && isOnline()) void useCloudSyncStore.getState().triggerSync();
+    if (useCloudSyncStore.getState().autoSync && isOnline()) void useCloudSyncStore.getState().triggerSync(undefined, { manual: false });
   }, delay);
 }
 
@@ -770,9 +809,10 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
     return finalStatus === 'synced';
   },
 
-  triggerSync: async workspaceId => {
+  triggerSync: async (workspaceId, options) => {
     if (deviceResetInProgress) return;
     clearRetry();
+    const isManualSync = options?.manual !== false;
     const connection = get().connectionByProvider.googledrive;
     if (!connection || get().statusByProvider.googledrive === 'connecting' || (!CLOUD_SYNC_V2_ENABLED && get().isSyncing)) return;
     if (!isOnline()) {
@@ -780,6 +820,8 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
       return;
     }
 
+    lastProgressUpdateAt = 0;
+    lastProgressKey = '';
     set(state => ({ isSyncing: true, statusByProvider: { ...state.statusByProvider, googledrive: 'syncing' }, lastError: null, lastDiagnostic: null, progress: { stage: 'preparing', completed: 0, total: 1, message: 'Checking cloud…' } }));
 
     if (CLOUD_SYNC_V2_ENABLED) {
@@ -789,6 +831,17 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
       const userId = useAuthStore.getState().user?.id ?? null;
       const assertCurrent = syncAuthority.capture(() => get().connectionByProvider.googledrive === connection && (useAuthStore.getState().user?.id ?? null) === userId);
       try {
+      if (!isManualSync && isUserInteracting()) {
+        await waitUntilUserIdle().catch(() => {});
+        assertCurrent();
+        if (!get().autoSync || !isOnline()) return;
+      }
+      if (cleanRevisionsAccount !== connection.accountIdentifier) {
+        cleanRevisionsAccount = connection.accountIdentifier;
+        cleanWorkspaceRevisions.clear();
+      }
+      const capturedEpochs = new Map(dirtyWorkspaceEpochs);
+      const dirtyAtStart = new Set(dirtyWorkspaceIds);
       // Electron's legacy IndexedDB import runs after the UI appears. Join
       // that one in-flight run before enumerating local workspaces so Sync now
       // cannot race a partially reconstructed workspace tree.
@@ -815,6 +868,15 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
         baselines: getV2BaselineStore(),
         conflictStore: dexieSyncV2ConflictStore,
         environment: isElectron ? 'desktop' : 'web',
+        manual: isManualSync,
+        dirtyWorkspaceIds: dirtyAtStart,
+        cleanWorkspaceRevisions,
+        onWorkspaceCleanSynced: (syncedWorkspaceId, manifestRevision) => {
+          cleanWorkspaceRevisions.set(syncedWorkspaceId, manifestRevision);
+          if ((dirtyWorkspaceEpochs.get(syncedWorkspaceId) ?? 0) === (capturedEpochs.get(syncedWorkspaceId) ?? 0)) {
+            dirtyWorkspaceIds.delete(syncedWorkspaceId);
+          }
+        },
         legacyMigrator: isElectron ? async () => {
           return inspectAndMigrateLegacyPanvasRoot({
             accountIdentifier: connection.accountIdentifier,
@@ -824,7 +886,7 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
             assertCurrent,
             onProgress: message => {
               assertCurrent();
-              set({ progress: { stage: 'preparing', completed: 0, total: 1, message } });
+              commitProgressIfChanged(set, { stage: 'preparing', completed: 0, total: 1, message });
             },
           });
         } : undefined,
@@ -833,7 +895,15 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
           return { workspaceId, kind: kind as SyncV2ConflictResolution['kind'], id: idParts.join(':'), choice: resolution };
         }),
         assertCurrent,
-        onProgress: message => { assertCurrent(); set({ progress: { stage: message.startsWith('Uploading') ? 'uploading' : message.startsWith('Downloading') ? 'downloading' : message === 'Up to date' ? 'complete' : 'preparing', completed: message === 'Up to date' ? 1 : 0, total: 1, message } }); },
+        onProgress: message => {
+          assertCurrent();
+          commitProgressIfChanged(set, {
+            stage: message.startsWith('Uploading') ? 'uploading' : message.startsWith('Downloading') ? 'downloading' : message === 'Up to date' ? 'complete' : 'preparing',
+            completed: message === 'Up to date' ? 1 : 0,
+            total: 1,
+            message,
+          });
+        },
       });
       const localIds = await localWorkspaceIds();
       assertCurrent();
@@ -976,11 +1046,11 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
             localAdapter: adapterForRun,
             onWorkspace: (completed, total, remoteWorkspaceId) => {
               diagnosticWorkspaceId = remoteWorkspaceId;
-              set({ progress: { stage: 'downloading', completed: completed - 1, total, message: `Syncing workspace ${completed} of ${total}...` } });
+              commitProgressIfChanged(set, { stage: 'downloading', completed: completed - 1, total, message: `Syncing workspace ${completed} of ${total}...` });
             },
             onRecordProgress: (workspaceNumber, workspaceTotal, completed, total, remoteWorkspaceId) => {
               diagnosticWorkspaceId = remoteWorkspaceId;
-              set({ progress: { stage: 'downloading', completed, total, message: `Syncing workspace ${workspaceNumber} of ${workspaceTotal}... Downloading changes ${completed} of ${total}...` } });
+              commitProgressIfChanged(set, { stage: 'downloading', completed, total, message: `Syncing workspace ${workspaceNumber} of ${workspaceTotal}... Downloading changes ${completed} of ${total}...` });
             },
           });
           for (const replica of replicas) {
@@ -1050,7 +1120,7 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
           deviceState,
           now: Date.now(),
           objectConcurrency: 4,
-          onProgress: val => { assertCurrent(); set({ progress: progressPrefix ? { ...val, message: `${progressPrefix} (${val.message})` } : val }); },
+          onProgress: val => { assertCurrent(); commitProgressIfChanged(set, progressPrefix ? { ...val, message: `${progressPrefix} (${val.message})` } : val); },
         });
 
         metrics.localEntitiesScanned += result.localEntitiesScanned; metrics.payloadsLoaded += result.payloadsLoaded; metrics.objectsUploaded += result.objectsUploaded; metrics.objectsAlreadyPresent += result.objectsAlreadyPresent; metrics.manifestEntries += result.manifestEntries; metrics.journalEntriesProcessed += result.journalEntriesProcessed; metrics.conflictsCreated += result.conflictsCreated; metrics.bytesUploaded += result.bytesUploaded; metrics.largeAssets += result.largeAssets; metrics.totalGoogleRequests += result.providerRequests.requests; metrics.retries += result.providerRequests.retries; metrics.backoffMs += result.providerRequests.backoffMs; metrics.timeouts += result.providerRequests.timeouts; metrics.totalDurationMs += result.stageTimingsMs.total; metrics.manifestReadMs += result.stageTimingsMs.manifestRead; metrics.manifestWriteMs += result.stageTimingsMs.manifestWrite; metrics.manifestReadBackMs += result.stageTimingsMs.manifestReadBack; metrics.hashingAndLoadMs += result.stageTimingsMs.payloadLoadAndHash; metrics.objectTransferMs += result.stageTimingsMs.objectTransfer;
@@ -1065,7 +1135,7 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
             provider: providerForRun,
             journalStore: journalForRun,
             localAdapter: adapterForRun,
-            onProgress: (completed, total) => set({ progress: { stage: 'downloading', completed, total, message: `Downloading changes ${completed} of ${total}...` } }),
+            onProgress: (completed, total) => commitProgressIfChanged(set, { stage: 'downloading', completed, total, message: `Downloading changes ${completed} of ${total}...` }),
           });
           metrics.remoteObjectsDownloaded += applied.applied;
           applyErrors = applied.errors;
@@ -1211,6 +1281,10 @@ export const useCloudSyncStore = create<CloudSyncState>((set, get) => ({
       }
       pendingV2ConflictResolutions.clear();
       deviceStates.clear();
+      cleanRevisionsAccount = null;
+      cleanWorkspaceRevisions.clear();
+      dirtyWorkspaceIds.clear();
+      dirtyWorkspaceEpochs.clear();
       if (dexieSyncV2ConflictStore.clear) await dexieSyncV2ConflictStore.clear();
       set({ progress: { stage: 'preparing', completed: 0, total: 1, message: 'Downloading your Google Drive work…' } });
     } catch (error) {
@@ -1278,18 +1352,36 @@ function scheduleAutoCloudSyncAfter(delayMs: number): void {
     const state = useCloudSyncStore.getState();
     if (!state.autoSync || !state.connectionByProvider.googledrive) return;
     // A V2 scan canonicalizes every page payload on the renderer's main thread.
-    // Starting it while ink is active turns a background backup into a visible
-    // stroke stall, so keep the pending sync until drawing has been idle for a
-    // short window. Local saves, retries and explicit sync requests are not
-    // affected by this gate.
-    if (isDrawingRecentlyActive(AUTO_CLOUD_SYNC_DRAWING_IDLE_MS)) {
+    // Starting it while ink/navigation/selection/typing is active turns a
+    // background backup into a visible stall, so defer until interactive idle.
+    // Local saves, retries and explicit sync requests are not affected.
+    if (isDrawingRecentlyActive(AUTO_CLOUD_SYNC_DRAWING_IDLE_MS) || isUserInteracting()) {
       scheduleAutoCloudSyncAfter(AUTO_CLOUD_SYNC_DRAWING_RETRY_MS);
       return;
     }
-    void state.triggerSync();
+    void state.triggerSync(undefined, { manual: false });
   }, delayMs);
 }
 
 export function scheduleAutoCloudSync(): void {
   scheduleAutoCloudSyncAfter(AUTO_CLOUD_SYNC_DELAY_MS);
+}
+
+export function flushDeferredAutoCloudSync(): void {
+  if (!autoSyncTimer) return;
+  const state = useCloudSyncStore.getState();
+  if (!state.autoSync || !state.connectionByProvider.googledrive) return;
+  if (isDrawingRecentlyActive(AUTO_CLOUD_SYNC_DRAWING_IDLE_MS) || isUserInteracting()) return;
+  clearTimeout(autoSyncTimer);
+  autoSyncTimer = null;
+  void state.triggerSync(undefined, { manual: false });
+}
+
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('blur', () => flushDeferredAutoCloudSync());
+}
+if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushDeferredAutoCloudSync();
+  });
 }

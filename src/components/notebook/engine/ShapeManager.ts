@@ -5,7 +5,10 @@ import { buildLineStyleGeometry, lineStyleHit } from './lineStyleGeometry.ts';
 // Handles drawing and rendering of vector shapes (rectangle, ellipse, etc).
 
 import type { Shape, ShapeType } from './drawingTypes.ts';
-import { DEFAULT_PAGE_LAYER_ID } from './drawingTypes.ts';
+import { DEFAULT_PAGE_LAYER_ID, isLinearShapeType } from './drawingTypes.ts';
+import { getShapePolygonVertices, hitTestPolygonShape, isPolygonShapeType } from './shapePolygonGeometry.ts';
+import type { EraseBounds } from './capsuleErase.ts';
+import { isEmptyBounds, objectIntersectsBounds } from './strokeSpatialIndex.ts';
 import type { ViewportManager } from './ViewportManager.ts';
 import { LayerManager } from './LayerManager.ts';
 import { fullDarkInkColor } from '../../../lib/fullDarkView.ts';
@@ -65,12 +68,19 @@ export class ShapeManager {
   }
 
   /** Render all shapes onto the given context. */
-  renderShapes(ctx: CanvasRenderingContext2D, layerId?: string, excludeIds?: Set<string>): void {
+  renderShapes(
+    ctx: CanvasRenderingContext2D,
+    layerId?: string,
+    excludeIds?: Set<string>,
+    cullBounds?: EraseBounds | null
+  ): void {
+    if (cullBounds && isEmptyBounds(cullBounds)) return;
     for (const shape of this.shapes) {
       if (excludeIds && excludeIds.has(shape.id)) continue;
-      if (!this.viewport.intersectsRenderWindow(shape)) continue;
       const shapeLayerId = shape.layerId ?? DEFAULT_PAGE_LAYER_ID;
       if (layerId && shapeLayerId !== layerId) continue;
+      if (!this.viewport.intersectsRenderWindow(shape)) continue;
+      if (cullBounds && !objectIntersectsBounds(shape, cullBounds)) continue;
       this.renderShape(ctx, shape);
     }
   }
@@ -79,8 +89,8 @@ export class ShapeManager {
   renderShape(ctx: CanvasRenderingContext2D, shape: Shape): void {
     if (this.fullDarkView) shape = { ...shape, color: fullDarkInkColor(shape.color), fill: shape.fill ? fullDarkInkColor(shape.fill) : shape.fill };
     ctx.save();
-    
-    if (shape.shapeType === 'line' || shape.shapeType === 'arrow') {
+
+    if (isLinearShapeType(shape.shapeType)) {
       const geometry = buildLineStyleGeometry(shape);
       ctx.strokeStyle = shape.color; ctx.fillStyle = shape.color; ctx.lineWidth = shape.strokeWidth;
       ctx.globalAlpha = Math.max(0, Math.min(1, shape.opacity ?? 1)); ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.setLineDash([]);
@@ -122,18 +132,20 @@ export class ShapeManager {
         ctx.ellipse(cx, cy, Math.abs(shape.width) / 2, Math.abs(shape.height) / 2, 0, 0, 2 * Math.PI);
         break;
       case 'triangle':
-        ctx.moveTo(cx, shape.y);
-        ctx.lineTo(shape.x + shape.width, shape.y + shape.height);
-        ctx.lineTo(shape.x, shape.y + shape.height);
-        ctx.closePath();
-        break;
       case 'diamond':
-        ctx.moveTo(cx, shape.y);
-        ctx.lineTo(shape.x + shape.width, cy);
-        ctx.lineTo(cx, shape.y + shape.height);
-        ctx.lineTo(shape.x, cy);
-        ctx.closePath();
+      case 'pentagon':
+      case 'hexagon':
+      case 'star': {
+        const vertices = getShapePolygonVertices(shape.shapeType, shape.x, shape.y, shape.width, shape.height);
+        if (vertices && vertices.length > 0) {
+          ctx.moveTo(vertices[0].x, vertices[0].y);
+          for (let i = 1; i < vertices.length; i += 1) {
+            ctx.lineTo(vertices[i].x, vertices[i].y);
+          }
+          ctx.closePath();
+        }
         break;
+      }
 
     }
 
@@ -141,7 +153,7 @@ export class ShapeManager {
       ctx.fill();
     }
     ctx.stroke();
-    
+
     ctx.restore();
   }
 
@@ -149,22 +161,37 @@ export class ShapeManager {
 
   findShapesNearPoint(x: number, y: number, radius: number): string[] {
     const hits: string[] = [];
-    const radiusSq = radius * radius;
 
     for (const shape of this.shapes) {
       if (!this.layerManager.isEditable(shape.layerId)) continue;
-      if (shape.shapeType === 'line' || shape.shapeType === 'arrow') {
+      if (isLinearShapeType(shape.shapeType)) {
         if (lineStyleHit(shape, { x, y }, radius)) hits.push(shape.id);
         continue;
       }
-      // Very basic hit testing for now (bounding box + radius)
-      // For precise selection, we'd need type-specific geometry math.
-      const minX = Math.min(shape.x, shape.x + shape.width) - radius;
-      const maxX = Math.max(shape.x, shape.x + shape.width) + radius;
-      const minY = Math.min(shape.y, shape.y + shape.height) - radius;
-      const maxY = Math.max(shape.y, shape.y + shape.height) + radius;
+      if (isPolygonShapeType(shape.shapeType)) {
+        if (hitTestPolygonShape(shape, x, y, radius)) hits.push(shape.id);
+        continue;
+      }
+      const x0 = Math.min(shape.x, shape.x + shape.width);
+      const w = Math.abs(shape.width);
+      const y0 = Math.min(shape.y, shape.y + shape.height);
+      const h = Math.abs(shape.height);
+      const cx = x0 + w / 2;
+      const cy = y0 + h / 2;
+      const angle = -(shape.rotation || 0) * Math.PI / 180;
+      const dx = x - cx;
+      const dy = y - cy;
+      const lx = dx * Math.cos(angle) - dy * Math.sin(angle);
+      const ly = dx * Math.sin(angle) + dy * Math.cos(angle);
+      const pad = radius + (shape.strokeWidth || 2) / 2;
 
-      if (x >= minX && x <= maxX && y >= minY && y <= maxY) {
+      if (shape.shapeType === 'ellipse') {
+        const rx = w / 2 + pad;
+        const ry = h / 2 + pad;
+        if (rx > 0 && ry > 0 && (lx / rx) ** 2 + (ly / ry) ** 2 <= 1) {
+          hits.push(shape.id);
+        }
+      } else if (Math.abs(lx) <= w / 2 + pad && Math.abs(ly) <= h / 2 + pad) {
         hits.push(shape.id);
       }
     }

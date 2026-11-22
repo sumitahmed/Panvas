@@ -192,6 +192,21 @@ export function resolvePageGeometryScrollDelta(
   };
 }
 
+/** Resolve the source-page frame inside a rendered (possibly scaled) page viewport rect. */
+export function resolvePageSourceViewportFrame(
+  page: PageGeometryFrame,
+  properties: PagePropertySet,
+): PageGeometryFrame {
+  const geometry = resolvePageSurfaceGeometry(properties);
+  const scale = geometry.width > 0 ? page.width / geometry.width : 1;
+  return {
+    left: page.left + geometry.source.left * scale,
+    top: page.top + geometry.source.top * scale,
+    width: geometry.source.width * scale,
+    height: geometry.source.height * scale,
+  };
+}
+
 export function getNotebookPageDefaults(notebook?: Notebook): PagePropertySet {
   const defaults = { ...DEFAULT_PAGE_PROPERTY_SET, ...(notebook?.defaultPageProperties ?? {}) };
   delete defaults.layoutExtent;

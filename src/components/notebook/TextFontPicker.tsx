@@ -11,6 +11,12 @@ import {
   type FontAvailability,
 } from './textFonts';
 
+const CORE_BUNDLED_FONT_SET = new Set<string>([
+  'Inter, sans-serif',
+  "'Newsreader', serif",
+  "'JetBrains Mono', monospace",
+]);
+
 export function TextFontPicker({ value, onChange, ariaLabel = 'Text font', className = '', presentation = 'popover', open: controlledOpen, onOpenChange }: {
   value: string;
   onChange: (font: string) => void;
@@ -27,7 +33,7 @@ export function TextFontPicker({ value, onChange, ariaLabel = 'Text font', class
     setLocalOpen(next); onOpenChange?.(next);
   };
   const [availability, setAvailability] = useState<Record<string, FontAvailability>>(() =>
-    Object.fromEntries(PANVAS_TEXT_FONT_FAMILIES.map(font => [font, 'loading'])),
+    Object.fromEntries(PANVAS_TEXT_FONT_FAMILIES.map(font => [font, CORE_BUNDLED_FONT_SET.has(font) ? 'loaded' : 'loading'])),
   );
   const rootRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -35,14 +41,15 @@ export function TextFontPicker({ value, onChange, ariaLabel = 'Text font', class
   const current = value || 'Inter, sans-serif';
 
   useEffect(() => {
+    if (!open) return;
     let active = true;
-    // Opening typography must not download the entire preview catalog or
-    // invalidate document pagination for fonts the author has not requested.
-    (open ? PANVAS_TEXT_FONT_FAMILIES : [current]).forEach(font => {
+    // Load decorative handwriting CSS and resolve face availability only when
+    // the picker is opened, never eagerly on closed mount.
+    PANVAS_TEXT_FONT_FAMILIES.forEach(font => {
       void loadTextFont(font).then(state => { if (active) setAvailability(previous => previous[font] === state ? previous : { ...previous, [font]: state }); });
     });
     return () => { active = false; };
-  }, [open, current]);
+  }, [open]);
 
   // Keep the catalog stable while faces load. Filtering failed faces reduced
   // an offline/error state to a misleading three-font list.
@@ -97,7 +104,9 @@ export function TextFontPicker({ value, onChange, ariaLabel = 'Text font', class
     >
       <span className="min-w-0 truncate">
         <span style={fontOptionStyle(current, currentAvailability)}>{fontLabel(current)}</span>
-        {currentAvailability !== 'loaded' && <span className="ml-1 text-[9px] text-panvas-text-tertiary">{currentAvailability === 'loading' ? 'loading' : 'unavailable'}</span>}
+        {(currentAvailability === 'unavailable' || (open && currentAvailability === 'loading')) && (
+          <span className="ml-1 text-[9px] text-panvas-text-tertiary">{currentAvailability === 'loading' ? 'loading' : 'unavailable'}</span>
+        )}
       </span>
       <ChevronDown size={13} className={`shrink-0 text-panvas-text-tertiary ${open ? 'rotate-180' : ''}`} />
     </button>

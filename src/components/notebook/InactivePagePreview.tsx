@@ -1,13 +1,13 @@
 import React, { useEffect, useLayoutEffect, useState, useRef, useMemo } from 'react';
 import { useFullDarkView } from '@/hooks/useFullDarkView';
-import { FULL_DARK_PDF_FILTER, fullDarkSurfaceColor, isBrightDocumentCanvas } from '@/lib/fullDarkView';
-import { useDocumentTextPresentation } from './useDocumentTextPresentation';
+import { FULL_DARK_PDF_FILTER, isBrightDocumentCanvas } from '@/lib/fullDarkView';
 import { useUIStore } from '@/stores/uiStore';
-import { textObjectStyle } from './textTypography';
 import { notebookRepository } from '@/repositories/NotebookRepository';
 import { canvasRepository } from '@/repositories/CanvasRepository';
 import { useAuthStore } from '@/stores/authStore';
 import { PageRenderer } from './PageRenderer';
+import { StaticTextPreview } from './StaticTextPreview';
+import { loadTextFontStylesheet } from './textFonts';
 import { createEmptyDrawingData, type DrawingData, type TextObject, DEFAULT_PAGE_LAYER_ID } from './engine/drawingTypes';
 import type { Notebook, NotebookPage } from '@/types/notebook';
 import { resolvePageProperties } from '@/lib/pageProperties';
@@ -16,17 +16,7 @@ import { ShapeManager } from './engine/ShapeManager';
 import { ImageManager } from './engine/ImageManager';
 import { LayerManager } from './engine/LayerManager';
 import { DrawingEngine } from './engine/DrawingEngine';
-import { EditorContent, useEditor } from '@tiptap/react';
-import { notebookTipTapExtensions } from './tiptapExtensions';
 import { resolvePageSurfaceGeometry } from '@/lib/pageProperties';
-import {
-  getStickyNoteColor,
-  getStickyNoteOpacity,
-  getStickyNoteShape,
-  getShapeBorderRadius,
-  hexToRgba,
-  isStickyNote,
-} from './stickyNotes';
 import { gate0Profiler } from '@/dev/gate0Profiler';
 
 interface InactivePagePreviewProps {
@@ -42,73 +32,6 @@ interface InactivePagePreviewProps {
   data?: DrawingData;
   onActivatePage?: (pageId: string) => void;
 }
-
-const StaticTextPreview: React.FC<{ object: TextObject; scale: number; offset?: { x: number; y: number } }> = ({ object, scale, offset }) => {
-  gate0Profiler.resource('reactRenders.InactiveStaticTextPreview', 1);
-  const fullDarkView = useFullDarkView();
-  const textRef = useRef<HTMLDivElement>(null);
-  useDocumentTextPresentation(textRef, fullDarkView, object.content);
-  const editor = useEditor({
-    editable: false,
-    extensions: notebookTipTapExtensions,
-    content: object.content,
-  });
-  useEffect(() => {
-    gate0Profiler.resource('tipTapEditors', 1);
-    return () => gate0Profiler.resource('tipTapEditors', -1);
-  }, []);
-
-  if (!editor) return null;
-
-  const isSticky = isStickyNote(object);
-  const stickyColor = getStickyNoteColor(object);
-  const stickyOpacity = getStickyNoteOpacity(object);
-  const stickyShape = getStickyNoteShape(object);
-  const bgRgba = isSticky ? hexToRgba(fullDarkView ? fullDarkSurfaceColor(stickyColor, true) : stickyColor, stickyOpacity) : undefined;
-  const legacyBg = /^#[0-9a-f]{6}$/i.test(String(object.metadata?.elementBackground ?? ''))
-    ? String(object.metadata?.elementBackground)
-    : undefined;
-
-  return (
-    <div
-      className={`absolute pointer-events-none z-0 ${object.metadata?.pastePresentation === 'sticky-note' ? 'panvas-pasted-note' : object.metadata?.pastePresentation === 'mixed-paste' ? 'panvas-mixed-paste' : ''}`}
-      style={{
-        ...textObjectStyle(object),
-        left: `${(object.x + (offset?.x ?? 0)) * scale}px`,
-        top: `${(object.y + (offset?.y ?? 0)) * scale}px`,
-        width: `${object.width}px`,
-        minHeight: object.height ? `${object.height}px` : undefined,
-        transform: `scale(${scale})`,
-        transformOrigin: 'top left',
-        padding: isSticky ? '14px' : undefined,
-        ...(legacyBg && !isSticky ? { backgroundColor: legacyBg } : {}),
-      }}
-    >
-      {isSticky && (
-        <div className="absolute inset-0 -z-10 overflow-visible pointer-events-none">
-          {stickyShape === 'star' ? (
-            <svg className="w-full h-full drop-shadow-md" viewBox="0 0 100 100" preserveAspectRatio="none">
-              <polygon points="50,0 63,38 100,38 69,59 82,100 50,75 18,100 31,59 0,38 37,38" fill={bgRgba} />
-            </svg>
-          ) : (
-            <div
-              className="w-full h-full shadow-md"
-              style={{
-                backgroundColor: bgRgba,
-                borderRadius: getShapeBorderRadius(stickyShape),
-              }}
-            />
-          )}
-        </div>
-      )}
-      <div ref={textRef} className="panvas-document-text"><EditorContent
-        editor={editor} 
-        className={`outline-none prose prose-neutral max-w-none prose-sm ${isSticky ? 'p-0' : 'p-1'}`} 
-        style={{ wordBreak: 'break-word', whiteSpace: 'pre-wrap', overflowWrap: 'break-word' }}
-      /></div>
-    </div>
-  );
-};
 
 const InactivePagePreviewComponent: React.FC<InactivePagePreviewProps> = ({
   workspaceId, notebookId, notebook, page, width, height, scale, pageNumberText, data: pageSnapshot, onActivatePage
@@ -225,6 +148,12 @@ const InactivePagePreviewComponent: React.FC<InactivePagePreviewProps> = ({
     return data.objects.filter(o => o.type === 'text' && visibility.get(o.layerId ?? DEFAULT_PAGE_LAYER_ID) !== false) as TextObject[];
   }, [data]);
 
+  useEffect(() => {
+    for (const obj of textObjects) {
+      if (obj.fontFamily) void loadTextFontStylesheet(obj.fontFamily);
+    }
+  }, [textObjects]);
+
   // PDF Preview Rendering
   useEffect(() => {
     if (page.type !== 'pdf' || !page.pdfDataId || !canvasRef.current) return;
@@ -260,7 +189,7 @@ const InactivePagePreviewComponent: React.FC<InactivePagePreviewProps> = ({
           gate0Profiler.event('pdf-destroy', undefined, { pageId: page.id, reason: 'resolved-after-unmount' });
           return;
         }
-        
+
         // Render first page
         const pdfPage = await doc.getPage(1);
         const viewport = pdfPage.getViewport({ scale: 1.0 });
@@ -270,10 +199,10 @@ const InactivePagePreviewComponent: React.FC<InactivePagePreviewProps> = ({
         // Scale to fit the page dimensions while preserving aspect ratio
         const pdfScale = Math.min(width / viewport.width, height / viewport.height) * 0.95;
         const scaledViewport = pdfPage.getViewport({ scale: pdfScale });
-        
+
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
-        
+
         canvas.width = scaledViewport.width;
         canvas.height = scaledViewport.height;
 
@@ -304,7 +233,7 @@ const InactivePagePreviewComponent: React.FC<InactivePagePreviewProps> = ({
     <div
       data-page-id={page.id}
       data-rendered-page-id={page.id}
-      className="relative shadow-2xl transition-shadow" 
+      className="relative shadow-2xl transition-shadow"
       onPointerDown={handleTriggerActivate}
       onClick={handleTriggerActivate}
     >
@@ -321,13 +250,13 @@ const InactivePagePreviewComponent: React.FC<InactivePagePreviewProps> = ({
         ))}
 
         <div className="absolute inset-0 z-10 flex items-center justify-center">
-          <canvas 
-            ref={canvasRef} 
+          <canvas
+            ref={canvasRef}
             className={`pointer-events-none ${page.type === 'pdf' ? 'shadow-md bg-white' : ''}`}
             style={page.type === 'default' ? { width, height } : { filter: fullDarkView && brightPdfPreview ? FULL_DARK_PDF_FILTER : 'none' }}
           />
         </div>
-        
+
       </PageRenderer>
     </div>
   );

@@ -1,3 +1,5 @@
+import { setNavigationGestureActive } from '../../../services/cloudsync/drawingActivity.ts';
+
 /** Shared synchronous ownership of manual notebook navigation. */
 export class NavigationGestureLifecycle {
   private owners = new Set<symbol>();
@@ -10,9 +12,12 @@ export class NavigationGestureLifecycle {
   /** Acquire before canceling a previous owner when promoting a gesture. */
   begin(): () => void {
     const owner = Symbol('navigation');
+    const wasEmpty = this.owners.size === 0;
     this.owners.add(owner);
+    if (wasEmpty) setNavigationGestureActive(this, true);
     return () => {
       if (!this.owners.delete(owner) || this.active) return;
+      setNavigationGestureActive(this, false);
       for (const listener of this.idleListeners) listener();
     };
   }

@@ -1346,7 +1346,8 @@ test('virtual PDF identities parse once and V2 routing returns before the V1 sta
   assert.deepEqual(parsePdfAnnotationStorageId('page-with_pdf_marker_pdf_12'), { ownerPageId: 'page-with_pdf_marker', sourcePage: 12 });
   assert.equal(parsePdfAnnotationStorageId('page-1_pdf_0'), null);
   const store = readFileSync(new URL('../src/stores/cloudSyncStore.ts', import.meta.url), 'utf8');
-  const start = store.indexOf('if (CLOUD_SYNC_V2_ENABLED) {', store.indexOf('triggerSync: async workspaceId =>'));
+  const start = store.indexOf('if (CLOUD_SYNC_V2_ENABLED) {', store.indexOf('triggerSync: async'));
+  assert.ok(start > 0, 'V2 branch start must be found inside triggerSync');
   const end = store.indexOf('let diagnosticWorkspaceId', start);
   const v2Branch = store.slice(start, end);
   assert.match(v2Branch, /runCloudSyncV2/);

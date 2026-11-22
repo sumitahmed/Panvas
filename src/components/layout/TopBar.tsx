@@ -15,6 +15,7 @@ import { useLocation } from 'wouter';
 import { useUIStore } from '@/stores/uiStore';
 import { useWorkspaceStore } from '@/stores/workspaceStore';
 import { useAuthStore } from '@/stores/authStore';
+import { useShallow } from 'zustand/react/shallow';
 import { UserAvatar } from '@/components/ui/UserAvatar';
 import { SyncIndicator } from '@/components/ui/SyncIndicator';
 import { navigateToLibraryView } from '@/services/library/libraryRouteState';
@@ -26,40 +27,28 @@ const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPod|iPad/i.test(n
 const isElectronOnWindows = isElectronShell && !isMac;
 const ELECTRON_CAPTION_SAFE_WIDTH = 144;
 
-export function TopBar() {
-  const [, navigate] = useLocation();
-  const { isSidebarOpen, toggleSidebar, openCommandPalette, theme, setTheme, requestCloudSyncReview } = useUIStore();
+const TopBarBreadcrumbs = React.memo(function TopBarBreadcrumbs({ navigate }: { navigate: (to: string) => void }) {
   const {
     activeCanvasId, activePageId, activeWorkspaceId,
     canvasFiles, workspaces, folders, notebooks, notebookSections, notebookPages,
-    setActiveCanvas, setActivePage, setActiveNotebook, setActiveNotebookSection,
-  } = useWorkspaceStore();
-  const { isAuthenticated, signOut } = useAuthStore();
-  const [isAuthMenuOpen, setIsAuthMenuOpen] = useState(false);
-  const authMenuRef = useRef<HTMLDivElement>(null);
-
-  // Keep the native overlay symbols contrasting with the active theme; the
-  // handler also mirrors the theme into main-process settings.
-  useEffect(() => {
-    window.panvas?.settings.setTheme(theme).catch(() => {});
-  }, [theme]);
-
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (authMenuRef.current && !authMenuRef.current.contains(event.target as Node)) {
-        setIsAuthMenuOpen(false);
-      }
-    }
-
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
+  } = useWorkspaceStore(useShallow(state => ({
+    activeCanvasId: state.activeCanvasId,
+    activePageId: state.activePageId,
+    activeWorkspaceId: state.activeWorkspaceId,
+    canvasFiles: state.canvasFiles,
+    workspaces: state.workspaces,
+    folders: state.folders,
+    notebooks: state.notebooks,
+    notebookSections: state.notebookSections,
+    notebookPages: state.notebookPages,
+  })));
+  const { setActiveCanvas, setActivePage, setActiveNotebook, setActiveNotebookSection } = useWorkspaceStore.getState();
 
   const activeCanvas = canvasFiles.find(canvas => canvas.id === activeCanvasId);
   let currentWorkspace = workspaces.find(workspace => workspace.id === (activeCanvas?.workspaceId ?? activeWorkspaceId));
 
   const breadcrumbs: { id: string, name: string, type: string }[] = [];
-  
+
   if (activePageId) {
     const page = notebookPages.find(p => p.id === activePageId);
     if (page) {
@@ -99,6 +88,83 @@ export function TopBar() {
       }
     }
   }
+
+  return (
+    <nav aria-label="Breadcrumb" className="min-w-0 items-center gap-1.5 text-xs text-panvas-text-secondary hidden md:flex">
+      <ChevronRight size={13} className="flex-shrink-0 text-panvas-text-tertiary" />
+      <button
+        onClick={() => {
+          setActiveCanvas(null);
+          setActivePage(null);
+          setActiveNotebook(null);
+          navigateToLibraryView('library');
+          navigate('/app/library');
+        }}
+        className="max-w-20 lg:max-w-28 xl:max-w-36 truncate rounded px-1 py-0.5 hover:text-panvas-text-primary focus-ring"
+        style={noDragStyle}
+      >
+        {currentWorkspace?.name ?? 'Library'}
+      </button>
+      {breadcrumbs.map((crumb, index) => {
+        const isLast = index === breadcrumbs.length - 1;
+        return (
+          <React.Fragment key={crumb.id}>
+            <ChevronRight size={13} className="flex-shrink-0 text-panvas-text-tertiary" />
+            <button
+              type="button"
+              onClick={() => {
+                if (crumb.type === 'page') setActivePage(crumb.id);
+                else if (crumb.type === 'section') void setActiveNotebookSection(crumb.id);
+                else if (crumb.type === 'notebook') void setActiveNotebook(crumb.id);
+                else if (crumb.type === 'canvas') setActiveCanvas(crumb.id);
+                navigate('/app');
+              }}
+              className={`max-w-24 lg:max-w-32 xl:max-w-44 truncate rounded px-1 py-0.5 text-left ${isLast ? 'font-medium text-panvas-text-primary cursor-default' : 'hover:text-panvas-text-primary focus-ring'}`}
+              style={noDragStyle}
+            >
+              {crumb.name}
+            </button>
+          </React.Fragment>
+        );
+      })}
+    </nav>
+  );
+});
+
+export function TopBar() {
+  const [, navigate] = useLocation();
+  const { isSidebarOpen, toggleSidebar, openCommandPalette, theme, setTheme, requestCloudSyncReview } = useUIStore(useShallow(state => ({
+    isSidebarOpen: state.isSidebarOpen,
+    toggleSidebar: state.toggleSidebar,
+    openCommandPalette: state.openCommandPalette,
+    theme: state.theme,
+    setTheme: state.setTheme,
+    requestCloudSyncReview: state.requestCloudSyncReview,
+  })));
+  const { isAuthenticated, signOut } = useAuthStore(useShallow(state => ({
+    isAuthenticated: state.isAuthenticated,
+    signOut: state.signOut,
+  })));
+  const [isAuthMenuOpen, setIsAuthMenuOpen] = useState(false);
+  const authMenuRef = useRef<HTMLDivElement>(null);
+
+  // Keep the native overlay symbols contrasting with the active theme; the
+  // handler also mirrors the theme into main-process settings.
+  useEffect(() => {
+    window.panvas?.settings.setTheme(theme).catch(() => {});
+  }, [theme]);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (authMenuRef.current && !authMenuRef.current.contains(event.target as Node)) {
+        setIsAuthMenuOpen(false);
+      }
+    }
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
   // Public cycle matches Appearance; legacy choices migrate before first paint.
   const THEME_CYCLE = ['light', 'ink', 'dark'] as const;
   const ThemeIcon = theme === 'dark' ? Moon : theme === 'ink' ? PenTool : Sun;
@@ -130,8 +196,8 @@ export function TopBar() {
       className="panvas-topbar panvas-layer-toolbar flex-shrink-0 relative flex items-center justify-between px-3 bg-panvas-bg-primary text-panvas-text-primary border-b border-panvas-border-subtle select-none h-11"
       style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
     >
-      {/* LEFT ZONE: Sidebar toggle, Logo, Breadcrumbs */}
-      <div className="flex min-w-0 flex-1 items-center gap-2.5" style={noDragStyle}>
+      {/* LEFT ZONE: Sidebar toggle, Logo, Breadcrumbs. Container stays draggable; only leaf controls are no-drag. */}
+      <div className="flex min-w-0 flex-1 items-center gap-2.5">
         <IconButton
           label={isSidebarOpen ? 'Hide library' : 'Show library'}
           onClick={toggleSidebar}
@@ -141,64 +207,29 @@ export function TopBar() {
 
         <button
           onClick={() => {
-            setActiveCanvas(null);
+            useWorkspaceStore.getState().setActiveCanvas(null);
             navigateToLibraryView('library');
             navigate('/app/library');
           }}
           className="flex items-center gap-2 rounded-md px-1 py-1 text-left hover:bg-panvas-bg-hover focus-ring flex-shrink-0"
+          style={noDragStyle}
           aria-label="Open Panvas library"
         >
           <img src={PANVAS_LOGO_SRC} alt="" className="h-6 w-6 rounded-md" />
           <span className="hidden text-sm font-semibold tracking-tight sm:inline">Panvas</span>
         </button>
 
-        <nav aria-label="Breadcrumb" className="min-w-0 items-center gap-1.5 text-xs text-panvas-text-secondary hidden md:flex">
-          <ChevronRight size={13} className="flex-shrink-0 text-panvas-text-tertiary" />
-          <button
-            onClick={() => {
-              setActiveCanvas(null);
-              setActivePage(null);
-              setActiveNotebook(null);
-              navigateToLibraryView('library');
-              navigate('/app/library');
-            }}
-            className="max-w-28 lg:max-w-36 truncate rounded px-1 py-0.5 hover:text-panvas-text-primary focus-ring"
-          >
-            {currentWorkspace?.name ?? 'Library'}
-          </button>
-          {breadcrumbs.map((crumb, index) => {
-            const isLast = index === breadcrumbs.length - 1;
-            return (
-              <React.Fragment key={crumb.id}>
-                <ChevronRight size={13} className="flex-shrink-0 text-panvas-text-tertiary" />
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (crumb.type === 'page') setActivePage(crumb.id);
-                    else if (crumb.type === 'section') void setActiveNotebookSection(crumb.id);
-                    else if (crumb.type === 'notebook') void setActiveNotebook(crumb.id);
-                    else if (crumb.type === 'canvas') setActiveCanvas(crumb.id);
-                    navigate('/app');
-                  }}
-                  className={`max-w-32 lg:max-w-44 truncate rounded px-1 py-0.5 text-left ${isLast ? 'font-medium text-panvas-text-primary cursor-default' : 'hover:text-panvas-text-primary focus-ring'}`}
-                >
-                  {crumb.name}
-                </button>
-              </React.Fragment>
-            );
-          })}
-        </nav>
+        <TopBarBreadcrumbs navigate={navigate} />
       </div>
 
-      {/* CENTER ZONE: Search Panvas. On phones the field compresses to a
-          compact icon action that opens the exact same command palette as
-          the desktop field and the Ctrl+K shortcut. */}
-      <div className="flex items-center justify-center flex-shrink-0 px-2 w-full max-w-xs sm:max-w-sm md:max-w-md min-w-0 max-[599px]:w-auto max-[599px]:px-0" style={noDragStyle}>
+      {/* CENTER ZONE: Search Panvas. Shrinks responsively when unmaximized so generous drag gaps remain on both sides. */}
+      <div className="flex items-center justify-center flex-shrink min-w-0 px-3 w-[clamp(180px,28vw,380px)] max-[599px]:w-auto max-[599px]:px-0">
         <button
           onClick={openCommandPalette}
           aria-label="Search Panvas"
           title="Search Panvas (Ctrl K)"
           className="flex h-8 sm:h-9 w-full items-center gap-2 rounded-lg border border-panvas-border-default bg-panvas-bg-secondary px-3 text-xs text-panvas-text-tertiary shadow-sm transition-colors hover:bg-panvas-bg-hover hover:border-panvas-border-strong focus-ring max-[599px]:h-8 max-[599px]:w-9 max-[599px]:justify-center max-[599px]:px-0"
+          style={noDragStyle}
         >
           <Search size={14} className="flex-shrink-0" />
           <span className="flex-1 text-left truncate max-[599px]:hidden">Search Panvas</span>
@@ -206,9 +237,9 @@ export function TopBar() {
         </button>
       </div>
 
-      {/* RIGHT ZONE: App controls + Native Caption Safe Spacer */}
-      <div className="flex min-w-0 flex-1 items-center justify-end gap-1.5" style={noDragStyle}>
-        <div className="flex items-center pl-1" style={noDragStyle}>
+      {/* RIGHT ZONE: App controls + Native Caption Safe Spacer. Empty right-zone whitespace remains draggable. */}
+      <div className="flex min-w-0 flex-1 items-center justify-end gap-1.5">
+        <div className="flex flex-shrink-0 items-center pl-1" style={noDragStyle}>
           <SyncIndicator onOpenCloudSync={openCloudSync} />
         </div>
 
@@ -216,7 +247,7 @@ export function TopBar() {
           <ThemeIcon size={16} />
         </IconButton>
 
-        {isAuthenticated && <div className="relative ml-0.5" ref={authMenuRef}>
+        {isAuthenticated && <div className="relative ml-0.5 flex-shrink-0" ref={authMenuRef} style={noDragStyle}>
           <button
             onClick={() => setIsAuthMenuOpen(open => !open)}
             className="rounded-full focus-ring flex items-center justify-center"
@@ -255,7 +286,13 @@ export function TopBar() {
 
 function IconButton({ children, label, onClick }: { children: React.ReactNode; label: string; onClick: () => void }) {
   return (
-    <button onClick={onClick} className="flex h-8 w-8 items-center justify-center rounded-md text-panvas-text-secondary transition-colors hover:bg-panvas-bg-hover hover:text-panvas-text-primary active:bg-panvas-bg-active focus-ring" aria-label={label} title={label}>
+    <button
+      onClick={onClick}
+      className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md text-panvas-text-secondary transition-colors hover:bg-panvas-bg-hover hover:text-panvas-text-primary active:bg-panvas-bg-active focus-ring"
+      style={noDragStyle}
+      aria-label={label}
+      title={label}
+    >
       {children}
     </button>
   );

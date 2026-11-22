@@ -14,8 +14,13 @@ export class TextManager {
   getDefaultFontFamily(): string { return this.defaultFontFamily; }
   setDefaultFontFamily(fontFamily: string): void { this.defaultFontFamily = fontFamily || 'Inter, sans-serif'; }
   private texts: TextObject[] = [];
+  private version = 0;
   private editors: Map<string, any> = new Map(); // Store Editor instances
   private layerManager: LayerManager;
+
+  getVersion(): number {
+    return this.version;
+  }
 
   constructor(layerManager: LayerManager = new LayerManager()) {
     this.layerManager = layerManager;
@@ -66,11 +71,13 @@ export class TextManager {
 
   setTexts(texts: TextObject[]): void {
     this.texts = texts;
+    this.version += 1;
   }
 
   addText(text: TextObject): void {
     text.layerId ??= this.layerManager.getActiveLayerId();
     this.texts.push(text);
+    this.version += 1;
   }
 
   /** Replace one object in place so continuation history preserves render order. */
@@ -78,6 +85,7 @@ export class TextManager {
     const index = this.texts.findIndex(candidate => candidate.id === text.id);
     if (index < 0) return false;
     this.texts[index] = text;
+    this.version += 1;
     return true;
   }
 
@@ -85,6 +93,7 @@ export class TextManager {
     const text = this.texts.find(t => t.id === id);
     if (text) {
       text.content = content;
+      this.version += 1;
     }
   }
 
@@ -94,6 +103,7 @@ export class TextManager {
     const text = this.texts.find(t => t.id === id);
     if (!text) return undefined;
     text.metadata = { ...(text.metadata ?? {}), ...metadata };
+    this.version += 1;
     return text;
   }
 
@@ -102,6 +112,7 @@ export class TextManager {
     if (text) {
       text.width = width;
       text.height = height;
+      this.version += 1;
     }
   }
 
@@ -112,6 +123,7 @@ export class TextManager {
       text.y = y;
       text.width = width;
       text.height = height;
+      this.version += 1;
     }
   }
 
@@ -119,6 +131,7 @@ export class TextManager {
     const index = this.texts.findIndex(t => t.id === id);
     if (index === -1) return undefined;
     const [removed] = this.texts.splice(index, 1);
+    this.version += 1;
     return removed;
   }
 
@@ -131,12 +144,14 @@ export class TextManager {
       }
       return true;
     });
+    if (removed.length > 0) this.version += 1;
     return removed;
   }
 
   clearTexts(): TextObject[] {
     const removed = this.texts;
     this.texts = [];
+    if (removed.length > 0) this.version += 1;
     return removed;
   }
 

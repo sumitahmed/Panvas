@@ -18,19 +18,19 @@ import { createDocumentLayoutTransition, runDocumentLayoutHistory, documentConve
 import { unsupportedNotebookContent, NOTEBOOK_RICH_TEXT_SCHEMA_VERSION } from './notebookContentCompatibility';
 import { getNotebookSchema } from './tiptapExtensions';
 import { NotebookPageUtilities } from './NotebookPageUtilities';
-import { PresentationOverlay } from '@/components/workspace/PresentationOverlay';
 import { resolveNotebookNavigationDelta, shouldNotebookHandleNavigationKey } from './notebookNavigation';
 import { NotebookPageView } from './NotebookPageView';
 import { LOGICAL_SCROLL_WINDOW } from './logicalScrollWindow';
-import { PageRenderer } from './PageRenderer';
 import { residentPageIds, reuseResidentPageIds, dominantPageId } from './pageVisualWindow';
 import { NotebookContextMenu, type ContextMenuState } from './NotebookContextMenu';
-import { DocumentationLinkDialog } from './DocumentationLinkDialog';
-import { DocumentationMarkdownDialog } from './DocumentationMarkdownDialog';
-import { HandwritingConversionDialog } from './HandwritingConversionDialog';
 import type { Editor } from '@tiptap/react';
 import { notebookRepository } from '@/repositories/NotebookRepository';
-import { exportNotebookToPdf, exportPageToPdf, printNotebook, printPage } from '@/services/pdf/notebookExportCommands';
+
+const PresentationOverlay = React.lazy(() => import('@/components/workspace/PresentationOverlay').then(m => ({ default: m.PresentationOverlay })));
+const DocumentationLinkDialog = React.lazy(() => import('./DocumentationLinkDialog').then(m => ({ default: m.DocumentationLinkDialog })));
+const DocumentationMarkdownDialog = React.lazy(() => import('./DocumentationMarkdownDialog').then(m => ({ default: m.DocumentationMarkdownDialog })));
+const HandwritingConversionDialog = React.lazy(() => import('./HandwritingConversionDialog').then(m => ({ default: m.HandwritingConversionDialog })));
+const HandwritingConversionBar = React.lazy(() => import('./HandwritingConversionBar').then(m => ({ default: m.HandwritingConversionBar })));
 import { type AudioNote, type TextObject, type Stroke, createEmptyDrawingData, type DrawingData, type NotebookMode } from './engine/drawingTypes';
 import { canvasRepository } from '@/repositories/CanvasRepository';
 import { generateId } from '@/lib/utils/id';
@@ -42,11 +42,13 @@ import { attachTwoFingerViewportGesture } from './engine/touchViewportGesture';
 import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
 import { useIsCompactTouchViewport } from '@/hooks/useIsCompactTouchViewport';
 import { useHasTouchInput } from '@/hooks/useHasTouchInput';
-import { capturePageGeometryAnchor, derivePagePropertyOverrides, getNotebookPageDefaults, hasAuthoritativePageAppearance, resolveNotebookPageLayout, resolvePageDimensions, resolvePageGeometryScrollDelta, resolvePageProperties, resolvePageRenderProperties, resolveBasePageDimensions, type PageGeometryAnchor } from '@/lib/pageProperties';
+import { capturePageGeometryAnchor, derivePagePropertyOverrides, getNotebookPageDefaults, hasAuthoritativePageAppearance, resolveNotebookPageLayout, resolvePageDimensions, resolvePageGeometryScrollDelta, resolvePageProperties, resolvePageRenderProperties, resolvePageSourceViewportFrame, resolveBasePageDimensions, type PageGeometryAnchor } from '@/lib/pageProperties';
 import type { NotebookPropertyBatchSnapshot, PagePropertySet } from '@/types/notebook';
 import { createStickyNote, STICKY_NOTE_MIN_HEIGHT, STICKY_NOTE_WIDTH } from './stickyNotes';
-import type { HandwritingToolPreferences } from '@/services/beautification/handwritingBeautification';
+import { getHandwritingBounds, type HandwritingToolPreferences } from '@/services/beautification/handwritingBeautification';
 import type { ReviewedHandwritingLine } from '@/services/recognition/bulkConversion';
+import { getEligibleSelectedHandwritingStrokes } from '@/services/recognition/bulkConversion';
+import { getHandwritingRecognitionProvider } from '@/services/recognition';
 import { PanelTopOpen, PanelRight, Plus } from 'lucide-react';
 import { pageAudioPersistence } from '@/services/audio/pageAudioPersistenceInstance';
 import { drawingSnapshotJson, rememberDrawingSnapshotJson } from '@/services/storage/drawingSnapshotJson';
@@ -59,7 +61,6 @@ import {
   isPaperColorOnlyUpdate,
   mergeLoadedPageData,
   resolveNotebookPageRenderData,
-  isPageFarOffscreen,
   type PageOwnedDrawing,
 } from './notebookPageRenderState';
 import { gate0Profiler } from '@/dev/gate0Profiler';
@@ -70,10 +71,48 @@ import {
   type DrawingPersistenceCallbacks,
   type DrawingSaveTarget,
 } from './drawingPersistenceQueue';
-import { setDrawingGestureActive, isDrawingRecentlyActive } from '@/services/cloudsync/drawingActivity';
+import { setDrawingGestureActive, markNavigationActivity, isDrawingRecentlyActive } from '@/services/cloudsync/drawingActivity';
 import { resolveDocumentToolCursor } from './documentToolCursor';
 import { DocumentToolCursorOverlay } from './DocumentToolCursorOverlay';
 import { saveNotebookPosition, getNotebookPosition } from '@/lib/readingPosition';
+
+const MAX_RESIDENT_OFFSCREEN_ENGINES = 6;
+const MAX_RESIDENT_OFFSCREEN_VRAM_BYTES = 48 * 1024 * 1024;
+const MAX_SECTION_DATA_CACHE_ENTRIES = 24;
+
+function arePagePropertiesShallowEqual(a: PagePropertySet | undefined, b: PagePropertySet | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (
+    a.paperColor !== b.paperColor
+    || a.template !== b.template
+    || a.ruleLineColor !== b.ruleLineColor
+    || a.orientation !== b.orientation
+    || a.pageSize !== b.pageSize
+    || a.layoutMode !== b.layoutMode
+    || a.layoutExtent !== b.layoutExtent
+    || a.infiniteWidth !== b.infiniteWidth
+    || a.margins !== b.margins
+    || a.extraHeight !== b.extraHeight
+    || a.extraTop !== b.extraTop
+    || a.extraRight !== b.extraRight
+    || a.extraBottom !== b.extraBottom
+    || a.extraLeft !== b.extraLeft
+  ) {
+    return false;
+  }
+  const fieldsA = a.templateFields;
+  const fieldsB = b.templateFields;
+  if (fieldsA === fieldsB) return true;
+  if (!fieldsA || !fieldsB) return false;
+  const keysA = Object.keys(fieldsA);
+  const keysB = Object.keys(fieldsB);
+  if (keysA.length !== keysB.length) return false;
+  for (const key of keysA) {
+    if (fieldsA[key] !== fieldsB[key]) return false;
+  }
+  return true;
+}
 
 function captureEngineOwnedDrawing(
   notebookEngine: NotebookEngine,
@@ -141,7 +180,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   const page = notebookPages.find(item => item.id === activePageId);
   const notebook = page ? notebooks.find(item => item.id === page.notebookId) : undefined;
   const workspace = notebook ? workspaces.find(item => item.id === notebook.workspaceId) : undefined;
-  
+
   // Engine setup
   const notebookEngine = useMemo(() => new NotebookEngine(), []);
   // The renderer owns this engine for its full mounted lifetime. Re-renders
@@ -172,9 +211,75 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   const [sectionDataRevision, setSectionDataRevision] = useState(0);
   const pendingSectionPublishRef = useRef(false);
   const sectionDataCacheRef = useRef<Record<string, DrawingData>>({});
+  const pagePropertiesCacheRef = useRef<Record<string, PagePropertySet>>({});
+  const sectionDataOrderRef = useRef<string[]>([]);
+  const loadingSectionPagesRef = useRef(new Set<string>());
   const publishedSectionDataRef = useRef(sectionDataCacheRef.current);
+  const focusedPageIdRef = useRef<string>(activePageId || '');
+  const currentActivePageIdRef = useRef<string | null>(activePageId);
+  const deferredPageSavesRef = useRef(new Map<string, PageOwnedDrawing>());
+  const drawingSaveSchedulerRef = useRef<DrawingSaveScheduler<PageOwnedDrawing> | null>(null);
+  const residentIdsRef = useRef<Set<string>>(new Set());
+
+  const recordAndTrimSectionDataCache = useCallback((candidate: Record<string, DrawingData>): Record<string, DrawingData> => {
+    const order = sectionDataOrderRef.current;
+    const keys = Object.keys(candidate);
+    for (const id of keys) {
+      const entry = candidate[id];
+      if (entry?.properties) {
+        pagePropertiesCacheRef.current[id] = entry.properties;
+      }
+      if (!order.includes(id)) {
+        order.push(id);
+      }
+    }
+    sectionDataOrderRef.current = order.filter(id => candidate[id] !== undefined);
+    if (keys.length <= MAX_SECTION_DATA_CACHE_ENTRIES) {
+      return candidate;
+    }
+
+    const trimmed: Record<string, DrawingData> = { ...candidate };
+    const protectedIds = new Set<string>(residentIdsRef.current);
+    if (focusedPageIdRef.current) protectedIds.add(focusedPageIdRef.current);
+    if (currentActivePageIdRef.current) protectedIds.add(currentActivePageIdRef.current);
+    const liveOwnerId = notebookEngine.getDrawingOwnership().pageId;
+    if (liveOwnerId) protectedIds.add(liveOwnerId);
+    for (const pendingId of deferredPageSavesRef.current.keys()) protectedIds.add(pendingId);
+    const scheduledId = drawingSaveSchedulerRef.current?.peek()?.sheetId;
+    if (scheduledId) protectedIds.add(scheduledId);
+
+    const remainingOrder: string[] = [];
+    let count = keys.length;
+    for (const id of sectionDataOrderRef.current) {
+      if (count > MAX_SECTION_DATA_CACHE_ENTRIES && !protectedIds.has(id) && trimmed[id] !== undefined) {
+        const evicted = trimmed[id];
+        if (evicted?.properties) {
+          pagePropertiesCacheRef.current[id] = evicted.properties;
+        }
+        delete trimmed[id];
+        delete sectionDataRevisionRef.current[id];
+        count -= 1;
+      } else if (trimmed[id] !== undefined) {
+        remainingOrder.push(id);
+      }
+    }
+    sectionDataOrderRef.current = remainingOrder;
+    return trimmed;
+  }, [notebookEngine]);
+
+  const touchSectionDataOrder = useCallback((pageId: string) => {
+    const order = sectionDataOrderRef.current;
+    const existingIdx = order.indexOf(pageId);
+    if (existingIdx !== -1) order.splice(existingIdx, 1);
+    order.push(pageId);
+  }, []);
+
   const updateSectionDataCache = useCallback((update: (current: Record<string, DrawingData>) => Record<string, DrawingData>, publish = true) => {
-    const next = update(sectionDataCacheRef.current);
+    const rawNext = update(sectionDataCacheRef.current);
+    if (rawNext === sectionDataCacheRef.current) {
+      return;
+    }
+    const next = recordAndTrimSectionDataCache(rawNext);
     sectionDataCacheRef.current = next;
     if (publish && next !== publishedSectionDataRef.current) {
       publishedSectionDataRef.current = next;
@@ -184,7 +289,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         setSectionDataRevision(revision => revision + 1);
       }
     }
-  }, []);
+  }, [recordAndTrimSectionDataCache]);
   // A save snapshot contains the same scene at the same drawing revision but
   // freshly cloned object arrays. Replacing a page-cache entry with it would
   // invalidate an already-current page-owned preview and replay 1,200 strokes.
@@ -225,9 +330,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       if (cached && cached !== drawing) drawing.retainStrokePaths(cached);
       residentDrawingEnginesRef.current.delete(pageId);
       residentDrawingEnginesRef.current.set(pageId, drawing);
-      // Detached previews release their canvases/images in PageView cleanup.
-      // Keep only a small recent geometry window so revisiting a page does not
-      // rebuild every path. Never retain an unbounded notebook's geometry.
+
       const sampleCount = (id: string, engine: NotebookEngine['drawing']) => {
         const strokes = engine.getStrokes();
         if (strokes.length) return strokes.reduce((count, stroke) => count + stroke.points.length, 0);
@@ -235,20 +338,81 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         return (data?.strokes ?? data?.objects?.filter(object => object.type === 'stroke') ?? [])
           .reduce((count, stroke) => count + stroke.points.length, 0);
       };
-      let samples = [...residentDrawingEnginesRef.current].reduce((sum, [id, engine]) => sum + sampleCount(id, engine), 0);
-      for (const [id, engine] of residentDrawingEnginesRef.current) {
-        if (residentDrawingEnginesRef.current.size <= 10 && samples <= 1_000_000) break;
-        if (id === pageId) continue;
-        samples -= sampleCount(id, engine);
+
+      const entries = [...residentDrawingEnginesRef.current.entries()];
+      let offscreenCount = 0;
+      let offscreenBytes = 0;
+      let totalSamples = 0;
+      for (const [id, engine] of entries) {
+        totalSamples += sampleCount(id, engine);
+        if (id !== pageId && id !== focusedPageIdRef.current && !residentIdsRef.current.has(id)) {
+          offscreenCount += 1;
+          offscreenBytes += engine.getEstimatedBackingBytes?.() ?? 0;
+        }
+      }
+
+      for (const [id, engine] of entries) {
+        if (offscreenCount <= MAX_RESIDENT_OFFSCREEN_ENGINES
+          && offscreenBytes <= MAX_RESIDENT_OFFSCREEN_VRAM_BYTES
+          && totalSamples <= 1_000_000) {
+          break;
+        }
+        if (id === pageId || id === focusedPageIdRef.current || residentIdsRef.current.has(id)) continue;
+        offscreenCount -= 1;
+        offscreenBytes -= engine.getEstimatedBackingBytes?.() ?? 0;
+        totalSamples -= sampleCount(id, engine);
         residentDrawingEnginesRef.current.delete(id);
+        if (engine !== notebookEngine.drawing) {
+          engine.detachCanvas(true);
+        }
+      }
+
+      if (residentDrawingEnginesRef.current.size > 12 || totalSamples > 1_000_000) {
+        for (const [id, engine] of [...residentDrawingEnginesRef.current.entries()]) {
+          if (residentDrawingEnginesRef.current.size <= 12 && totalSamples <= 1_000_000) break;
+          if (id === pageId || id === focusedPageIdRef.current) continue;
+          totalSamples -= sampleCount(id, engine);
+          residentDrawingEnginesRef.current.delete(id);
+          if (engine !== notebookEngine.drawing) {
+            engine.detachCanvas(true);
+          }
+        }
       }
     }
-  }, []);
+  }, [notebookEngine]);
+
+  useEffect(() => () => {
+    for (const engine of residentDrawingEnginesRef.current.values()) {
+      if (engine !== notebookEngine.drawing) {
+        engine.detachCanvas(true);
+      }
+    }
+    residentDrawingEnginesRef.current.clear();
+    residentImageManagersRef.current.clear();
+    latestCapturedDrawingRef.current.clear();
+    sectionDataCacheRef.current = {};
+    publishedSectionDataRef.current = sectionDataCacheRef.current;
+    pagePropertiesCacheRef.current = {};
+    sectionDataOrderRef.current = [];
+    sectionDataRevisionRef.current = {};
+    prevResolvedSectionPropsRef.current.clear();
+  }, [workspace?.id, notebook?.id, activeNotebookSectionId, notebookEngine]);
+
   // The focused page owns the live engine. Keep its identity available while
   // resolving the visible page props so a metadata snapshot cannot briefly
   // overwrite an in-memory property change during a render.
   const [focusedPageId, setFocusedPageId] = useState<string>(activePageId || '');
-  const focusedPageIdRef = useRef(focusedPageId);
+  // An urgent external-store render (e.g. Zustand activePageId) can run before
+  // handleActivatePage's startTransition(setFocusedPageId) commits. Never
+  // clobber focusedPageIdRef back to the outgoing page once the engine already
+  // owns the incoming page.
+  if (
+    !focusedPageIdRef.current
+    || focusedPageId === focusedPageIdRef.current
+    || notebookEngine.getDrawingOwnership().pageId !== focusedPageIdRef.current
+  ) {
+    focusedPageIdRef.current = focusedPageId;
+  }
   const propertySaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingPropertySaveRef = useRef<PageOwnedDrawing | null>(null);
   const persistDrawingRef = useRef<(snapshot: PageOwnedDrawing | null) => void>(() => {});
@@ -258,9 +422,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   // understands deferral and a hard 10s checkpoint, so extending its active
   // window to scroll keeps persistence safe without serializing mid-fling.
   const scrollGestureActiveRef = useRef(false);
-  const deferredPageSavesRef = useRef(new Map<string, PageOwnedDrawing>());
   const deferredSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const drawingSaveSchedulerRef = useRef<DrawingSaveScheduler<PageOwnedDrawing> | null>(null);
   if (!drawingSaveSchedulerRef.current) {
     drawingSaveSchedulerRef.current = new DrawingSaveScheduler<PageOwnedDrawing>(
       snapshot => {
@@ -288,6 +450,32 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   const [, setTextObjects] = useState<TextObject[]>([]);
   const [handwritingStrokes, setHandwritingStrokes] = useState<Stroke[]>([]);
   const [isHandwritingDialogOpen, setIsHandwritingDialogOpen] = useState(false);
+  const [conversionBarState, setConversionBarState] = useState<{
+    open: boolean;
+    mode: 'text' | 'math';
+    isRecognizing: boolean;
+    initialValue: string;
+    lines: ReviewedHandwritingLine[];
+    strokes: Stroke[];
+    providerId: string;
+    lineCount: number;
+    strokeCount: number;
+    statusMessage: string | null;
+    editingTextId: string | null;
+  }>({
+    open: false,
+    mode: 'text',
+    isRecognizing: false,
+    initialValue: '',
+    lines: [],
+    strokes: [],
+    providerId: 'unknown',
+    lineCount: 0,
+    strokeCount: 0,
+    statusMessage: null,
+    editingTextId: null,
+  });
+  const conversionRequestGenRef = useRef(0);
   const [activeEditor, setActiveEditor] = useState<Editor | null>(null);
   const [, setLayerRevision] = useState(0);
   const { isPropertiesPanelOpen } = useUIStore(useShallow(state => ({ isPropertiesPanelOpen: state.isPropertiesPanelOpen })));
@@ -304,10 +492,14 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     notebookEngine, () => useWorkspaceStore.getState().notebookPages,
     id => useWorkspaceStore.getState().setActivePage(id),
   ), [notebookEngine]);
-  
+
   const containerRef = useRef<HTMLDivElement>(null);
+  const sizerRef = useRef<HTMLDivElement>(null);
+  const surfaceRef = useRef<HTMLDivElement>(null);
   const fullscreenToolbarHostRef = useRef<HTMLDivElement>(null);
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
+  const containerSizeRef = useRef(containerSize);
+  containerSizeRef.current = containerSize;
   const [fullscreenToolbarHostWidth, setFullscreenToolbarHostWidth] = useState<number | null>(null);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [debouncedScale, setDebouncedScale] = useState(1.0);
@@ -316,16 +508,25 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     ? resolveDocumentToolCursor(toolState)
     : undefined;
   const initialRestoredNotebookRef = useRef<string | null>(null);
+  const zoomGestureActiveRef = useRef(false);
+  const wheelZoomReleaseRef = useRef<(() => void) | null>(null);
+  const wheelZoomIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const layoutTotalRef = useRef({ width: 0, height: 0 });
+  const isMobileViewportRef = useRef(false);
 
-  useEffect(() => {
-    const gestures = notebookEngine.input.navigationGestures;
-    const updateRasterScale = () => {
-      if (!gestures.active) setDebouncedScale(notebookEngine.viewport.getState().scale);
-    };
-    const handler = setTimeout(updateRasterScale, 150);
-    const unsubscribe = gestures.onIdle(updateRasterScale);
-    return () => { clearTimeout(handler); unsubscribe(); };
-  }, [notebookEngine, viewport.scale]);
+  const applyImperativeZoomDom = useCallback((scale: number, activeGesture: boolean) => {
+    const sizer = sizerRef.current;
+    const surface = surfaceRef.current;
+    const { width: totalWidth, height: totalHeight } = layoutTotalRef.current;
+    if (!sizer || !surface || totalWidth <= 0 || totalHeight <= 0) return;
+    const container = containerRef.current;
+    const containerWidth = container?.clientWidth || containerSizeRef.current.width;
+    const pad = isMobileViewportRef.current ? 16 : 64;
+    sizer.style.width = `${Math.max(containerWidth, totalWidth * scale + pad)}px`;
+    sizer.style.height = `${totalHeight * scale}px`;
+    surface.style.transform = `scale(${scale})`;
+    surface.style.willChange = activeGesture ? 'transform' : '';
+  }, []);
 
   useEffect(() => {
     if (workspaceViewMode !== 'edit') {
@@ -337,6 +538,9 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   // Every manual pan owner shares this synchronous lifecycle. Focus handoff
   // unmounts/detaches the live canvas, so ALL activation requests must defer.
   const navigationGestures = notebookEngine.input.navigationGestures;
+  const navigationGesturesRef = useRef(navigationGestures);
+  navigationGesturesRef.current = navigationGestures;
+  const pendingContainerSizeRef = useRef<{ width: number; height: number } | null>(null);
   const pendingFocusPageIdRef = useRef<string | null>(null);
   const pendingActivationPageIdRef = useRef<string | null>(null);
   // Passive scroll coalesces its focus transfer until motion settles. Running a
@@ -345,6 +549,52 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   const passiveActivationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingPassiveActivationRef = useRef<string | null>(null);
   const flushNavigationScrollRef = useRef<() => void>(() => {});
+  const endWheelZoomGesture = useCallback(() => {
+    if (wheelZoomIdleTimerRef.current !== null) {
+      clearTimeout(wheelZoomIdleTimerRef.current);
+      wheelZoomIdleTimerRef.current = null;
+    }
+    zoomGestureActiveRef.current = false;
+    const state = notebookEngine.viewport.getState();
+    applyImperativeZoomDom(state.scale, false);
+    const release = wheelZoomReleaseRef.current;
+    wheelZoomReleaseRef.current = null;
+    if (release) {
+      release();
+    } else {
+      flushNavigationScrollRef.current();
+      const pendingSize = pendingContainerSizeRef.current;
+      pendingContainerSizeRef.current = null;
+      if (pendingSize) {
+        setContainerSize(prev =>
+          prev.width === pendingSize.width && prev.height === pendingSize.height
+            ? prev
+            : pendingSize,
+        );
+      }
+      setViewport(prev => (prev === state ? prev : state));
+      setDebouncedScale(prev => (prev === state.scale ? prev : state.scale));
+    }
+  }, [notebookEngine, applyImperativeZoomDom]);
+
+  const beginWheelZoomGesture = useCallback((isZoomOutFromWindow = false) => {
+    zoomGestureActiveRef.current = true;
+    wheelZoomReleaseRef.current ??= navigationGestures.begin();
+    if (wheelZoomIdleTimerRef.current !== null) clearTimeout(wheelZoomIdleTimerRef.current);
+    wheelZoomIdleTimerRef.current = setTimeout(endWheelZoomGesture, isZoomOutFromWindow ? 150 : 220);
+  }, [navigationGestures, endWheelZoomGesture]);
+
+  useEffect(() => () => {
+    if (wheelZoomIdleTimerRef.current !== null) {
+      clearTimeout(wheelZoomIdleTimerRef.current);
+      wheelZoomIdleTimerRef.current = null;
+    }
+    zoomGestureActiveRef.current = false;
+    const release = wheelZoomReleaseRef.current;
+    wheelZoomReleaseRef.current = null;
+    release?.();
+  }, []);
+
   // Clear before child layout cleanup detaches the focused canvas on teardown.
   useLayoutEffect(() => () => {
     pendingFocusPageIdRef.current = null;
@@ -356,7 +606,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     pendingPassiveActivationRef.current = null;
     flushNavigationScrollRef.current = () => {};
   }, []);
-  const pageGeometryTransitionRef = useRef<{ pageId: string; anchor: PageGeometryAnchor } | null>(null);
+  const pageGeometryTransitionRef = useRef<{ pageId: string; anchor: PageGeometryAnchor; useSourceFrame?: boolean } | null>(null);
   const pageGeometryReleaseRafRef = useRef<number | null>(null);
   const [pageGeometryTransitionRevision, setPageGeometryTransitionRevision] = useState(0);
   // handleActivatePage is defined further down (it needs the section cache) and is rebuilt
@@ -365,13 +615,29 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   // through this ref, which is reassigned on every render right after the callback is created.
   const handleActivatePageRef = useRef<(targetPageId: string, recordOpen?: boolean) => void>(() => {});
   useEffect(() => navigationGestures.onIdle(() => {
+    if (wheelZoomIdleTimerRef.current === null) {
+      zoomGestureActiveRef.current = false;
+    }
     // The final pointermove can precede the observer's rAF. Resolve that final
     // position before flushing, avoiding a stale-page handoff followed by another.
     flushNavigationScrollRef.current();
+    const pendingSize = pendingContainerSizeRef.current;
+    pendingContainerSizeRef.current = null;
+    if (pendingSize) {
+      setContainerSize(prev =>
+        prev.width === pendingSize.width && prev.height === pendingSize.height
+          ? prev
+          : pendingSize,
+      );
+    }
+    const state = notebookEngine.viewport.getState();
+    applyImperativeZoomDom(state.scale, false);
+    setViewport(prev => (prev === state ? prev : state));
+    setDebouncedScale(prev => (prev === state.scale ? prev : state.scale));
     const targetPageId = pendingFocusPageIdRef.current;
     pendingFocusPageIdRef.current = null;
     if (targetPageId) handleActivatePageRef.current(targetPageId);
-  }), [navigationGestures]);
+  }), [navigationGestures, notebookEngine, applyImperativeZoomDom]);
 
   // The scroll viewport is only rendered when a page is active (see the guard just before the
   // JSX), so this boolean — not the page id — is what listener-binding effects depend on.
@@ -379,19 +645,29 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
 
   // Sync Engine state to React
   useEffect(() => {
-    const unsubViewport = notebookEngine.viewport.subscribe(setViewport);
+    const unsubViewport = notebookEngine.viewport.subscribe(state => {
+      if (zoomGestureActiveRef.current || navigationGestures.active) return;
+      applyImperativeZoomDom(state.scale, false);
+      setViewport(state);
+      setDebouncedScale(state.scale);
+    });
 
     const unsubProps = notebookEngine.onPropertiesChange((newProps, source) => {
       // 1. Immediately update React state for instant UI response
-      setPageProperties(newProps);
-      
+      setPageProperties(prev => arePagePropertiesShallowEqual(prev, newProps) ? prev : newProps);
+
       const sceneOwnerPageId = notebookEngine.getDrawingOwnership().pageId;
       const currentPageId = source === 'load'
         ? sceneOwnerPageId
         : focusedPageIdRef.current || sceneOwnerPageId;
       if (currentPageId) {
+        pagePropertiesCacheRef.current[currentPageId] = { ...newProps };
         updateSectionDataCache(prev => {
-          const prevData = prev[currentPageId] || createEmptyDrawingData();
+          const prevEntry = prev[currentPageId];
+          if (source === 'load' && prevEntry && arePagePropertiesShallowEqual(prevEntry.properties, newProps)) {
+            return prev;
+          }
+          const prevData = prevEntry || createEmptyDrawingData();
           return {
             ...prev,
             [currentPageId]: {
@@ -414,7 +690,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       });
       if (!pageOwnedSnapshot) return;
       latestCapturedDrawingRef.current.set(currentPageId, pageOwnedSnapshot);
-      
+
       // 2. Debounce persistence so serialization and disk/IPC never block the UI render
       if (propertySaveTimeoutRef.current) clearTimeout(propertySaveTimeoutRef.current);
       pendingPropertySaveRef.current = pageOwnedSnapshot;
@@ -425,7 +701,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         if (pending) persistDrawingRef.current(pending);
       }, 500);
     });
-    
+
     return () => {
       unsubViewport();
       unsubProps();
@@ -437,10 +713,18 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     if (!container) return;
     const observer = new ResizeObserver(entries => {
       if (entries[0]) {
-        setContainerSize({
-          width: entries[0].contentRect.width,
-          height: entries[0].contentRect.height
-        });
+        const nextWidth = entries[0].contentRect.width;
+        const nextHeight = entries[0].contentRect.height;
+        if (zoomGestureActiveRef.current || navigationGesturesRef.current.active) {
+          pendingContainerSizeRef.current = { width: nextWidth, height: nextHeight };
+          return;
+        }
+        pendingContainerSizeRef.current = null;
+        setContainerSize(prev =>
+          prev.width === nextWidth && prev.height === nextHeight
+            ? prev
+            : { width: nextWidth, height: nextHeight },
+        );
       }
     });
     observer.observe(container);
@@ -469,6 +753,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   // viewport-level bottom sheet that never reserves chrome width, so the
   // auto-close protection does not apply there.
   const isMobileViewport = useIsMobileViewport();
+  isMobileViewportRef.current = isMobileViewport;
   const hasTouchInput = useHasTouchInput();
   const isCompactWorkspace = useIsMobileViewport(1023);
   const compactTouchViewport = useIsCompactTouchViewport();
@@ -493,39 +778,6 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     [pageProperties],
   );
 
-  // Auto-fit zoom to fill ~85% of workspace width on initial load. The upper
-  // clamp bounds the zoom level itself (not a fixed pixel width) so large
-  // desktop windows get proportionally larger paper instead of hitting a
-  // 1150px ceiling that left big displays mostly empty.
-  const hasAutoZoomed = useRef(false);
-  const fittedViewportRef = useRef('');
-  const fittedScaleRef = useRef<number | null>(null);
-  useEffect(() => {
-    if (containerSize.width === 0 || paperDimensions.width === 0) return;
-    // ResizeObserver's content box also changes when scrollbars appear during
-    // zoom. That is not a viewport resize: refitting here fights the gesture
-    // and repeatedly adds/removes the scrollbar. Use the stable layout width
-    // to decide whether fitting is needed; retain the available width below.
-    const layoutWidth = containerRef.current?.offsetWidth ?? containerSize.width;
-    const fitKey = `${dockFitViewport}:${layoutWidth}:${paperDimensions.width}:${activeNotebookSectionId}`;
-    const phoneResized = dockFitViewport && fittedViewportRef.current !== fitKey;
-    const wasAutoFitted = fittedScaleRef.current !== null && Math.abs(notebookEngine.viewport.getState().scale - fittedScaleRef.current) < 0.001;
-    const changedComposition = fittedViewportRef.current !== '' && !fittedViewportRef.current.startsWith(`${dockFitViewport}:`);
-    if (hasAutoZoomed.current && !phoneResized && !wasAutoFitted && !changedComposition) return;
-
-    const targetWidth = dockFitViewport ? containerSize.width - 16 : containerSize.width * 0.85;
-    const fitZoom = Math.max(0.25, Math.min(1.75, targetWidth / paperDimensions.width));
-    notebookEngine.viewport.setZoom(fitZoom);
-    if (dockFitViewport && containerRef.current) containerRef.current.scrollLeft = 0;
-    fittedViewportRef.current = fitKey;
-    fittedScaleRef.current = fitZoom;
-    hasAutoZoomed.current = true;
-  }, [containerSize.width, paperDimensions.width, notebookEngine, dockFitViewport, activeNotebookSectionId]);
-
-  // Reset auto-zoom when active notebook or section changes (not on every single page scroll)
-  useEffect(() => {
-    hasAutoZoomed.current = false;
-  }, [activeNotebookSectionId, notebook?.id]);
   const marginPaddingClass = useMemo(() => {
     if (pageProperties.margins === 'Narrow') return 'px-[5%] py-[5%]';
     if (pageProperties.margins === 'Wide') return 'px-[18%] py-[12%]';
@@ -555,16 +807,35 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     () => currentSectionPages.map(sectionPage => sectionPage.id).join('\u0000'),
     [currentSectionPages],
   );
-  
+  const currentSectionPageById = useMemo(
+    () => new Map(currentSectionPages.map(sectionPage => [sectionPage.id, sectionPage])),
+    [currentSectionPages],
+  );
+
   // Compute the canonical section layout in stable base-document coordinates.
   // Two-page mode is a real spread (paired columns), not a global UI scale.
+  const prevResolvedSectionPropsRef = useRef<Map<string, PagePropertySet>>(new Map());
   const resolvedSectionProperties = useMemo(() => {
-    return new Map(currentSectionPages.map(sectionPage => {
-      const cachedProperties = sectionDataCacheRef.current[sectionPage.id]?.properties;
+    const prev = prevResolvedSectionPropsRef.current;
+    const next = new Map<string, PagePropertySet>();
+    let allEqual = prev.size === currentSectionPages.length;
+    for (const sectionPage of currentSectionPages) {
+      const cachedProperties = sectionDataCacheRef.current[sectionPage.id]?.properties
+        ?? pagePropertiesCacheRef.current[sectionPage.id];
       // On first load there is no cache yet, so persisted metadata remains the
       // source until the engine finishes loading.
-      return [sectionPage.id, resolvePageRenderProperties(notebook, sectionPage, cachedProperties)] as const;
-    }));
+      const resolved = resolvePageRenderProperties(notebook, sectionPage, cachedProperties);
+      const existing = prev.get(sectionPage.id);
+      if (existing && arePagePropertiesShallowEqual(existing, resolved)) {
+        next.set(sectionPage.id, existing);
+      } else {
+        allEqual = false;
+        next.set(sectionPage.id, resolved);
+      }
+    }
+    if (allEqual) return prev;
+    prevResolvedSectionPropsRef.current = next;
+    return next;
   }, [currentSectionPages, notebook, sectionDataRevision]);
 
   const [logicalScrollBases, setLogicalScrollBases] = useState<Record<string, number>>({});
@@ -586,9 +857,58 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     })),
     spreadMode,
   ), [currentSectionPages, resolvedSectionProperties, spreadMode]);
+  layoutTotalRef.current = { width: layoutConfig.totalWidth, height: layoutConfig.totalHeight };
   const sectionAppearanceReady = currentSectionPages.every(sectionPage =>
-    hasAuthoritativePageAppearance(sectionPage, sectionDataCacheRef.current[sectionPage.id]?.properties),
+    hasAuthoritativePageAppearance(sectionPage, sectionDataCacheRef.current[sectionPage.id]?.properties)
+    || hasAuthoritativePageAppearance(sectionPage, pagePropertiesCacheRef.current[sectionPage.id]),
   );
+  // Auto-fit zoom to fill ~85% of workspace width on initial section load.
+  // Exclude paperDimensions.width so Research Space expansion and scrolling
+  // between pages of differing widths never rescale or ping-pong zoom.
+  const hasAutoZoomed = useRef(false);
+  const fittedViewportRef = useRef('');
+  const fittedScaleRef = useRef<number | null>(null);
+  const fittedPaperWidthRef = useRef<number | null>(null);
+  const fittedSectionRef = useRef('');
+  const hasSectionPages = currentSectionPages.length > 0;
+  useEffect(() => {
+    if (!sectionAppearanceReady || !hasSectionPages || containerSize.width === 0) return;
+    const sectionKey = `${notebook?.id ?? ''}:${activeNotebookSectionId ?? ''}`;
+    if (fittedSectionRef.current !== sectionKey) {
+      hasAutoZoomed.current = false;
+      fittedPaperWidthRef.current = null;
+    }
+
+    // ResizeObserver's content box also changes when scrollbars appear during
+    // zoom or page expansion. Use the stable layout width (excluding page width)
+    // to decide whether the viewport itself resized.
+    const layoutWidth = containerRef.current?.offsetWidth ?? containerSize.width;
+    const fitKey = `${dockFitViewport}:${layoutWidth}:${sectionKey}`;
+    const viewportChanged = fittedViewportRef.current !== fitKey;
+    const phoneResized = dockFitViewport && viewportChanged;
+    const wasAutoFitted = fittedScaleRef.current !== null
+      && Math.abs(notebookEngine.viewport.getState().scale - fittedScaleRef.current) < 0.001;
+    const changedComposition = fittedViewportRef.current !== ''
+      && !fittedViewportRef.current.startsWith(`${dockFitViewport}:`);
+    if (hasAutoZoomed.current && (!viewportChanged || (!phoneResized && !wasAutoFitted && !changedComposition))) return;
+
+    const initialProperties = (activePageId ? resolvedSectionProperties.get(activePageId) : undefined)
+      ?? (focusedPageId ? resolvedSectionProperties.get(focusedPageId) : undefined)
+      ?? (currentSectionPages[0] ? resolvedSectionProperties.get(currentSectionPages[0].id) : undefined)
+      ?? pageProperties;
+    const fitPaperWidth = fittedPaperWidthRef.current ?? resolvePageDimensions(initialProperties).width;
+    if (fitPaperWidth <= 0) return;
+
+    const targetWidth = dockFitViewport ? containerSize.width - 16 : containerSize.width * 0.85;
+    const fitZoom = Math.max(0.25, Math.min(1.75, targetWidth / fitPaperWidth));
+    notebookEngine.viewport.setZoom(fitZoom);
+    if (dockFitViewport && containerRef.current) containerRef.current.scrollLeft = 0;
+    fittedViewportRef.current = fitKey;
+    fittedScaleRef.current = fitZoom;
+    fittedPaperWidthRef.current = fitPaperWidth;
+    fittedSectionRef.current = sectionKey;
+    hasAutoZoomed.current = true;
+  }, [sectionAppearanceReady, hasSectionPages, containerSize.width, notebookEngine, dockFitViewport, activeNotebookSectionId, notebook?.id]);
   useEffect(() => {
     const goToPosition = (event: Event) => {
       const y = Number((event as CustomEvent).detail?.y);
@@ -613,7 +933,11 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     const pageElement = document.getElementById(`page-${pending.pageId}`);
     if (pageElement) {
       const pageRect = pageElement.getBoundingClientRect();
-      const delta = resolvePageGeometryScrollDelta(pending.anchor, pageRect);
+      const nextProperties = resolvedSectionProperties.get(pending.pageId) ?? notebookEngine.getProperties();
+      const targetFrame = pending.useSourceFrame
+        ? resolvePageSourceViewportFrame(pageRect, nextProperties)
+        : pageRect;
+      const delta = resolvePageGeometryScrollDelta(pending.anchor, targetFrame);
       container.scrollTo({
         left: Math.max(0, container.scrollLeft + delta.x),
         top: Math.max(0, container.scrollTop + delta.y),
@@ -634,109 +958,82 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     if (pageGeometryReleaseRafRef.current !== null) cancelAnimationFrame(pageGeometryReleaseRafRef.current);
   }, []);
 
-  // ---- Zoom: deterministic closed-form anchor-based scroll correction ----
-  // We capture the document-space point under the cursor BEFORE zoom,
-  // then in useLayoutEffect we calculate the exact new scroll position using
-  // closed-form vertical coordinates without any flexbox ambiguity or jumps.
-  const zoomAnchorRef = useRef<{
-    docX: number;      // document-space X under cursor
-    docY: number;      // document-space Y under cursor
-    originX: number;   // cursor X relative to container
-    originY: number;   // cursor Y relative to container
-    newScale: number;  // target scale
-  } | null>(null);
-
-  const applyZoom = useCallback((factor: number, originX: number, originY: number): boolean => {
+  // ---- Zoom: imperative GPU-transform anchor-based scroll correction ----
+  // Drive active zoom directly on the `.origin-top` surface, outer sizer, and
+  // scroll offsets so wheel/pinch ticks trigger zero React re-renders, then settle
+  // backing rasters once on idle.
+  const applyZoom = useCallback((factor: number, originX: number, originY: number, isGesture = true): boolean => {
     const container = containerRef.current;
     if (!container) return false;
 
-    const renderedScale = viewport.scale;
-    const pendingScale = zoomAnchorRef.current?.newScale;
-    const targetBaseScale = pendingScale !== undefined && pendingScale !== renderedScale
-      ? pendingScale
-      : renderedScale;
-    const newScale = Math.max(0.25, Math.min(8.0, targetBaseScale * factor));
-    if (newScale === targetBaseScale) return false;
+    const oldScale = notebookEngine.viewport.getState().scale;
+    const newScale = Math.max(0.25, Math.min(8.0, oldScale * factor));
+    if (newScale === oldScale) return false;
 
-    const w = layoutConfig.totalWidth * renderedScale;
-    const offsetX = Math.max(0, (container.clientWidth - w) / 2);
+    const totalWidth = layoutTotalRef.current.width;
+    const pad = isMobileViewportRef.current ? 16 : 64;
+    const oldW = totalWidth * oldScale;
+    const offsetX = Math.max(pad / 2, (container.clientWidth - oldW) / 2);
 
-    // Convert cursor origin (in container-space) to exact document-space coordinates
     const contentX = container.scrollLeft + originX - offsetX;
     const contentY = container.scrollTop + originY;
-    const docX = contentX / renderedScale;
-    const docY = contentY / renderedScale;
+    const docX = contentX / oldScale;
+    const docY = contentY / oldScale;
 
-    // Store anchor for post-render correction
-    zoomAnchorRef.current = { docX, docY, originX, originY, newScale };
+    if (isGesture) {
+      beginWheelZoomGesture(newScale < oldScale && notebookEngine.viewport.hasRenderWindow());
+    } else {
+      if (wheelZoomIdleTimerRef.current !== null) {
+        clearTimeout(wheelZoomIdleTimerRef.current);
+        wheelZoomIdleTimerRef.current = null;
+      }
+      zoomGestureActiveRef.current = false;
+      const release = wheelZoomReleaseRef.current;
+      wheelZoomReleaseRef.current = null;
+      release?.();
+    }
 
-    // Update viewport scale — triggers React re-render
+    applyImperativeZoomDom(newScale, isGesture);
     notebookEngine.viewport.setZoom(newScale);
+
+    const newW = totalWidth * newScale;
+    const newOffsetX = Math.max(pad / 2, (container.clientWidth - newW) / 2);
+    container.scrollLeft = Math.max(0, docX * newScale + newOffsetX - originX);
+    container.scrollTop = Math.max(0, docY * newScale - originY);
     return true;
-  }, [layoutConfig.totalWidth, notebookEngine, viewport.scale]);
-
-  // After React re-renders with the new scale, compute exact new scroll coordinates
-  useLayoutEffect(() => {
-    const anchor = zoomAnchorRef.current;
-    if (!anchor) return;
-    zoomAnchorRef.current = null;
-
-    const container = containerRef.current;
-    if (!container) return;
-
-    const scale = anchor.newScale;
-    const w = layoutConfig.totalWidth * scale;
-    const offsetX = Math.max(0, (container.clientWidth - w) / 2);
-
-    const newScrollLeft = Math.max(0, anchor.docX * scale + offsetX - anchor.originX);
-    const newScrollTop = Math.max(0, anchor.docY * scale - anchor.originY);
-
-    container.scrollTo({ left: newScrollLeft, top: newScrollTop, behavior: 'instant' });
-  }, [layoutConfig.totalWidth, viewport.scale]);
+  }, [notebookEngine, applyImperativeZoomDom, beginWheelZoomGesture]);
 
   // Direct panel zoom button (+, -, fit)
   const handlePanelZoom = useCallback((zoomFactor: number) => {
     const container = containerRef.current;
     if (!container) return;
-    const clampedZoom = Math.max(0.25, Math.min(8.0, viewport.scale * zoomFactor));
-    const factor = clampedZoom / viewport.scale;
+    const currentScale = notebookEngine.viewport.getState().scale;
+    const clampedZoom = Math.max(0.25, Math.min(8.0, currentScale * zoomFactor));
+    const factor = clampedZoom / currentScale;
     if (factor === 1) return;
-    applyZoom(factor, container.clientWidth / 2, container.clientHeight / 2);
-  }, [viewport.scale, applyZoom]);
+    applyZoom(factor, container.clientWidth / 2, container.clientHeight / 2, false);
+  }, [notebookEngine, applyZoom]);
 
-  // Continuously flushes accumulated pinch-zoom deltas on animation frames so
-  // there is always exactly one anchor in flight per committed scale.
+  // Continuously flushes accumulated pinch-zoom deltas on animation frames.
   const CONTINUOUS_PINCH_MAX_ABS_DELTA = 50; // px; below this, treat as a touchpad pinch sample
   const pinchAccumulatedDeltaYRef = useRef(0);
   const pinchOriginRef = useRef({ x: 0, y: 0 });
   const pinchFrameRef = useRef<number | null>(null);
-  const pinchCommitInFlightRef = useRef(false);
 
   const flushPinchZoom = useCallback(() => {
     pinchFrameRef.current = null;
-    if (pinchCommitInFlightRef.current) return; // wait for the in-flight scale to commit + correct
     const deltaY = pinchAccumulatedDeltaYRef.current;
     if (deltaY === 0) return;
     pinchAccumulatedDeltaYRef.current = 0;
 
     const factor = Math.exp(-deltaY / 100);
-    const didCommit = applyZoom(factor, pinchOriginRef.current.x, pinchOriginRef.current.y);
-    if (didCommit) {
-      pinchCommitInFlightRef.current = true;
-    }
+    applyZoom(factor, pinchOriginRef.current.x, pinchOriginRef.current.y, true);
   }, [applyZoom]);
 
   const schedulePinchFlush = useCallback(() => {
     if (pinchFrameRef.current !== null) return;
     pinchFrameRef.current = requestAnimationFrame(flushPinchZoom);
   }, [flushPinchZoom]);
-
-  useEffect(() => {
-    pinchCommitInFlightRef.current = false;
-    if (pinchAccumulatedDeltaYRef.current !== 0) {
-      schedulePinchFlush();
-    }
-  }, [viewport.scale, schedulePinchFlush]);
 
   useEffect(() => {
     return () => {
@@ -764,7 +1061,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
           schedulePinchFlush();
         } else {
           const factor = e.deltaY < 0 ? 1.1 : 0.9;
-          applyZoom(factor, originX, originY);
+          applyZoom(factor, originX, originY, true);
         }
       }
     };
@@ -967,8 +1264,14 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     let mode = notebookEngine.tools.getState().mode;
     return attachTwoFingerViewportGesture({
       target: container,
+      minScale: 0.25,
+      maxScale: 8,
       getScale: () => notebookEngine.viewport.getState().scale,
-      setScale: scale => flushSync(() => notebookEngine.viewport.setZoom(scale)),
+      setScale: scale => {
+        zoomGestureActiveRef.current = true;
+        applyImperativeZoomDom(scale, true);
+        notebookEngine.viewport.setZoom(scale);
+      },
       cancelActivePointerInteraction: () => notebookEngine.input.cancelActivePointerInteraction(),
       navigationGestures,
       subscribeCancellation: cancel => notebookEngine.tools.subscribe(state => {
@@ -978,7 +1281,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       }),
       getContentOffset: scale => ({ x: Math.max((container.clientWidth - layoutConfig.totalWidth * scale) / 2, dockFitViewport ? 8 : 32), y: 0 }),
     });
-  }, [notebookEngine, hasActivePage, layoutConfig.totalWidth, dockFitViewport, navigationGestures]);
+  }, [notebookEngine, hasActivePage, layoutConfig.totalWidth, dockFitViewport, navigationGestures, applyImperativeZoomDom]);
 
 
   // Central persistence writer for drawing data. Every notebook save goes
@@ -1036,6 +1339,9 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       // back until the next interaction.
       publishSnapshotPageData(snapshot, savedData);
       if (!completion.latestScheduled || !completion.latestPersisted) return;
+      if (latestCapturedDrawingRef.current.get(snapshot.sheetId)?.drawingRevision === snapshot.drawingRevision) {
+        latestCapturedDrawingRef.current.delete(snapshot.sheetId);
+      }
       if (focusedPageIdRef.current === pageId) notebookEngine.audio.setAll(savedData.audioNotes);
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('panvas:notebook-content-changed', { detail: { pageId } }));
@@ -1104,6 +1410,10 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     // Focus owns the shared engine and may only move once target data is
     // available. The section preload will update this effect when a cache gap
     // is filled; until then the existing focused page remains authoritative.
+    if (notebookEngine.getDrawingOwnership().pageId === targetPageId) {
+      if (focusedPageId !== targetPageId) setFocusedPageId(targetPageId);
+      return;
+    }
     if (sectionDataCacheRef.current[targetPageId]) {
       handleActivatePageRef.current(targetPageId);
     }
@@ -1127,24 +1437,30 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       (updates.orientation !== undefined && updates.orientation !== previousProperties.orientation)
       || (updates.pageSize !== undefined && updates.pageSize !== previousProperties.pageSize)
       || isNoteSpaceChange;
-    if (changesDimensions && updates.pageSize !== 'Infinite' && previousProperties.pageSize !== 'Infinite') {
-      const container = containerRef.current;
-      const pageId = focusedPageIdRef.current;
-      const pageElement = pageId ? document.getElementById(`page-${pageId}`) : null;
-      if (container && pageId && pageElement) {
-        const containerRect = container.getBoundingClientRect();
-        pageGeometryTransitionRef.current = {
-          pageId,
-          anchor: capturePageGeometryAnchor(pageElement.getBoundingClientRect(), {
-            x: containerRect.left + container.clientWidth / 2,
-            y: containerRect.top + container.clientHeight / 2,
-          }),
-        };
-      }
-    }
+    const shouldAnchorGeometry = changesDimensions
+      && (isNoteSpaceChange || (updates.pageSize !== 'Infinite' && previousProperties.pageSize !== 'Infinite'));
     const pageId = focusedPageIdRef.current;
     const isPaperColorOnlyChange = isPaperColorOnlyUpdate(updates);
     const applyProperties = (properties: PagePropertySet) => {
+      if (shouldAnchorGeometry && pageId) {
+        const container = containerRef.current;
+        const pageElement = document.getElementById(`page-${pageId}`);
+        if (container && pageElement) {
+          const containerRect = container.getBoundingClientRect();
+          const currentProperties = notebookEngine.getProperties();
+          const anchorFrame = isNoteSpaceChange
+            ? resolvePageSourceViewportFrame(pageElement.getBoundingClientRect(), currentProperties)
+            : pageElement.getBoundingClientRect();
+          pageGeometryTransitionRef.current = {
+            pageId,
+            useSourceFrame: isNoteSpaceChange,
+            anchor: capturePageGeometryAnchor(anchorFrame, {
+              x: containerRect.left + container.clientWidth / 2,
+              y: containerRect.top + container.clientHeight / 2,
+            }),
+          };
+        }
+      }
       notebookEngine.setProperties(properties, isPaperColorOnlyChange ? 'appearance' : 'user');
       setPageProperties({ ...properties });
       if (pageId) {
@@ -1276,32 +1592,105 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     }
   }, [notebookEngine, workspace, updateSectionDataCache]);
 
+  const activeSectionLoadKeyRef = useRef('');
+  activeSectionLoadKeyRef.current = `${workspace?.id ?? ''}:${notebook?.id ?? ''}:${activeNotebookSectionId ?? ''}`;
+
   // Preload section drawing data into memory cache when section changes
   useEffect(() => {
     if (!workspace || !notebook || currentSectionPages.length === 0) return;
     let mounted = true;
+    const sectionKey = `${workspace.id}:${notebook.id}:${activeNotebookSectionId ?? ''}`;
 
     async function preloadSection() {
-      const entries = await Promise.all(
-        currentSectionPages.map(async (p) => {
+      const pages = currentSectionPages;
+      if (pages.length <= MAX_SECTION_DATA_CACHE_ENTRIES) {
+        const entries = await Promise.all(
+          pages.map(async (p) => {
+            const d = await notebookRepository.loadDrawingData(workspace!.id, notebook!.id, p.id);
+            const loaded = (d || createEmptyDrawingData()) as DrawingData;
+            const data = { ...loaded, properties: resolvePageProperties(notebook, p, loaded.properties) };
+            return [p.id, data] as const;
+          }),
+        );
+        if (!mounted || activeSectionLoadKeyRef.current !== sectionKey) return;
+        const map: Record<string, DrawingData> = {};
+        for (const [id, d] of entries) {
+          map[id] = d;
+          pagePropertiesCacheRef.current[id] = d.properties;
+          // Repository data has no engine revision; a later save from a new
+          // engine must replace it rather than matching a stale page revision.
+          delete sectionDataRevisionRef.current[id];
+        }
+        updateSectionDataCache(prev => mergeLoadedPageData(prev, map));
+        return;
+      }
+
+      // Large section (>24 pages): prioritize active ±3 pages immediately into
+      // the full drawing cache, then chunk-scan distant pages' lightweight
+      // properties into `pagePropertiesCacheRef` without pinning all strokes.
+      const focusIdx = Math.max(
+        0,
+        pages.findIndex(p => p.id === (currentActivePageIdRef.current ?? focusedPageIdRef.current)),
+      );
+      const priorityStart = Math.max(0, focusIdx - 3);
+      const priorityEnd = Math.min(pages.length - 1, focusIdx + 3);
+      const priorityPages: typeof pages = [];
+      const distantPages: typeof pages = [];
+      for (let i = 0; i < pages.length; i++) {
+        if (i >= priorityStart && i <= priorityEnd) priorityPages.push(pages[i]);
+        else distantPages.push(pages[i]);
+      }
+
+      const priorityEntries = await Promise.all(
+        priorityPages.map(async (p) => {
           const d = await notebookRepository.loadDrawingData(workspace!.id, notebook!.id, p.id);
           const loaded = (d || createEmptyDrawingData()) as DrawingData;
           const data = { ...loaded, properties: resolvePageProperties(notebook, p, loaded.properties) };
           return [p.id, data] as const;
-        })
+        }),
       );
-      if (!mounted) return;
-      const map: Record<string, DrawingData> = {};
-      for (const [id, d] of entries) {
-        map[id] = d;
-        // Repository data has no engine revision; a later save from a new
-        // engine must replace it rather than matching a stale page revision.
+      if (!mounted || activeSectionLoadKeyRef.current !== sectionKey) return;
+      const priorityMap: Record<string, DrawingData> = {};
+      for (const [id, d] of priorityEntries) {
+        priorityMap[id] = d;
+        pagePropertiesCacheRef.current[id] = d.properties;
         delete sectionDataRevisionRef.current[id];
       }
-      updateSectionDataCache(prev => mergeLoadedPageData(prev, map));
+      updateSectionDataCache(prev => mergeLoadedPageData(prev, priorityMap));
+
+      let propsChanged = false;
+      const CHUNK_SIZE = 8;
+      for (let i = 0; i < distantPages.length; i += CHUNK_SIZE) {
+        if (!mounted || activeSectionLoadKeyRef.current !== sectionKey) return;
+        const batch = distantPages.slice(i, i + CHUNK_SIZE);
+        const batchProps = await Promise.all(
+          batch.map(async (p) => {
+            const existing = sectionDataCacheRef.current[p.id];
+            if (existing) {
+              return [p.id, existing.properties] as const;
+            }
+            const d = await notebookRepository.loadDrawingData(workspace!.id, notebook!.id, p.id);
+            const loaded = (d || createEmptyDrawingData()) as DrawingData;
+            return [p.id, resolvePageProperties(notebook, p, loaded.properties)] as const;
+          }),
+        );
+        if (!mounted || activeSectionLoadKeyRef.current !== sectionKey) return;
+        for (const [id, props] of batchProps) {
+          if (!arePagePropertiesShallowEqual(pagePropertiesCacheRef.current[id], props)) {
+            pagePropertiesCacheRef.current[id] = props;
+            propsChanged = true;
+          }
+        }
+        if (i + CHUNK_SIZE < distantPages.length) {
+          await new Promise<void>(resolve => setTimeout(resolve, 0));
+        }
+      }
+      if (mounted && propsChanged && activeSectionLoadKeyRef.current === sectionKey) {
+        setSectionDataRevision(revision => revision + 1);
+      }
     }
 
-    preloadSection();
+    void preloadSection();
     return () => { mounted = false; };
   }, [workspace?.id, notebook?.id, activeNotebookSectionId, currentSectionPageIdsKey, updateSectionDataCache]);
 
@@ -1411,7 +1800,6 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   const totalPages = currentSectionPages.length;
 
   // Keep track of activePageId for asynchronous scroll/pointer callbacks
-  const currentActivePageIdRef = useRef(activePageId);
   currentActivePageIdRef.current = activePageId;
   const isNavigatingRef = useRef<boolean>(false);
   const lastNavigatedPageIdRef = useRef<string>('');
@@ -1473,6 +1861,8 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       if (!cached || (!previewCurrent
         && (activeMemoryData.objects?.length ?? 0) >= (cached.objects?.length ?? 0))) {
         sectionDataCacheRef.current[targetPageId] = activeMemoryData;
+        if (activeMemoryData.properties) pagePropertiesCacheRef.current[targetPageId] = activeMemoryData.properties;
+        touchSectionDataOrder(targetPageId);
       }
     }
 
@@ -1527,7 +1917,10 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     const oldSlot = oldCanvas?.closest('[data-page-id]');
     if (outgoingPageId && notebookEngine.getDrawingOwnership().pageId === outgoingPageId) {
       if (notebookEngine.getDrawingOwnership().revision !== loadedSceneRevisionRef.current) {
-        sectionDataCacheRef.current[outgoingPageId] = notebookEngine.getDrawingData();
+        const snapshotData = notebookEngine.getDrawingData();
+        sectionDataCacheRef.current[outgoingPageId] = snapshotData;
+        if (snapshotData.properties) pagePropertiesCacheRef.current[outgoingPageId] = snapshotData.properties;
+        touchSectionDataOrder(outgoingPageId);
         sectionDataRevisionRef.current[outgoingPageId] = notebookEngine.getDrawingOwnership().revision;
       }
     }
@@ -1566,6 +1959,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       (incomingData.objects ?? []).filter(object => object.type === 'image').map(object => object.fileId));
     const incomingDrawing = residentDrawingEnginesRef.current.get(targetPageId);
     notebookEngine.setDrawingData(incomingData, targetPageId, incomingDrawing);
+    touchSectionDataOrder(targetPageId);
     // Offer the incoming page-owned preview to the live canvas mount so the
     // focus handoff does not replay the whole scene behind React's commit.
     if (incomingDrawing) notebookEngine.drawing.prepareSurfaceAdoption(incomingDrawing, incomingData);
@@ -1584,7 +1978,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     setFocusedPageId(targetPageId);
     if (useWorkspaceStore.getState().activePageId !== targetPageId) setActivePage(targetPageId, recordOpen);
     if (activationStartedAt) gate0Profiler.event('page-focus-transfer', performance.now() - activationStartedAt, { targetPageId });
-  }, [flushOwnedPageDrawing, notebookEngine, setActivePage, navigationGestures]);
+  }, [flushOwnedPageDrawing, notebookEngine, setActivePage, navigationGestures, touchSectionDataOrder]);
 
   handleActivatePageRef.current = handleActivatePage;
 
@@ -1626,10 +2020,104 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     armPassiveActivation();
   };
 
-  const [residentIds, setResidentIds] = useState(() => residentPageIds(
-    layoutConfig.positions, 0, containerSize.height / viewport.scale,
-  ));
-  const residentIdsRef = useRef(residentIds);
+  const [residentIds, setResidentIds] = useState(() => {
+    const initial = residentPageIds(
+      layoutConfig.positions,
+      0,
+      containerSize.height > 0 ? containerSize.height / viewport.scale : 1200,
+    );
+    if (initial.size === 0 && activePageId) initial.add(activePageId);
+    return initial;
+  });
+  residentIdsRef.current = residentIds;
+
+  // On-demand resident loader: ensure scrolling into any evicted range fetches
+  // full drawing payloads for visible/resident pages (plus immediate upcoming
+  // neighbors) in a single coalesced cache batch.
+  useEffect(() => {
+    if (!workspace || !notebook || currentSectionPages.length === 0) return;
+    const sectionKey = `${workspace.id}:${notebook.id}:${activeNotebookSectionId ?? ''}`;
+    let minIdx = Infinity;
+    let maxIdx = -1;
+    const targetIds = new Set<string>();
+    for (let i = 0; i < currentSectionPages.length; i += 1) {
+      const id = currentSectionPages[i].id;
+      if (residentIds.has(id)) {
+        targetIds.add(id);
+        if (i < minIdx) minIdx = i;
+        if (i > maxIdx) maxIdx = i;
+      }
+    }
+    if (maxIdx >= minIdx) {
+      const prefetchStart = Math.max(0, minIdx - 2);
+      const prefetchEnd = Math.min(currentSectionPages.length - 1, maxIdx + 8);
+      for (let i = prefetchStart; i <= prefetchEnd; i += 1) {
+        targetIds.add(currentSectionPages[i].id);
+      }
+    }
+
+    const missingIds: string[] = [];
+    for (const id of targetIds) {
+      if (sectionDataCacheRef.current[id] || loadingSectionPagesRef.current.has(id)) continue;
+      if (currentSectionPageById.has(id)) {
+        missingIds.push(id);
+        if (missingIds.length >= 10) break;
+      }
+    }
+    if (missingIds.length === 0) return;
+    for (const id of missingIds) loadingSectionPagesRef.current.add(id);
+    void Promise.all(
+      missingIds.map(async (id) => {
+        try {
+          const pageMeta = currentSectionPageById.get(id);
+          const d = await notebookRepository.loadDrawingData(workspace.id, notebook.id, id);
+          const raw = (d || createEmptyDrawingData()) as DrawingData;
+          const resolved = { ...raw, properties: resolvePageProperties(notebook, pageMeta, raw.properties) };
+          if (activeSectionLoadKeyRef.current !== sectionKey) return null;
+          pagePropertiesCacheRef.current[id] = resolved.properties;
+          return [id, resolved] as const;
+        } finally {
+          loadingSectionPagesRef.current.delete(id);
+        }
+      }),
+    ).then((entries) => {
+      if (activeSectionLoadKeyRef.current !== sectionKey) return;
+      const loadedBatch = entries.filter((entry): entry is readonly [string, DrawingData] => entry !== null);
+      if (loadedBatch.length === 0) return;
+      const touchesMounted = loadedBatch.some(([id]) => residentIdsRef.current.has(id) || focusedPageIdRef.current === id);
+      updateSectionDataCache((prev) => {
+        let next: Record<string, DrawingData> | null = null;
+        for (const [id, resolved] of loadedBatch) {
+          if (prev[id]) continue;
+          if (!next) next = { ...prev };
+          delete sectionDataRevisionRef.current[id];
+          next[id] = resolved;
+        }
+        return next ?? prev;
+      }, touchesMounted);
+    });
+  }, [residentIds, workspace?.id, notebook?.id, activeNotebookSectionId, currentSectionPages, currentSectionPageById, updateSectionDataCache]);
+
+  const savePositionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingPositionWriteRef = useRef<{ notebookId: string; pageId: string; scrollX: number; scrollY: number } | null>(null);
+  const flushPendingPosition = useCallback(() => {
+    if (savePositionTimeoutRef.current !== null) {
+      clearTimeout(savePositionTimeoutRef.current);
+      savePositionTimeoutRef.current = null;
+    }
+    const pending = pendingPositionWriteRef.current;
+    pendingPositionWriteRef.current = null;
+    if (pending) {
+      saveNotebookPosition(pending.notebookId, {
+        pageId: pending.pageId,
+        scrollX: pending.scrollX,
+        scrollY: pending.scrollY,
+      });
+    }
+  }, []);
+  useEffect(() => () => {
+    flushPendingPosition();
+  }, [flushPendingPosition]);
 
   // Real-time visible page detection on vertical scroll (Passive Observational Update)
   useEffect(() => {
@@ -1677,7 +2165,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       const claimedPageId = pendingPassiveActivationRef.current ?? (currentActivePageIdRef.current || '');
       const dominantId = dominantPageId(layoutConfig.positions, top + height / 2,
         claimedPageId, 24 / scale);
-      const dominantPage = currentSectionPages.find(page => page.id === dominantId);
+      const dominantPage = dominantId ? currentSectionPageById.get(dominantId) : undefined;
 
       if (isNavigatingRef.current || pageGeometryTransitionRef.current) return;
       if (notebookEngine.getProperties().pageSize === 'Infinite') return;
@@ -1712,37 +2200,34 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       });
     };
 
-    let savePositionTimeout: ReturnType<typeof setTimeout> | null = null;
     const persistPositionDebounced = () => {
-      if (savePositionTimeout !== null) clearTimeout(savePositionTimeout);
-      savePositionTimeout = setTimeout(() => {
-        savePositionTimeout = null;
-        if (notebook?.id && currentActivePageIdRef.current) {
-          saveNotebookPosition(notebook.id, {
-            pageId: currentActivePageIdRef.current,
-            scrollX: container.scrollLeft,
-            scrollY: container.scrollTop,
-          });
-        }
-      }, 250);
-    };
-
-    const flushPendingPosition = () => {
-      if (savePositionTimeout !== null) {
-        clearTimeout(savePositionTimeout);
-        savePositionTimeout = null;
-        if (notebook?.id && currentActivePageIdRef.current) {
-          saveNotebookPosition(notebook.id, {
-            pageId: currentActivePageIdRef.current,
-            scrollX: container.scrollLeft,
-            scrollY: container.scrollTop,
-          });
-        }
+      if (notebook?.id && currentActivePageIdRef.current) {
+        pendingPositionWriteRef.current = {
+          notebookId: notebook.id,
+          pageId: currentActivePageIdRef.current,
+          scrollX: container.scrollLeft,
+          scrollY: container.scrollTop,
+        };
       }
+      if (savePositionTimeoutRef.current !== null) clearTimeout(savePositionTimeoutRef.current);
+      savePositionTimeoutRef.current = setTimeout(() => {
+        savePositionTimeoutRef.current = null;
+        if (notebook?.id && currentActivePageIdRef.current) {
+          pendingPositionWriteRef.current = {
+            notebookId: notebook.id,
+            pageId: currentActivePageIdRef.current,
+            scrollX: container.scrollLeft,
+            scrollY: container.scrollTop,
+          };
+        }
+        flushPendingPosition();
+      }, 450);
     };
 
     const onScroll = () => {
+      if (wheelZoomIdleTimerRef.current !== null) return;
       holdSaveDuringScroll();
+      markNavigationActivity();
       persistPositionDebounced();
       // Keep deferring while wheel/touch motion continues. The handoff runs
       // after the last scroll event, not between two pages the user is passing.
@@ -1762,7 +2247,8 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     };
     flushNavigationScrollRef.current = flushScroll;
 
-    updateResidency(container.scrollTop / viewport.scale, container.clientHeight / viewport.scale);
+    const liveScale = notebookEngine.viewport.getState().scale || 1;
+    updateResidency(container.scrollTop / liveScale, container.clientHeight / liveScale);
     container.addEventListener('scroll', onScroll, { passive: true });
     return () => {
       if (flushNavigationScrollRef.current === flushScroll) flushNavigationScrollRef.current = () => {};
@@ -1770,9 +2256,8 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       if (scrollRafId !== null) {
         cancelAnimationFrame(scrollRafId);
       }
-      // The passive-activation timer and pending handoff deliberately survive
-      // this cleanup: they are component-scoped and cleared only on unmount,
-      // so a zoom or property change cannot cancel a scheduled page handoff.
+      // The passive-activation and reading-position timers survive observer
+      // re-runs cleanly; only component unmount flushes reading position.
       if (scrollSaveReleaseTimer !== null) {
         clearTimeout(scrollSaveReleaseTimer);
         scrollSaveReleaseTimer = null;
@@ -1781,9 +2266,8 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         scrollGestureActiveRef.current = false;
         syncSaveGestureActive();
       }
-      flushPendingPosition();
     };
-  }, [currentSectionPages, setActivePage, layoutConfig.positions, viewport.scale, containerSize.height, notebookEngine, syncSaveGestureActive]);
+  }, [currentSectionPages, setActivePage, layoutConfig.positions, containerSize.height, notebookEngine, syncSaveGestureActive, flushPendingPosition]);
 
   // Scroll to active page when activePageId changes from sidebar/navigator clicks
   useLayoutEffect(() => {
@@ -1833,11 +2317,14 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
           return true;
         }
 
-        const savedPosition = notebook?.id && initialRestoredNotebookRef.current !== notebook.id
+        const shouldTryInitialRestore = Boolean(notebook?.id && initialRestoredNotebookRef.current !== notebook.id);
+        if (shouldTryInitialRestore && notebook?.id) {
+          initialRestoredNotebookRef.current = notebook.id;
+        }
+        const savedPosition = shouldTryInitialRestore && notebook?.id
           ? getNotebookPosition(notebook.id)
           : null;
         if (savedPosition && savedPosition.pageId === activePageId) {
-          initialRestoredNotebookRef.current = notebook?.id ?? null;
           const targetScrollLeft = typeof savedPosition.scrollX === 'number' ? savedPosition.scrollX : container.scrollLeft;
           const targetScrollTop = typeof savedPosition.scrollY === 'number' ? savedPosition.scrollY : (container.scrollTop + relativeTop - 24);
           isNavigatingRef.current = true;
@@ -1864,9 +2351,10 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       } else {
         const pos = layoutConfig.positions.find(p => p.id === activePageId);
         if (pos && container) {
-          const targetScrollTop = Math.max(0, pos.y * viewport.scale - 24);
+          const liveScale = notebookEngine.viewport.getState().scale;
+          const targetScrollTop = Math.max(0, pos.y * liveScale - 24);
           const targetScrollLeft = spreadMode
-            ? Math.max(0, pos.x * viewport.scale - (container.clientWidth - pos.width * viewport.scale) / 2)
+            ? Math.max(0, pos.x * liveScale - (container.clientWidth - pos.width * liveScale) / 2)
             : container.scrollLeft;
           isNavigatingRef.current = true;
           container.scrollTo({ left: targetScrollLeft, top: targetScrollTop, behavior: 'instant' });
@@ -1886,7 +2374,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       });
       return () => cancelAnimationFrame(raf);
     }
-  }, [activePageId, currentSectionPages, handleActivatePage, layoutConfig.positions, sectionAppearanceReady, spreadMode, viewport.scale]);
+  }, [activePageId, currentSectionPages, handleActivatePage, layoutConfig.positions, sectionAppearanceReady, spreadMode, notebookEngine]);
 
   // Context Menu State
   const [contextMenu, setContextMenu] = useState<ContextMenuState>({
@@ -1899,14 +2387,14 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     canRedo: false,
     canConvertHandwriting: false,
   });
-  useEffect(() => { setContextMenu(previous => ({ ...previous, isOpen: false, editor: null })); }, [activePageId]);
+  useEffect(() => { setContextMenu(previous => (previous.isOpen || previous.editor ? { ...previous, isOpen: false, editor: null } : previous)); }, [activePageId]);
 
   // Sensible position for pasted content (viewport center on focused/active page)
   const getSensiblePastePosition = useCallback((contentWidth = 300, contentHeight = 100): { x: number; y: number } => {
     const container = containerRef.current;
     const targetPageId = focusedPageId || activePageId;
     const pageElem = targetPageId ? document.getElementById(`page-${targetPageId}`) : null;
-    
+
     if (!container || !pageElem) {
       return {
         x: Math.max(20, Math.round((paperDimensions.width - contentWidth) / 2)),
@@ -1919,18 +2407,18 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
 
     const visibleTop = Math.max(pageRect.top, viewportRect.top);
     const visibleBottom = Math.min(pageRect.bottom, viewportRect.bottom);
-    
+
     let pageCenterY = paperDimensions.height / 3;
     if (visibleBottom > visibleTop) {
       const visibleCenterY = (visibleTop + visibleBottom) / 2;
-      pageCenterY = (visibleCenterY - pageRect.top) / (viewport.scale || 1) + (targetPageId ? logicalScrollBases[targetPageId] ?? 0 : 0);
+      pageCenterY = (visibleCenterY - pageRect.top) / (notebookEngine.viewport.getState().scale || 1) + (targetPageId ? logicalScrollBases[targetPageId] ?? 0 : 0);
     }
 
     const x = Math.max(20, Math.min(paperDimensions.width - contentWidth - 20, Math.round((paperDimensions.width - contentWidth) / 2)));
     const y = Math.max(20, Math.min(paperDimensions.height - contentHeight - 20, Math.round(pageCenterY - contentHeight / 2)));
 
     return { x, y };
-  }, [focusedPageId, activePageId, paperDimensions, viewport.scale, logicalScrollBases]);
+  }, [focusedPageId, activePageId, paperDimensions, notebookEngine, logicalScrollBases]);
 
   // Sticky notes use the existing text/selection/persistence pipeline. The
   // toolbar and slash menu intentionally communicate through a narrow DOM
@@ -2003,16 +2491,16 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       try {
         const { canvasRepository } = await import('@/repositories/CanvasRepository');
         const userId = useAuthStore.getState().user?.id || null;
-        
+
         const mimeType = file.type || 'image/png';
         const fileName = file.name || `image_${Date.now()}.png`;
-        const imgData = await canvasRepository.storeImage(userId, targetPageId, fileName, mimeType, buffer);
-        
+        const imgData = await canvasRepository.storeImage(userId, targetPageId, fileName, mimeType, buffer, workspace?.id);
+
         const imgUrl = URL.createObjectURL(new Blob([buffer], { type: mimeType }));
         const img = new Image();
         img.onload = () => {
           const viewportManager = notebookEngine.viewport;
-          
+
           let width = img.width;
           let height = img.height;
           const max = 450;
@@ -2051,11 +2539,12 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
             createdAt: Date.now()
           };
 
-          notebookEngine.images.cacheImage(imgData.id, img, imgUrl);
+          notebookEngine.images.cacheImage(imgData.id, img);
+          URL.revokeObjectURL(imgUrl);
           if ((focusedPageIdRef.current || activePageId) !== targetPageId || !notebookEngine.drawing.canEditActiveLayer()) return;
           notebookEngine.images.addImage(newImg);
           notebookEngine.drawing.redraw();
-          
+
           // Switch to select tool and highlight the inserted image
           notebookEngine.tools.setMode('select');
           notebookEngine.selection.clearSelection();
@@ -2079,6 +2568,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
           }
         };
         img.onerror = (err) => {
+          URL.revokeObjectURL(imgUrl);
           console.error('Image onload failed:', err);
         };
         img.src = imgUrl;
@@ -2508,15 +2998,211 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     }
   }, [importImage, importRichText, importText, notebookEngine, pasteIntoDocument]);
 
-  const openHandwritingConversion = useCallback(() => {
-    const strokes = notebookEngine.selection.getSelectedStrokes();
+  const openHandwritingConversion = useCallback(async (mode: 'text' | 'math' = 'text') => {
+    let strokes = notebookEngine.selection.getSelectedStrokes();
     if (strokes.length === 0) {
-      useUIStore.getState().showToast('Select handwriting strokes to convert them to text.', 'error');
+      const allStrokes = notebookEngine.drawing.getStrokes();
+      const allIds = new Set(allStrokes.map(stroke => stroke.id));
+      const allPageStrokes = getEligibleSelectedHandwritingStrokes(allStrokes, allIds, stroke => notebookEngine.layers.isEditable(stroke.layerId));
+      if (allPageStrokes.length > 0) {
+        notebookEngine.selection.clearSelection(false);
+        allPageStrokes.forEach((stroke, idx) => notebookEngine.selection.select(stroke.id, 'stroke', idx > 0));
+        strokes = allPageStrokes;
+      }
+    }
+    if (strokes.length === 0) {
+      useUIStore.getState().showToast('Select handwriting strokes to convert them.', 'error');
       return;
     }
+
+    const requestGen = ++conversionRequestGenRef.current;
+    const preferences = notebookEngine.handwriting.getPreferences();
+    setIsHandwritingDialogOpen(false);
     setHandwritingStrokes(strokes);
-    setIsHandwritingDialogOpen(true);
+    setConversionBarState({
+      open: true,
+      mode,
+      isRecognizing: true,
+      initialValue: '',
+      lines: [],
+      strokes,
+      providerId: 'unknown',
+      lineCount: 0,
+      strokeCount: strokes.length,
+      statusMessage: null,
+      editingTextId: null,
+    });
+
+    try {
+      if (mode === 'math') {
+        const { recognizeHandwritingToMath } = await import('@/services/handwriting/mathRecognizer');
+        const provider = getHandwritingRecognitionProvider();
+        const result = await recognizeHandwritingToMath(strokes, {
+          provider,
+          language: preferences.language,
+          onProgress: ({ currentLine, totalLines }) => {
+            if (requestGen !== conversionRequestGenRef.current) return;
+            setConversionBarState(prev => (
+              prev.open && prev.mode === 'math' && prev.isRecognizing
+                ? {
+                    ...prev,
+                    lineCount: totalLines,
+                    statusMessage: totalLines > 1 ? `Recognizing line ${currentLine} of ${totalLines}…` : null,
+                  }
+                : prev
+            ));
+          },
+        });
+        if (requestGen !== conversionRequestGenRef.current) return;
+        setConversionBarState(prev => (
+          prev.open && prev.mode === 'math'
+            ? {
+                ...prev,
+                isRecognizing: false,
+                initialValue: result.latex,
+                lineCount: result.lineCount,
+                strokeCount: result.strokeCount || strokes.length,
+                statusMessage: result.warnings[0] ?? null,
+              }
+            : prev
+        ));
+        return;
+      }
+
+      const { recognizeSelectedHandwritingMultiLine } = await import('@/services/handwriting/multiLineOrdering');
+      const provider = getHandwritingRecognitionProvider();
+      const result = await recognizeSelectedHandwritingMultiLine(provider, strokes, { language: preferences.language });
+      if (requestGen !== conversionRequestGenRef.current) return;
+      setConversionBarState(prev => (
+        prev.open && prev.mode === 'text'
+          ? {
+              ...prev,
+              isRecognizing: false,
+              initialValue: result.fullText,
+              lines: result.lines,
+              providerId: result.providerId,
+              lineCount: result.lines.length,
+              strokeCount: result.strokeCount || strokes.length,
+              statusMessage: !result.isAvailable
+                ? (result.error ?? 'Handwriting recognition is unavailable on this device. Edit text below to apply.')
+                : (result.status === 'error' ? 'Recognition partially failed — review and edit below.' : null),
+            }
+          : prev
+      ));
+    } catch (err) {
+      if (requestGen !== conversionRequestGenRef.current) return;
+      console.error('Handwriting recognition error:', err);
+      setConversionBarState(prev => ({
+        ...prev,
+        isRecognizing: false,
+        statusMessage: 'Recognition failed — you can enter text manually below.',
+      }));
+    }
   }, [notebookEngine]);
+
+  const openEditMathObject = useCallback(async (object: TextObject) => {
+    const requestGen = ++conversionRequestGenRef.current;
+    let latex = typeof object.metadata?.latex === 'string' ? object.metadata.latex : '';
+    if (!latex.trim()) {
+      const { extractLatexFromTipTapContent } = await import('@/services/handwriting/mathRecognizer');
+      latex = extractLatexFromTipTapContent(object.content) ?? '';
+      if (requestGen !== conversionRequestGenRef.current) return;
+    }
+    setConversionBarState({
+      open: true,
+      mode: 'math',
+      isRecognizing: false,
+      initialValue: latex,
+      lines: [],
+      strokes: [],
+      providerId: 'math',
+      lineCount: 1,
+      strokeCount: 0,
+      statusMessage: null,
+      editingTextId: object.id,
+    });
+  }, []);
+
+  const cancelConversionBar = useCallback(() => {
+    conversionRequestGenRef.current += 1;
+    setConversionBarState(prev => ({ ...prev, open: false, isRecognizing: false, editingTextId: null }));
+  }, []);
+
+  const convertHandwritingToText = useCallback(() => {
+    void openHandwritingConversion('text');
+  }, [openHandwritingConversion]);
+
+  const convertHandwritingToMath = useCallback(() => {
+    void openHandwritingConversion('math');
+  }, [openHandwritingConversion]);
+
+  const applyConversionBar = useCallback((editedValue: string) => {
+    const trimmed = editedValue.trim();
+    if (!trimmed) return;
+    const preferences = notebookEngine.handwriting.getPreferences();
+
+    if (conversionBarState.editingTextId) {
+      if (!notebookEngine.updateMathTextObject(conversionBarState.editingTextId, trimmed)) {
+        useUIStore.getState().showToast('Unable to update the math equation.', 'error');
+        return;
+      }
+      const targetPageId = focusedPageIdRef.current || activePageId;
+      notebookEngine.selection.clearSelection();
+      if (document.activeElement instanceof HTMLElement) {
+        document.activeElement.blur();
+      }
+      setTextObjects([...notebookEngine.texts.getTexts()]);
+      if (targetPageId) persistDrawing(captureEngineOwnedDrawing(notebookEngine, notebook?.id, targetPageId));
+      conversionRequestGenRef.current += 1;
+      setConversionBarState(prev => ({ ...prev, open: false, editingTextId: null }));
+      return;
+    }
+
+    const sourceStrokes = conversionBarState.strokes;
+    let appliedOk = false;
+    if (conversionBarState.mode === 'math') {
+      appliedOk = notebookEngine.convertSelectedHandwritingToMath(trimmed, sourceStrokes, preferences);
+    } else {
+      let targetLines = conversionBarState.lines;
+      if (targetLines.length === 0 && sourceStrokes.length > 0) {
+        const bounds = getHandwritingBounds(sourceStrokes);
+        if (bounds) {
+          targetLines = [{
+            id: 'handwriting-line-1',
+            strokes: sourceStrokes,
+            bounds,
+            baseline: bounds.y + bounds.height * 0.82,
+            blankLinesBefore: 0,
+            layerId: sourceStrokes[0]?.layerId,
+            text: editedValue,
+            candidates: [editedValue],
+            status: 'success',
+          }];
+        }
+      }
+      appliedOk = notebookEngine.convertSelectedHandwritingToEditedText(
+        editedValue,
+        targetLines,
+        preferences,
+        conversionBarState.providerId,
+      );
+    }
+    if (!appliedOk) {
+      useUIStore.getState().showToast('The selected handwriting is no longer available for conversion.', 'error');
+      return;
+    }
+
+    const targetPageId = focusedPageIdRef.current || activePageId;
+    notebookEngine.selection.clearSelection();
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+    setTextObjects([...notebookEngine.texts.getTexts()]);
+    if (targetPageId) persistDrawing(captureEngineOwnedDrawing(notebookEngine, notebook?.id, targetPageId));
+    conversionRequestGenRef.current += 1;
+    setConversionBarState(prev => ({ ...prev, open: false, isRecognizing: false, editingTextId: null }));
+    setHandwritingStrokes([]);
+  }, [activePageId, conversionBarState, notebook?.id, notebookEngine, persistDrawing]);
 
   const confirmHandwritingConversion = useCallback((
     lines: ReviewedHandwritingLine[],
@@ -2532,12 +3218,12 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     if (targetPageId) persistDrawing(captureEngineOwnedDrawing(notebookEngine, notebook?.id, targetPageId));
     setIsHandwritingDialogOpen(false);
     setHandwritingStrokes([]);
-  }, [activePageId, notebookEngine, persistDrawing]);
+  }, [activePageId, notebook?.id, notebookEngine, persistDrawing]);
 
   // Centralized command dispatcher shared between context menu & keyboard
-  const executeCommand = useCallback(async (command: 'undo' | 'redo' | 'cut' | 'copy' | 'paste' | 'duplicate' | 'delete' | 'selectAll' | 'bringToFront' | 'bringForward' | 'sendBackward' | 'sendToBack' | 'convertHandwriting') => {
+  const executeCommand = useCallback(async (command: 'undo' | 'redo' | 'cut' | 'copy' | 'paste' | 'duplicate' | 'delete' | 'selectAll' | 'bringToFront' | 'bringForward' | 'sendBackward' | 'sendToBack' | 'convertHandwriting' | 'convertHandwritingMath') => {
     const isTextEditing = (
-      document.activeElement instanceof HTMLInputElement || 
+      document.activeElement instanceof HTMLInputElement ||
       document.activeElement instanceof HTMLTextAreaElement ||
       !!(document.activeElement as HTMLElement)?.isContentEditable
     );
@@ -2629,7 +3315,10 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         }
         break;
       case 'convertHandwriting':
-        if (!isTextEditing) openHandwritingConversion();
+        if (!isTextEditing) void openHandwritingConversion('text');
+        break;
+      case 'convertHandwritingMath':
+        if (!isTextEditing) void openHandwritingConversion('math');
         break;
     }
   }, [notebookEngine, handlePasteFromClipboard, openHandwritingConversion]);
@@ -2638,10 +3327,10 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const isTextEditing = (
-        e.target instanceof HTMLInputElement || 
+        e.target instanceof HTMLInputElement ||
         e.target instanceof HTMLTextAreaElement ||
         (e.target as HTMLElement)?.isContentEditable ||
-        document.activeElement instanceof HTMLInputElement || 
+        document.activeElement instanceof HTMLInputElement ||
         document.activeElement instanceof HTMLTextAreaElement ||
         !!(document.activeElement as HTMLElement)?.isContentEditable
       );
@@ -2651,7 +3340,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         setNotebookModeLevel(notebookModeLevel === 2 ? 0 : 2);
         return;
       }
-      
+
       if (e.key === 'Escape' && notebookModeLevel > 0) {
         setNotebookModeLevel(0);
       }
@@ -2763,7 +3452,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       if (isTextEditing) return;
 
       const key = e.key.toLowerCase();
-      
+
       switch (key) {
         case 'v': notebookEngine.tools.setMode('select'); break;
         case 't': notebookEngine.tools.setMode('text'); break;
@@ -2788,7 +3477,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
           break;
       }
     };
-    
+
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [notebookEngine, notebookModeLevel, setNotebookModeLevel, handlePanelZoom, executeCommand, setWorkspaceViewMode, workspaceViewMode]);
@@ -2798,10 +3487,10 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     if (workspaceViewMode !== 'edit') return;
     const onWindowPaste = (e: ClipboardEvent) => {
       const isTextEditing = (
-        e.target instanceof HTMLInputElement || 
+        e.target instanceof HTMLInputElement ||
         e.target instanceof HTMLTextAreaElement ||
         (e.target as HTMLElement)?.isContentEditable ||
-        document.activeElement instanceof HTMLInputElement || 
+        document.activeElement instanceof HTMLInputElement ||
         document.activeElement instanceof HTMLTextAreaElement ||
         !!(document.activeElement as HTMLElement)?.isContentEditable
       );
@@ -2826,7 +3515,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     const hasSelection = notebookEngine.selection.getSelectedElements().length > 0;
     const canConvertHandwriting = notebookEngine.selection.hasSelectedStrokes();
     const isTextEditing = (
-      document.activeElement instanceof HTMLInputElement || 
+      document.activeElement instanceof HTMLInputElement ||
       document.activeElement instanceof HTMLTextAreaElement ||
       !!(document.activeElement as HTMLElement)?.isContentEditable
     );
@@ -2849,7 +3538,8 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     await handlePasteFromClipboard(e);
   };
 
-  const handleDrop = async (e: React.DragEvent) => {
+  const handleDropImplRef = useRef<(e: React.DragEvent) => Promise<void>>(async () => {});
+  handleDropImplRef.current = async (e: React.DragEvent) => {
     await UniversalDropRouter.handleExternalDrop(e, {
       onImageDrop: async (file) => {
         await importImage(file, e.clientX, e.clientY);
@@ -2864,22 +3554,57 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       }
     });
   };
+  const handleDrop = useCallback(async (e: React.DragEvent) => {
+    await handleDropImplRef.current(e);
+  }, []);
 
-  const handleDragOver = (e: React.DragEvent) => {
+  const handleDragOver = useCallback((e: React.DragEvent) => {
     UniversalDropRouter.handleDragOver(e, ['IMAGE']);
-  };
+  }, []);
 
+  const activePageRef = useRef(page);
+  activePageRef.current = page;
   const handleLayersChange = useCallback(() => {
     setLayerRevision(value => value + 1);
     setTextObjects([...notebookEngine.texts.getTexts()]);
-    const currentPageId = focusedPageIdRef.current || page?.id;
+    const currentPageId = focusedPageIdRef.current || activePageRef.current?.id;
     if (!currentPageId) return;
     const snapshot = captureEngineOwnedDrawing(notebookEngine, notebook?.id, currentPageId);
     if (!snapshot) return;
     sectionDataRevisionRef.current[currentPageId] = snapshot.drawingRevision;
     updateSectionDataCache(previous => ({ ...previous, [currentPageId]: snapshot.data }));
     persistDrawing(snapshot);
-  }, [notebook?.id, notebookEngine, page?.id, persistDrawing, updateSectionDataCache]);
+  }, [notebook?.id, notebookEngine, persistDrawing, updateSectionDataCache]);
+
+  const rebaseLogicalScrollRef = useRef(rebaseLogicalScroll);
+  rebaseLogicalScrollRef.current = rebaseLogicalScroll;
+  const pageActivateHandlersRef = useRef(new Map<string, () => void>());
+  const pageLogicalRebaseHandlersRef = useRef(new Map<string, (base: number, delta: number) => void>());
+  useEffect(() => {
+    const valid = new Set(currentSectionPages.map(p => p.id));
+    for (const key of pageActivateHandlersRef.current.keys()) {
+      if (!valid.has(key)) pageActivateHandlersRef.current.delete(key);
+    }
+    for (const key of pageLogicalRebaseHandlersRef.current.keys()) {
+      if (!valid.has(key)) pageLogicalRebaseHandlersRef.current.delete(key);
+    }
+  }, [currentSectionPageIdsKey]);
+  const getActivatePageHandler = (pageId: string) => {
+    let fn = pageActivateHandlersRef.current.get(pageId);
+    if (!fn) {
+      fn = () => handleActivatePageRef.current(pageId);
+      pageActivateHandlersRef.current.set(pageId, fn);
+    }
+    return fn;
+  };
+  const getLogicalRebaseHandler = (pageId: string) => {
+    let fn = pageLogicalRebaseHandlersRef.current.get(pageId);
+    if (!fn) {
+      fn = (base: number, delta: number) => rebaseLogicalScrollRef.current(pageId, base, delta);
+      pageLogicalRebaseHandlersRef.current.set(pageId, fn);
+    }
+    return fn;
+  };
 
   const handlePageAudioPersisted = useCallback((pageId: string, data: DrawingData) => {
     updateSectionDataCache(previous => ({ ...previous, [pageId]: data }));
@@ -2938,6 +3663,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     if (!page || !notebook) return;
     setIsExportingPdf(true);
     try {
+      const { exportPageToPdf } = await import('@/services/pdf/notebookExportCommands');
       await exportPageToPdf(page.id, { drawingOverrides: { [page.id]: notebookEngine.getDrawingData() } });
     } finally {
       setIsExportingPdf(false);
@@ -2948,6 +3674,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     if (!notebook) return;
     setIsExportingPdf(true);
     try {
+      const { exportNotebookToPdf } = await import('@/services/pdf/notebookExportCommands');
       const activeId = focusedPageIdRef.current;
       const overrides = activeId ? { [activeId]: notebookEngine.getDrawingData() } : undefined;
       await exportNotebookToPdf(notebook.id, { drawingOverrides: overrides });
@@ -2960,6 +3687,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     if (!page) return;
     setIsExportingPdf(true);
     try {
+      const { printPage } = await import('@/services/pdf/notebookExportCommands');
       await printPage(page.id, { drawingOverrides: { [page.id]: notebookEngine.getDrawingData() } });
     } finally {
       setIsExportingPdf(false);
@@ -2970,6 +3698,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
     if (!notebook) return;
     setIsExportingPdf(true);
     try {
+      const { printNotebook } = await import('@/services/pdf/notebookExportCommands');
       const activeId = focusedPageIdRef.current;
       const overrides = activeId ? { [activeId]: notebookEngine.getDrawingData() } : undefined;
       await printNotebook(notebook.id, { drawingOverrides: overrides });
@@ -3018,7 +3747,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
           on its own visible chrome. */}
       {(isMobileViewport || compactTouchViewport) && workspaceViewMode !== 'present' && notebookModeLevel !== 2 && <div className="panvas-mobile-document-header">
         <button type="button" className="min-w-0 flex-1 truncate text-left text-xs font-medium" onClick={() => useUIStore.getState().toggleSidebar()} title="Browse notebook pages">{focusedPage?.title ?? 'Notebook'}</button>
-        <button type="button" onClick={() => handlePanelZoom((containerSize.width - 16) / paperDimensions.width / viewport.scale)} className="shrink-0 whitespace-nowrap px-2 text-xs" aria-label="Fit page width">Fit width</button>
+        <button type="button" onClick={() => handlePanelZoom((containerSize.width - 16) / paperDimensions.width / (notebookEngine.viewport.getState().scale || 1))} className="shrink-0 whitespace-nowrap px-2 text-xs" aria-label="Fit page width">Fit width</button>
         <button type="button" className="panvas-icon-control focus-ring" onClick={() => useUIStore.getState().togglePropertiesPanel()} aria-label="Open page and view inspector" aria-expanded={isPropertiesPanelOpen}><PanelRight size={18} /></button>
         <NotebookPageUtilities engine={notebookEngine} workspaceId={workspace?.id} notebookId={notebook?.id} ownerId={focusedPage?.id} editable={workspaceViewMode === 'edit'} onPageDataPersisted={handlePageAudioPersisted} onVoiceDelete={handleDeleteVoiceNote} onVoiceRename={handleRenameVoiceNote} onChange={handleLayersChange} compact onExportPage={() => void handleExportPagePdf()} onExportNotebook={() => void handleExportNotebookPdf()} onPrintPage={() => void handlePrintPage()} onPrintNotebook={() => void handlePrintNotebook()} isExporting={isExportingPdf} />
         <NotebookWorkspaceControls focusOnly embedded />
@@ -3042,7 +3771,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         ) : (
           <div ref={fullscreenToolbarHostRef} className="panvas-fullscreen-toolbar-host absolute left-3 right-3 top-3 z-40 flex min-w-0 justify-center overflow-visible pointer-events-none">
             <div className="panvas-layer-toolbar panvas-floating-surface flex w-fit max-w-full items-center gap-1 overflow-visible rounded-2xl p-1 pointer-events-auto" role="toolbar" aria-label="Fullscreen notebook tools">
-              {workspaceViewMode === 'edit' && <NotebookFloatingToolbar editor={activeEditor} engine={notebookEngine} workspaceId={workspace?.id} onConvertHandwriting={openHandwritingConversion} pageUtilities={landscapePageUtilities} embedded hideCollapseButton fullscreenToolOnly availableWidth={fullscreenToolbarHostWidth === null ? null : Math.max(0, fullscreenToolbarHostWidth - 104)} />}
+              {workspaceViewMode === 'edit' && <NotebookFloatingToolbar editor={activeEditor} engine={notebookEngine} workspaceId={workspace?.id} onConvertHandwriting={convertHandwritingToText} onConvertHandwritingToMath={convertHandwritingToMath} pageUtilities={landscapePageUtilities} embedded hideCollapseButton fullscreenToolOnly availableWidth={fullscreenToolbarHostWidth === null ? null : Math.max(0, fullscreenToolbarHostWidth - 104)} />}
               <button type="button" onClick={() => setToolbarCollapsed(true)} className="panvas-icon-control shrink-0 focus-ring" title="Hide fullscreen tools" aria-label="Hide fullscreen tools">
                 <PanelTopOpen size={16} className="rotate-180" />
               </button>
@@ -3064,7 +3793,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
         )}
 
         <div className="pointer-events-none flex-1 flex justify-center items-start min-w-0">
-          {workspaceViewMode === 'edit' && <NotebookFloatingToolbar editor={activeEditor} engine={notebookEngine} workspaceId={workspace?.id} onConvertHandwriting={openHandwritingConversion} pageUtilities={landscapePageUtilities} />}
+          {workspaceViewMode === 'edit' && <NotebookFloatingToolbar editor={activeEditor} engine={notebookEngine} workspaceId={workspace?.id} onConvertHandwriting={convertHandwritingToText} onConvertHandwritingToMath={convertHandwritingToMath} pageUtilities={landscapePageUtilities} />}
         </div>
 
         <div className={`pointer-events-auto flex flex-shrink-0 items-end gap-2 ${isConstrainedHeader ? 'flex-col gap-1' : 'items-start'}`}>
@@ -3075,7 +3804,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
 
       {/* Native Scrolling Viewport: one-finger margin scrolling stays enabled;
           the notebook controller owns pinch even on an inactive page. */}
-      <main 
+      <main
         ref={containerRef}
         tabIndex={0}
         aria-label="Notebook pages"
@@ -3095,7 +3824,7 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
           else setIsTouchDevice(false);
           containerRef.current?.focus({ preventScroll: true });
           if (contextMenu.isOpen) {
-            setContextMenu(prev => ({ ...prev, isOpen: false }));
+            setContextMenu(prev => (prev.isOpen ? { ...prev, isOpen: false } : prev));
           }
           if (e.pointerType === 'touch') {
             dockTapRef.current = { pointerId: e.pointerId, x: e.clientX, y: e.clientY, time: performance.now() };
@@ -3122,29 +3851,33 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
           <div className="flex min-h-full w-full items-center justify-center text-xs text-panvas-text-secondary" role="status">
             Preparing notebook appearance…
           </div>
-        ) : (
-        <div 
+        ) : (() => {
+        const liveScale = notebookEngine.viewport.getState().scale;
+        return (
+        <div
+          ref={sizerRef}
           className="flex flex-col items-center mx-auto"
-          style={{ 
-            width: `${Math.max(containerSize.width, layoutConfig.totalWidth * viewport.scale + (isMobileViewport ? 16 : 64))}px`,
+          style={{
+            width: `${Math.max(containerSize.width, layoutConfig.totalWidth * liveScale + (isMobileViewport ? 16 : 64))}px`,
             minHeight: '100%',
-            height: `${layoutConfig.totalHeight * viewport.scale}px`,
+            height: `${layoutConfig.totalHeight * liveScale}px`,
             position: 'relative'
           }}
         >
           <div
+            ref={surfaceRef}
             className="relative origin-top"
             style={{
               width: `${layoutConfig.totalWidth}px`,
               height: `${layoutConfig.totalHeight}px`,
-              transform: `scale(${viewport.scale})`,
+              transform: `scale(${liveScale})`,
               transformOrigin: 'top center',
             }}
           >
             {layoutConfig.positions.map((pos, index) => {
               const pageNumText = formatPageIndicator(index + 1, totalPages);
               const isFocused = pos.id === focusedPageId;
-              const pageItem = currentSectionPages.find(p => p.id === pos.id)!;
+              const pageItem = currentSectionPageById.get(pos.id)!;
               const sceneOwnerPageId = notebookEngine.getDrawingOwnership().pageId;
               const cachedData = sectionDataCacheRef.current[pos.id];
               // A page-owned preview is marked current for the exact cache entry
@@ -3166,28 +3899,20 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
               );
 
               const isResident = residentIds.has(pos.id) || isFocused;
-              const isFarOffscreen = isPageFarOffscreen(
-                pos.y,
-                viewport.scale,
-                containerRef.current?.scrollTop ?? 0,
-                containerSize.height,
-                isResident,
-                3,
-              );
 
               return (
-                <div 
-                  key={pos.id} 
+                <div
+                  key={pos.id}
                   data-page-id={pos.id}
                   data-page-index={index}
                   data-focused-sheet={isFocused ? 'true' : 'false'}
                   data-scene-owner-sheet-id={isFocused ? notebookEngine.getDrawingOwnership().pageId ?? '' : ''}
                   className="absolute"
-                  style={{ 
+                  style={{
                     left: pos.x,
-                    top: pos.y, 
-                    width: pos.width, 
-                    height: pos.height 
+                    top: pos.y,
+                    width: pos.width,
+                    height: pos.height
                   }}
                 >
                   {isResident ? (
@@ -3195,12 +3920,16 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
                       key={pos.id}
                       page={pageItem}
                       logicalBase={resolvedSectionProperties.get(pos.id)!.pageSize === 'Infinite' || resolvedSectionProperties.get(pos.id)!.layoutMode === 'document' ? logicalScrollBases[pos.id] ?? 0 : 0}
-                      onLogicalRebase={(base, delta) => rebaseLogicalScroll(pos.id, base, delta)}
+                      onLogicalRebase={getLogicalRebaseHandler(pos.id)}
                       onImageManagerReady={registerPageImages}
                       data={renderData}
                       properties={resolvedSectionProperties.get(pos.id)!}
                       width={pos.width}
                       height={pos.height}
+                      pageX={pos.x}
+                      pageY={pos.y}
+                      layoutTotalWidth={layoutConfig.totalWidth}
+                      horizontalPadding={isMobileViewport ? 16 : 64}
                       renderScale={debouncedScale}
                       pageNumberText={pageNumText}
                       isFocused={isFocused}
@@ -3210,16 +3939,17 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
                       previewSource={residentDrawingEnginesRef.current.get(pos.id)}
                       activeEditor={activeEditor}
                       setActiveEditor={setActiveEditor}
-                      onActivatePage={() => handleActivatePage(pos.id)}
+                      onActivatePage={getActivatePageHandler(pos.id)}
                       handleDrop={handleDrop}
                       handleDragOver={handleDragOver}
                       editable={workspaceViewMode === 'edit'}
                       onVoiceNoteChange={handleLayersChange}
-                      onVoiceNoteDelete={note => void handleDeleteVoiceNote(note)}
-                      onVoiceNoteRename={(note, title) => void handleRenameVoiceNote(note, title)}
+                      onVoiceNoteDelete={handleDeleteVoiceNote}
+                      onVoiceNoteRename={handleRenameVoiceNote}
                       onUpdateProperties={handlePagePropertiesUpdate}
+                      onEditMathObject={openEditMathObject}
                     />
-                  ) : isFarOffscreen ? (
+                  ) : (
                     <div
                       id={`page-${pos.id}`}
                       data-page-id={pos.id}
@@ -3228,11 +3958,6 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
                     >
                       <span className="font-mono opacity-50">{pageNumText}</span>
                     </div>
-                  ) : (
-                    <PageRenderer id={pos.id} width={pos.width} height={pos.height}
-                      properties={resolvedSectionProperties.get(pos.id)!} pageNumberText={pageNumText}>
-                      <div role="status" className="absolute inset-0 flex items-center justify-center text-xs opacity-60">Loading page…</div>
-                    </PageRenderer>
                   )}
                   {isFocused && workspaceViewMode === 'edit' && !isMobileViewport && (
                     <button
@@ -3251,7 +3976,8 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
             })}
           </div>
         </div>
-        )}
+        );
+        })()}
       </main>
 
       {useMobileDock && <div className="panvas-mobile-tool-dock">
@@ -3260,8 +3986,9 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
           engine={notebookEngine}
           workspaceId={workspace?.id}
           holdDockVisible={isPropertiesPanelOpen}
-         
-          onConvertHandwriting={openHandwritingConversion}
+
+          onConvertHandwriting={convertHandwritingToText}
+          onConvertHandwritingToMath={convertHandwritingToMath}
           pageUtilities={
             <NotebookPageUtilities
               engine={notebookEngine}
@@ -3286,9 +4013,9 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
 
       {/* Static properties panel on the right */}
       {isPropertiesPanelOpen && workspaceViewMode !== 'present' && (
-        <NotebookToolPropertiesPanel 
-          viewportEngine={notebookEngine.viewport} 
-          zoom={viewport.scale} 
+        <NotebookToolPropertiesPanel
+          viewportEngine={notebookEngine.viewport}
+          zoom={notebookEngine.viewport.getState().scale}
           properties={pageProperties}
           onUpdateProperties={handlePagePropertiesUpdate}
           onConvertText={handleConvertText}
@@ -3300,30 +4027,62 @@ export function NotebookRenderer({ spreadMode = false, onEngineReady }: { spread
       )}
 
       {/* Right-click Context Menu */}
-      <DocumentationLinkDialog />
-      <DocumentationMarkdownDialog />
+      <React.Suspense fallback={null}>
+        <DocumentationLinkDialog />
+        <DocumentationMarkdownDialog />
+      </React.Suspense>
       <NotebookContextMenu
         engine={notebookEngine}
         state={contextMenu}
-        onClose={() => setContextMenu(prev => ({ ...prev, isOpen: false }))}
+        onClose={() => setContextMenu(prev => (prev.isOpen ? { ...prev, isOpen: false } : prev))}
         onCommand={executeCommand}
       />
-      <HandwritingConversionDialog
-        open={isHandwritingDialogOpen}
-        strokes={handwritingStrokes}
-        initialPreferences={notebookEngine.handwriting.getPreferences()}
-          onCancel={() => {
-            setIsHandwritingDialogOpen(false);
-            setHandwritingStrokes([]);
-          }}
-        onConfirm={confirmHandwritingConversion}
-      />
-      {workspaceViewMode === 'present' && <PresentationOverlay onWheel={event => {
-        const container = containerRef.current;
-        if (!container || event.ctrlKey || event.metaKey) return;
-        event.preventDefault();
-        container.scrollBy({ left: event.deltaX, top: event.deltaY, behavior: 'auto' });
-      }} />}
+      {conversionBarState.open && (
+        <React.Suspense fallback={null}>
+          <HandwritingConversionBar
+            open={conversionBarState.open}
+            mode={conversionBarState.mode}
+            isRecognizing={conversionBarState.isRecognizing}
+            initialValue={conversionBarState.initialValue}
+            lineCount={conversionBarState.lineCount}
+            strokeCount={conversionBarState.strokeCount}
+            statusMessage={conversionBarState.statusMessage}
+            isEditingExisting={Boolean(conversionBarState.editingTextId)}
+            onApply={applyConversionBar}
+            onCancel={cancelConversionBar}
+            onRetryMathRecognition={conversionBarState.mode === 'math' ? () => void openHandwritingConversion('math') : undefined}
+            onOpenLineOptions={conversionBarState.mode === 'text' && handwritingStrokes.length > 0 ? () => {
+              conversionRequestGenRef.current += 1;
+              setConversionBarState(prev => ({ ...prev, open: false, isRecognizing: false }));
+              setIsHandwritingDialogOpen(true);
+            } : undefined}
+          />
+        </React.Suspense>
+      )}
+      {isHandwritingDialogOpen && (
+        <React.Suspense fallback={null}>
+          <HandwritingConversionDialog
+            open={isHandwritingDialogOpen}
+            strokes={handwritingStrokes}
+            initialPreferences={notebookEngine.handwriting.getPreferences()}
+            onCancel={() => {
+              setIsHandwritingDialogOpen(false);
+              setHandwritingStrokes([]);
+            }}
+            onConfirm={confirmHandwritingConversion}
+          />
+        </React.Suspense>
+      )}
+      {workspaceViewMode === 'present' && (
+        <React.Suspense fallback={null}>
+          <PresentationOverlay onWheel={event => {
+            const container = containerRef.current;
+            if (!container || event.ctrlKey || event.metaKey) return;
+            event.preventDefault();
+            container.scrollBy({ left: event.deltaX, top: event.deltaY, behavior: 'auto' });
+          }} />
+        </React.Suspense>
+      )}
     </div>
     </React.Profiler>
   );

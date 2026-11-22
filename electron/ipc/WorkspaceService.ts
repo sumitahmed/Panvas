@@ -56,6 +56,7 @@ export class WorkspaceService {
   private readonly remoteApplyTails = new Map<string, Promise<void>>();
   private storageRootLoaded = false;
   private storageRootUnavailable = false;
+  private ensuredBaseDirPath: string | null = null;
   private workspaceDiscoveryComplete = false;
   private storageOverview: StorageOverview | null = null;
   private storageInspection: Promise<StorageOverview> | null = null;
@@ -209,6 +210,7 @@ export class WorkspaceService {
     await this.writeGlobalSettings(next);
     this.assetStorageRoots = next.assetStorageRoots;
     this.baseDir = resolved;
+    this.ensuredBaseDirPath = null;
     this.storageOverview = null;
     this.storageRootUnavailable = false;
     this.storageRootLoaded = true;
@@ -556,6 +558,15 @@ export class WorkspaceService {
     return null;
   }
 
+  async deleteBinaryAsset(kind: 'pdf' | 'image' | 'audio', id: string): Promise<void> {
+    if (!SAFE_SYNC_FILE_ID.test(id)) throw new Error('Invalid asset identifier.');
+    await this.ensureBaseDir();
+    await Promise.all((await this.getBinaryReadDirectories(kind)).flatMap(dir => [
+      fsPromises.rm(path.join(dir, `${id}.bin`), { force: true }),
+      fsPromises.rm(path.join(dir, `${id}.meta.json`), { force: true }),
+    ]));
+  }
+
   private getPanvasDir(workspaceDir: string) {
     return path.join(workspaceDir, '.panvas');
   }
@@ -646,25 +657,27 @@ export class WorkspaceService {
     }
   }
 
-  async writeWorkspaceJson(workspaceDir: string, data: any) {
+  async writeWorkspaceJson(workspaceDir: string, data: any, priority: 'foreground' | 'background' = 'foreground') {
     const filePath = this.getWorkspaceJsonPath(workspaceDir);
     const serialized = JSON.stringify(this.parseWorkspaceJson(JSON.stringify(data)), null, 2);
-    await writeQueue.enqueue(filePath, serialized);
+    await writeQueue.enqueue(filePath, serialized, priority);
     // This is a last-known-good recovery mirror, not a second source of truth.
     // It is written only after the canonical metadata write succeeds.
     try {
-      await writeQueue.enqueue(this.getWorkspaceRecoveryPath(workspaceDir), serialized);
+      await writeQueue.enqueue(this.getWorkspaceRecoveryPath(workspaceDir), serialized, priority);
     } catch (error) {
       // Canonical metadata is already durable. A mirror failure must not turn a
       // successful save into a false failure, but it remains diagnosable.
       console.warn('[WorkspaceService] Could not refresh last-good recovery.', error instanceof Error ? error.name : 'UnknownError');
     }
   }
-  
+
   async ensureBaseDir() {
+    if (this.ensuredBaseDirPath === this.baseDir && !this.storageRootUnavailable) return;
     await this.loadStorageRoot();
     if (this.storageRootUnavailable) return;
     await fsPromises.mkdir(this.baseDir, { recursive: true });
+    this.ensuredBaseDirPath = this.baseDir;
   }
 
   /**
@@ -707,6 +720,7 @@ export class WorkspaceService {
     this.workspaceRegistry.clear();
     this.persistedWorkspaceLocations.clear();
     this.workspaceDiscoveryComplete = false;
+    this.ensuredBaseDirPath = null;
     this.remoteApplyTails.clear();
     return { workspaceIds, recoveryPath };
   }
@@ -896,6 +910,70 @@ export class WorkspaceService {
     return records.sort((a, b) => a.id.localeCompare(b.id));
   }
 
+  /** Fast read-only stat summary for sync change detection (reads zero file payloads). */
+  async getWorkspaceEntityStats(workspaceId: string): Promise<Record<string, { mtimeMs: number; size: number }>> {
+    const workspaceDir = this.getWorkspaceDirById(workspaceId);
+    const metadata = await this.readWorkspaceJson(workspaceDir);
+    const stats: Record<string, { mtimeMs: number; size: number }> = {};
+    const statFile = async (key: string, filePath: string) => {
+      try {
+        const s = await fsPromises.stat(filePath);
+        if (s.isFile()) stats[key] = { mtimeMs: s.mtimeMs, size: s.size };
+      } catch {
+        // File absent
+      }
+    };
+    for (const page of metadata.notebookPages ?? []) {
+      const id = String(page.id ?? '');
+      const notebookId = String(page.notebookId ?? '');
+      if (page.deletedAt || !SAFE_SYNC_FILE_ID.test(id) || !SAFE_SYNC_FILE_ID.test(notebookId)) continue;
+      const pagesDir = path.join(workspaceDir, 'Notebooks', notebookId, 'pages');
+      await statFile(`pageContent:${id}`, path.join(pagesDir, `${id}.content.json`));
+      await statFile(`pageDrawing:${id}`, path.join(pagesDir, `${id}.drawing.json`));
+    }
+    for (const record of await this.listPageDrawingRecords(workspaceId, false, false)) {
+      if (record.id === record.ownerPageId) continue;
+      const filePath = path.join(workspaceDir, 'Notebooks', record.notebookId, 'pages', `${record.id}.drawing.json`);
+      await statFile(`pageDrawing:${record.id}`, filePath);
+    }
+    for (const canvas of metadata.canvasFiles ?? []) {
+      const id = String(canvas.id ?? '');
+      if (canvas.deletedAt || !SAFE_SYNC_FILE_ID.test(id)) continue;
+      await statFile(`canvasScene:${id}`, path.join(workspaceDir, 'Canvas', `${id}.json`));
+    }
+    return stats;
+  }
+
+  async statBinaryAssets(
+    refs: Array<{ kind: 'pdf' | 'image' | 'audio'; id: string }>,
+  ): Promise<Record<string, { mtimeMs: number; size: number }>> {
+    const out: Record<string, { mtimeMs: number; size: number }> = {};
+    const dirCache = new Map<'pdf' | 'image' | 'audio', string[]>();
+    for (const ref of refs) {
+      if (!['pdf', 'image', 'audio'].includes(ref.kind) || !SAFE_SYNC_FILE_ID.test(ref.id)) continue;
+      let dirs = dirCache.get(ref.kind);
+      if (!dirs) {
+        dirs = await this.getBinaryReadDirectories(ref.kind);
+        dirCache.set(ref.kind, dirs);
+      }
+      for (const directory of dirs) {
+        try {
+          const [metaStat, binStat] = await Promise.all([
+            fsPromises.stat(path.join(directory, `${ref.id}.meta.json`)),
+            fsPromises.stat(path.join(directory, `${ref.id}.bin`)),
+          ]);
+          if (metaStat.isFile() && binStat.isFile()) {
+            out[`asset:${ref.id}`] = { mtimeMs: Math.max(metaStat.mtimeMs, binStat.mtimeMs), size: binStat.size };
+            break;
+          }
+        } catch {
+          // Try next storage directory
+        }
+      }
+    }
+    return out;
+  }
+
   /** Applies a validated cloud record while preserving its stable Panvas ID. */
   async applyRemoteRecord(workspaceId: string, kind: SyncEntityKind, id: string, payload: any, tombstone: boolean, parentId?: string | null): Promise<void> {
     const previous = this.remoteApplyTails.get(workspaceId) ?? Promise.resolve();
@@ -1037,7 +1115,7 @@ export class WorkspaceService {
           const next = scene.customBlocks.filter((item: any) => item?.id !== id);
           if (next.length !== scene.customBlocks.length) {
             scene.customBlocks = next;
-            await writeQueue.enqueue(canvasPath, JSON.stringify(scene, null, 2));
+            await writeQueue.enqueue(canvasPath, JSON.stringify(scene, null, 2), 'background');
             return;
           }
         } catch (error: any) { if (error?.code !== 'ENOENT') throw error; }
@@ -1056,7 +1134,7 @@ export class WorkspaceService {
       const pagesDir = path.join(workspaceDir!, 'Notebooks', page.notebookId, 'pages');
       await fsPromises.mkdir(pagesDir, { recursive: true });
       const suffix = kind === 'pageContent' ? 'content' : 'drawing';
-      await writeQueue.enqueue(path.join(pagesDir, `${id}.${suffix}.json`), JSON.stringify(payload?.data ?? payload, null, 2));
+      await writeQueue.enqueue(path.join(pagesDir, `${id}.${suffix}.json`), JSON.stringify(payload?.data ?? payload, null, 2), 'background');
       return;
     }
     if (kind === 'canvasScene') {
@@ -1066,14 +1144,14 @@ export class WorkspaceService {
         ? { ...payload, canvasFileId: payload.canvasFileId ?? payload.id ?? id }
         : null;
       if (!scene || scene.canvasFileId !== id) throw new Error('Remote canvas scene has an invalid canvas owner.');
-      await writeQueue.enqueue(path.join(workspaceDir!, 'Canvas', `${id}.json`), JSON.stringify(scene, null, 2));
+      await writeQueue.enqueue(path.join(workspaceDir!, 'Canvas', `${id}.json`), JSON.stringify(scene, null, 2), 'background');
       return;
     }
 
     const metadata = await this.readWorkspaceJson(workspaceDir!);
     if (kind === 'workspace') {
       const nested = { folders: metadata.folders, canvasFiles: metadata.canvasFiles, notebooks: metadata.notebooks, notebookSections: metadata.notebookSections, notebookPages: metadata.notebookPages };
-      await this.writeWorkspaceJson(workspaceDir!, { ...metadata, ...payload, ...nested, id: workspaceId, deletedAt: tombstone ? Date.now() : payload.deletedAt ?? null });
+      await this.writeWorkspaceJson(workspaceDir!, { ...metadata, ...payload, ...nested, id: workspaceId, deletedAt: tombstone ? Date.now() : payload.deletedAt ?? null }, 'background');
       return;
     }
     const collections: Partial<Record<SyncEntityKind, string>> = { folder: 'folders', notebook: 'notebooks', notebookSection: 'notebookSections', notebookPage: 'notebookPages', canvasFile: 'canvasFiles' };
@@ -1099,7 +1177,7 @@ export class WorkspaceService {
       };
       if (index >= 0) collection[index] = value; else collection.push(value);
       metadata[collectionName] = collection;
-      await this.writeWorkspaceJson(workspaceDir!, metadata);
+      await this.writeWorkspaceJson(workspaceDir!, metadata, 'background');
       return;
     }
     if (kind === 'customBlock') {
@@ -1114,7 +1192,7 @@ export class WorkspaceService {
         const value = { ...payload, id: payload?.id ?? id, canvasFileId: canvasId };
         if (index >= 0) scene.customBlocks[index] = value; else scene.customBlocks.push(value);
       }
-      await writeQueue.enqueue(canvasPath, JSON.stringify(scene, null, 2));
+      await writeQueue.enqueue(canvasPath, JSON.stringify(scene, null, 2), 'background');
     }
   }
 }

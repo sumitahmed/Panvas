@@ -1,5 +1,6 @@
 import type { RecordPointer, SafeCloudDiagnostic, SyncEntityKind } from '../types.ts';
 import type { ScannedSyncEntity } from '../engine.ts';
+import type { SyncTimeSlicer } from '../drawingActivity.ts';
 
 export interface SyncV2Profile {
   format: 'panvas-sync-v2-profile';
@@ -148,13 +149,13 @@ export interface SyncV2LocalSource {
    * old, incomplete replica returning after another device was used.
    */
   canRepairMissingRemoteObjects?(): boolean;
-  listWorkspaceIds(): Promise<string[]>;
-  scanWorkspace(workspaceId: string): Promise<ScannedSyncEntity[]>;
+  listWorkspaceIds(options?: { slicer?: SyncTimeSlicer }): Promise<string[]>;
+  scanWorkspace(workspaceId: string, options?: { slicer?: SyncTimeSlicer }): Promise<ScannedSyncEntity[]>;
   /** Both ownership projections from one captured local snapshot. */
-  scanWorkspaceSnapshot?(workspaceId: string): Promise<{ owned: ScannedSyncEntity[]; all: ScannedSyncEntity[] }>;
-  scanWorkspaceIncludingUnowned?(workspaceId: string): Promise<ScannedSyncEntity[]>;
+  scanWorkspaceSnapshot?(workspaceId: string, options?: { slicer?: SyncTimeSlicer }): Promise<{ owned: ScannedSyncEntity[]; all: ScannedSyncEntity[] }>;
+  scanWorkspaceIncludingUnowned?(workspaceId: string, options?: { slicer?: SyncTimeSlicer }): Promise<ScannedSyncEntity[]>;
   /** Bypasses the cycle snapshot for edit detection and post-apply baselines. */
-  scanFreshWorkspace?(workspaceId: string): Promise<ScannedSyncEntity[]>;
+  scanFreshWorkspace?(workspaceId: string, options?: { slicer?: SyncTimeSlicer }): Promise<ScannedSyncEntity[]>;
   /**
    * Returns only a trusted, canonical workspace-root recovery record. It must
    * never include page/document payloads. Missing or untrusted recovery is
@@ -165,5 +166,5 @@ export interface SyncV2LocalSource {
 
 export interface SyncV2LocalAdapter {
   applyRecord(input: { workspaceId: string; record: SyncV2Record; bytes: Uint8Array | null; allowStaleOwnershipRepair?: boolean }): Promise<void>;
-  applyWorkspace?(input: { workspaceId: string; expected: ScannedSyncEntity[]; expectedHashes?: ReadonlyMap<string, string | null>; downloads: Array<{ record: SyncV2Record; bytes: Uint8Array | null }>; allowStaleOwnershipRepair?: boolean; assertCurrent?: () => void }): Promise<{ skipped?: Array<{ kind: SyncEntityKind; id: string }> } | void>;
+  applyWorkspace?(input: { workspaceId: string; expected: ScannedSyncEntity[]; expectedHashes?: ReadonlyMap<string, string | null>; downloads: Array<{ record: SyncV2Record; bytes: Uint8Array | null }>; allowStaleOwnershipRepair?: boolean; assertCurrent?: () => void; slicer?: SyncTimeSlicer }): Promise<{ skipped?: Array<{ kind: SyncEntityKind; id: string }> } | void>;
 }

@@ -14,11 +14,13 @@ import { createDocumentPagination } from './documentPagination';
 import { documentInsets, documentExtent, positionedContentBottom, documentSheetStride } from './documentFlowGeometry';
 import { resolveBasePageDimensions, resolvePageNoteSpace } from '@/lib/pageProperties';
 import { useFullDarkView } from '@/hooks/useFullDarkView';
+import { colorLuminance, fullDarkSurfaceColor } from '@/lib/fullDarkView';
 import { useDocumentTextPresentation } from './useDocumentTextPresentation';
 import { notebookDocumentViewContent } from './notebookDocumentView';
 import { useUIStore } from '@/stores/uiStore';
 import { documentLayoutHistoryExtension } from './documentLayoutTransition';
 import { textObjectStyle } from './textTypography';
+import { markTextTypingActivity } from '@/services/cloudsync/drawingActivity';
 
 export function DocumentFlowEditor({ object, engine, properties, toolMode, editable, onFocus, ownerPageId, renderBase = 0 }: {
   object: TextObject; engine: NotebookEngine; properties: PagePropertySet;
@@ -42,7 +44,8 @@ export function DocumentFlowEditor({ object, engine, properties, toolMode, edita
   const writingAllowed = useRef(editable); writingAllowed.current = editable;
   const containerRef = useRef<HTMLDivElement>(null);
   const fullDarkView = useFullDarkView();
-  useDocumentTextPresentation(containerRef, fullDarkView, object.content);
+  const paperIsDark = colorLuminance(fullDarkView ? fullDarkSurfaceColor(properties.paperColor || '#ffffff') : (properties.paperColor || '#ffffff')) < 0.35;
+  useDocumentTextPresentation(containerRef, fullDarkView || paperIsDark, object.content);
   const config = useRef({ properties, onLayout: (_height: number, _ms: number, _issues: string[]) => {} });
   config.current = { properties, onLayout: (height, milliseconds, nextIssues) => {
     if (protectedContent || engine.getDrawingOwnership().pageId !== ownerPageId) return;
@@ -71,6 +74,7 @@ export function DocumentFlowEditor({ object, engine, properties, toolMode, edita
     editorProps: { attributes: { class: 'tiptap prose prose-neutral prose-sm max-w-none panvas-document-content', role: 'textbox', 'aria-multiline': 'true', 'aria-label': 'Document body', 'data-protected-content': protectedContent ? 'true' : 'false' } },
     onUpdate: ({ editor: current }) => {
       if (protection.current || !editable || engine.getDrawingOwnership().pageId !== ownerPageId) return;
+      markTextTypingActivity();
       object.content = current.getJSON();
       authoredContent.current = object.content;
       object.metadata = { ...object.metadata, richTextSchemaVersion: NOTEBOOK_RICH_TEXT_SCHEMA_VERSION };
@@ -115,7 +119,7 @@ export function DocumentFlowEditor({ object, engine, properties, toolMode, edita
     editor.view.dom.style.lineHeight = typography.lineHeight ?? '';
     editor.view.dom.dispatchEvent(new Event('panvas-layout'));
   }, [editor, object.fontFamily, object.metadata?.handwritingFontSize, object.metadata?.handwritingLineHeight]);
-  return <div ref={containerRef} data-document-body={object.id} data-infinite-document={properties.pageSize === 'Infinite' ? 'true' : 'false'} className="panvas-document-body panvas-document-text absolute" onPointerDown={event => { if (event.pointerType !== 'touch') event.stopPropagation(); }} style={{ left: notes.left + inset, top: notes.top + inset - renderBase, width, zIndex: 12, pointerEvents: editable && toolMode === 'text' ? 'auto' : 'none' }}>
+  return <div ref={containerRef} data-document-body={object.id} data-panvas-dark-paper={paperIsDark ? 'true' : undefined} data-infinite-document={properties.pageSize === 'Infinite' ? 'true' : 'false'} className="panvas-document-body panvas-document-text absolute" onPointerDown={event => { if (event.pointerType !== 'touch') event.stopPropagation(); }} style={{ left: notes.left + inset, top: notes.top + inset - renderBase, width, zIndex: 12, pointerEvents: editable && toolMode === 'text' ? 'auto' : 'none' }}>
     {protectedContent && <div role="status">This document requires a compatible Panvas version. Its original content is protected.</div>}
     {issues.length > 0 && <div role="status" className="panvas-document-layout-issue">{[...new Set(issues)].join(' ')}</div>}
     <EditorContent editor={editor} style={{ maskImage: pageMask, WebkitMaskImage: pageMask }} />

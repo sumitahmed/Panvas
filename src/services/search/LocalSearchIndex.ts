@@ -1,5 +1,3 @@
-import * as pdfjsLib from 'pdfjs-dist';
-import pdfjsWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import type { CanvasFile, Folder } from '@/types/workspace';
 import type { Notebook, NotebookPage, NotebookSection } from '@/types/notebook';
 import { canvasRepository } from '@/repositories/CanvasRepository';
@@ -13,11 +11,16 @@ import {
   type PageSearchSaveEvent,
 } from './searchIndexEvents';
 import { createLocalSearchScopeKey } from './searchIndexScope';
-import { applyPageSearchSave, isSearchIndexValid, type CachedSearchPagePayload, type SearchIndexMutationState } from './localSearchIndexState';
+import {
+  applyPageSearchSave,
+  isSearchIndexValid,
+  mergePageSearchText,
+  type CachedPdfAnnotationPayload,
+  type CachedSearchPagePayload,
+  type SearchIndexMutationState,
+} from './localSearchIndexState';
 
 export { createLocalSearchScopeKey } from './searchIndexScope';
-
-if (!pdfjsLib.GlobalWorkerOptions.workerSrc) pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorkerUrl;
 
 export type LocalSearchDocumentKind = 'folder' | 'canvas' | 'notebook' | 'page' | 'pdf';
 
@@ -52,36 +55,82 @@ export interface LocalSearchSource {
 }
 
 type CachedPagePayloads = CachedSearchPagePayload;
-type CachedPdfAnnotationPayloads = ReadonlyMap<string, unknown>;
+type CachedPdfAnnotationPayloads = ReadonlyMap<string, CachedPdfAnnotationPayload>;
 
+const MAX_PDF_TEXT_CACHE_ENTRIES = 20;
 const pdfTextCache = new Map<string, string[]>();
 
-async function extractPdfPages(userId: string | null, pdfDataId: string): Promise<string[]> {
+function getCachedPdfText(pdfDataId: string): string[] | undefined {
   const cached = pdfTextCache.get(pdfDataId);
+  if (!cached) return undefined;
+  pdfTextCache.delete(pdfDataId);
+  pdfTextCache.set(pdfDataId, cached);
+  return cached;
+}
+
+function setCachedPdfText(pdfDataId: string, pages: string[]): void {
+  if (pdfTextCache.has(pdfDataId)) {
+    pdfTextCache.delete(pdfDataId);
+  }
+  pdfTextCache.set(pdfDataId, pages);
+  while (pdfTextCache.size > MAX_PDF_TEXT_CACHE_ENTRIES) {
+    const oldestKey = pdfTextCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    pdfTextCache.delete(oldestKey);
+  }
+}
+
+async function loadPdfJs() {
+  const [pdfjsLib, workerModule] = await Promise.all([
+    import('pdfjs-dist'),
+    import('pdfjs-dist/build/pdf.worker.min.mjs?url'),
+  ]);
+  if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = workerModule.default;
+  }
+  return pdfjsLib;
+}
+
+async function extractPdfPages(userId: string | null, pdfDataId: string): Promise<string[]> {
+  const cached = getCachedPdfText(pdfDataId);
   if (cached) return cached;
   const stored = await canvasRepository.getPdf(userId, pdfDataId);
   if (!stored) return [];
-  const task = pdfjsLib.getDocument({ data: new Uint8Array(stored.data.slice(0)) });
+  const pdfjsLib = await loadPdfJs();
+  const task = pdfjsLib.getDocument({
+    data: new Uint8Array(stored.data.slice(0)),
+    disableAutoFetch: true,
+    disableStream: true,
+  });
   const document = await task.promise;
   try {
     const pages: string[] = [];
     for (let number = 1; number <= document.numPages; number += 1) {
       const page = await document.getPage(number);
-      const text = await page.getTextContent();
-      pages.push(normalizeSearchText(text.items.map(item => 'str' in item ? item.str : '').join(' ')));
-      page.cleanup();
+      try {
+        const text = await page.getTextContent();
+        pages.push(normalizeSearchText(text.items.map(item => 'str' in item ? item.str : '').join(' ')));
+      } finally {
+        page.cleanup();
+      }
     }
-    pdfTextCache.set(pdfDataId, pages);
+    setCachedPdfText(pdfDataId, pages);
     return pages;
   } finally {
     await document.destroy();
+    if (!task.destroyed) {
+      await task.destroy().catch(() => {});
+    }
   }
 }
 
 export async function rebuildLocalSearchIndex(source: LocalSearchSource): Promise<LocalSearchDocument[]> {
+  if (localSearchIndex.getWorkspaceId() && localSearchIndex.getWorkspaceId() !== source.workspaceId) {
+    localSearchIndex.clear();
+  }
   const documents: LocalSearchDocument[] = [];
   const pagePayloads = new Map<string, CachedPagePayloads>();
-  const pdfAnnotationPayloads = new Map<string, unknown>();
+  const pdfAnnotationPayloads = new Map<string, CachedPdfAnnotationPayload>();
   const scopeKey = createLocalSearchScopeKey(source);
   const activeFolders = source.folders.filter(item => item.workspaceId === source.workspaceId && !item.deletedAt);
   const activeNotebooks = source.notebooks.filter(item => item.workspaceId === source.workspaceId && !item.deletedAt);
@@ -106,12 +155,13 @@ export async function rebuildLocalSearchIndex(source: LocalSearchSource): Promis
 
   for (const canvas of source.canvasFiles.filter(item => item.workspaceId === source.workspaceId && !item.deletedAt)) {
     const data = await canvasRepository.loadData(source.userId, canvas.id).catch(() => undefined);
+    const canvasText = normalizeSearchText(textFromTipTap(data?.customBlocks));
     documents.push({
       id: canvas.id, kind: 'canvas', workspaceId: canvas.workspaceId, title: canvas.name,
       ...emptyContent,
-      content: normalizeSearchText(textFromTipTap(data?.customBlocks)),
-      richText: normalizeSearchText(textFromTipTap(data?.customBlocks)),
-      snippet: normalizeSearchText(textFromTipTap(data?.customBlocks)).slice(0, 220),
+      content: canvasText,
+      richText: canvasText,
+      snippet: canvasText.slice(0, 220),
       tags: ['canvas'], updatedAt: canvas.updatedAt,
     });
   }
@@ -152,7 +202,7 @@ export async function rebuildLocalSearchIndex(source: LocalSearchSource): Promis
           if (annotationDrawing) {
             pdfAnnotationPayloads.set(
               pdfAnnotationScopeKey(notebook.workspaceId, notebook.id, page.id, sourcePage),
-              annotationDrawing,
+              { handwritingText: annotation.handwritingText, richText: annotation.richText },
             );
           }
           const richText = normalizeSearchText(`${embeddedText} ${annotation.richText}`);
@@ -171,11 +221,22 @@ export async function rebuildLocalSearchIndex(source: LocalSearchSource): Promis
       notebookRepository.loadPageData(notebook.workspaceId, notebook.id, page.id).catch(() => null),
       notebookRepository.loadDrawingData(notebook.workspaceId, notebook.id, page.id).catch(() => null),
     ]);
-    pagePayloads.set(page.id, { content, drawing });
-    documents.push({ id: page.id, kind: 'page', ...base, ...extractPageSearchContent(content, drawing) });
+    const contentText = normalizeSearchText(textFromTipTap(content));
+    const drawingExtracted = extractPageSearchContent(undefined, drawing);
+    pagePayloads.set(page.id, {
+      contentText,
+      drawingHandwritingText: drawingExtracted.handwritingText,
+      drawingRichText: drawingExtracted.richText,
+    });
+    documents.push({
+      id: page.id,
+      kind: 'page',
+      ...base,
+      ...mergePageSearchText(contentText, drawingExtracted.handwritingText, drawingExtracted.richText),
+    });
   }
 
-  localSearchIndex.replace(documents, pagePayloads, pdfAnnotationPayloads, scopeKey);
+  localSearchIndex.replace(documents, pagePayloads, pdfAnnotationPayloads, scopeKey, source.workspaceId);
   return documents;
 }
 
@@ -186,8 +247,9 @@ export function searchLocalIndex(documents: LocalSearchDocument[], query: string
 export class LocalSearchIndex {
   private documents: LocalSearchDocument[] = [];
   private readonly pagePayloads = new Map<string, CachedPagePayloads>();
-  private readonly pdfAnnotationPayloads = new Map<string, unknown>();
+  private readonly pdfAnnotationPayloads = new Map<string, CachedPdfAnnotationPayload>();
   private scopeKey: string | null = null;
+  private workspaceId: string | null = null;
   private readonly unsubscribe: () => void;
 
   constructor() {
@@ -199,13 +261,23 @@ export class LocalSearchIndex {
     pagePayloads: ReadonlyMap<string, CachedPagePayloads> = new Map(),
     pdfAnnotationPayloads: CachedPdfAnnotationPayloads = new Map(),
     scopeKey: string | null = null,
+    workspaceId: string | null = null,
   ): void {
+    const nextWorkspaceId = workspaceId ?? documents[0]?.workspaceId ?? null;
+    if (this.workspaceId && nextWorkspaceId && this.workspaceId !== nextWorkspaceId) {
+      pdfTextCache.clear();
+    }
     this.documents = documents;
     this.scopeKey = scopeKey;
+    this.workspaceId = nextWorkspaceId;
     this.pagePayloads.clear();
     pagePayloads.forEach((payload, pageId) => this.pagePayloads.set(pageId, payload));
     this.pdfAnnotationPayloads.clear();
     pdfAnnotationPayloads.forEach((payload, key) => this.pdfAnnotationPayloads.set(key, payload));
+  }
+
+  getWorkspaceId(): string | null {
+    return this.workspaceId;
   }
 
   isValidFor(scopeKey: string): boolean {
@@ -220,11 +292,26 @@ export class LocalSearchIndex {
     return rankLocalSearchDocuments(this.documents, query, limit);
   }
 
+  clear(): void {
+    this.documents = [];
+    this.scopeKey = null;
+    this.workspaceId = null;
+    this.pagePayloads.clear();
+    this.pdfAnnotationPayloads.clear();
+    pdfTextCache.clear();
+  }
+
+  reset(): void {
+    this.clear();
+  }
+
   dispose(): void {
     this.unsubscribe();
+    this.clear();
   }
 
   private applySavedPage(event: PageSearchSaveEvent): void {
+    if (!this.scopeKey && this.documents.length === 0) return;
     const state: SearchIndexMutationState = {
       documents: this.documents,
       pagePayloads: this.pagePayloads,

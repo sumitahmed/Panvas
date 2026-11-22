@@ -20,6 +20,8 @@ Panvas is an independent MIT-licensed application. This file identifies the majo
 | `@huggingface/transformers` | `^4.2.0` | Apache-2.0 | [huggingface/transformers.js](https://github.com/huggingface/transformers.js) |
 | PostHog JS | `^1.380.0` | Apache-2.0 AND MIT | [PostHog/posthog-js](https://github.com/PostHog/posthog-js) |
 | Supabase JS | `^2.49.0` | MIT | [supabase/supabase-js](https://github.com/supabase/supabase-js) |
+| `onnxruntime-node` | `^1.21.0` | MIT | [microsoft/onnxruntime](https://github.com/microsoft/onnxruntime) |
+| TexTeller3 (model weights) | `onnx-community/TexTeller3-ONNX` | Apache-2.0 | [OleehyO/TexTeller](https://github.com/OleehyO/TexTeller) |
 
 Other direct runtime packages (including `@base-ui/react`, `react-hook-form`, `react-markdown`, `react-syntax-highlighter`, `remark-*`, `lowlight`, `highlight.js`, `framer-motion`, `nanoid`, `polygon-clipping`, `three`, `tippy.js`, `vanta`, `wouter`, `zod`, and their transitive dependencies) retain the license metadata shipped in `node_modules` and the lockfile. Review the package's own license before redistributing a modified copy.
 

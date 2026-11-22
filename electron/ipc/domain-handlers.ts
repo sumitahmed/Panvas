@@ -156,10 +156,10 @@ async function validateArguments(channel: string, args: unknown[]): Promise<void
     'notebookSection:create': [0, 1], 'notebookSection:getAll': [0], 'notebookSection:update': [0, 1], 'notebookSection:delete': [0, 1],
     'notebookPage:create': [0, 1, 2], 'notebookPage:getAll': [0], 'notebookPage:update': [0, 1], 'notebookPage:delete': [0, 1],
     'notebook:savePage': [0, 1, 2], 'notebook:loadPage': [0, 1, 2], 'notebook:saveDrawing': [0, 1, 2], 'notebook:loadDrawing': [0, 1, 2],
-    'binary:getPdf': [0], 'binary:getImage': [0], 'binary:getAudio': [0], 'binary:deleteAudio': [0],
+    'binary:getPdf': [0], 'binary:getImage': [0], 'binary:deleteImage': [0], 'binary:getAudio': [0], 'binary:deleteAudio': [0],
     'backup:export': [0],
     'trash:permanentlyDelete': [0, 1],
-    'cloudsync:listPageDrawingRecords': [0], 'cloudsync:applyRemoteRecords': [0],
+    'cloudsync:listPageDrawingRecords': [0], 'cloudsync:getWorkspaceEntityStats': [0], 'cloudsync:applyRemoteRecords': [0],
     'workspace:getRecoveryWorkspaceRoot': [0],
   };
   for (const index of idArguments[channel] ?? []) requireId(args[index], 'identifier');
@@ -205,6 +205,14 @@ async function validateArguments(channel: string, args: unknown[]): Promise<void
     requireJsonPayload(args[0], 'backup payload', MAX_BACKUP_BYTES);
     const { validateWorkspaceBackup } = await import('../../src/services/backup/backupService.js');
     validateWorkspaceBackup(args[0]);
+  }
+  if (channel === 'cloudsync:statBinaryAssets') {
+    if (!Array.isArray(args[0]) || args[0].length > 50_000) throw new Error('Invalid binary asset stat request.');
+    for (const entry of args[0]) {
+      requirePlainObject(entry, 'binary asset stat entry');
+      if (!['pdf', 'image', 'audio'].includes(String(entry.kind))) throw new Error('Invalid asset kind.');
+      requireId(entry.id, 'asset identifier');
+    }
   }
   if (channel === 'cloudsync:applyRemoteRecord') {
     requireId(args[0], 'workspace identifier');
@@ -326,6 +334,52 @@ async function removeCanvasPayload(workspaceDir: string, canvasId: string): Prom
   await fsPromises.rm(path.join(workspaceDir, 'Canvas', `${canvasId}.json`), { force: true });
 }
 
+function collectImageFileIds(raw: string, out: Set<string>): void {
+  try {
+    const parsed = JSON.parse(raw);
+    for (const obj of Array.isArray(parsed?.objects) ? parsed.objects : []) {
+      if (obj?.type === 'image' && typeof obj.fileId === 'string' && SAFE_ID.test(obj.fileId)) out.add(obj.fileId);
+      if (obj?.type === 'text' && obj.content) {
+        const stack = [obj.content];
+        while (stack.length) {
+          const node = stack.pop();
+          if ((node?.type === 'image' || node?.type === 'inlineImage') && typeof node?.attrs?.fileId === 'string' && SAFE_ID.test(node.attrs.fileId)) out.add(node.attrs.fileId);
+          if (Array.isArray(node?.content)) stack.push(...node.content);
+        }
+      }
+    }
+  } catch { /* ignore unreadable drawing */ }
+}
+
+async function pruneUnreferencedImages(candidateIds: Set<string>): Promise<void> {
+  if (candidateIds.size === 0) return;
+  try {
+    const remaining = new Set(candidateIds);
+    const scanText = async (filePath: string) => {
+      if (remaining.size === 0) return;
+      const text = await fsPromises.readFile(filePath, 'utf8').catch(() => '');
+      if (!text) return;
+      for (const id of [...remaining]) if (text.includes(id)) remaining.delete(id);
+    };
+    for (const { workspaceDir } of await workspaceService.discoverWorkspaces()) {
+      const nbRoot = path.join(workspaceDir, 'Notebooks');
+      for (const nb of await fsPromises.readdir(nbRoot, { withFileTypes: true }).catch(() => [] as import('fs').Dirent[])) {
+        if (!nb.isDirectory()) continue;
+        const pagesDir = path.join(nbRoot, nb.name, 'pages');
+        for (const entry of await fsPromises.readdir(pagesDir, { withFileTypes: true }).catch(() => [] as import('fs').Dirent[])) {
+          if (entry.isFile() && entry.name.endsWith('.drawing.json')) await scanText(path.join(pagesDir, entry.name));
+        }
+      }
+      const canvasRoot = path.join(workspaceDir, 'Canvas');
+      for (const entry of await fsPromises.readdir(canvasRoot, { withFileTypes: true }).catch(() => [] as import('fs').Dirent[])) {
+        if (entry.isFile() && entry.name.endsWith('.json')) await scanText(path.join(canvasRoot, entry.name));
+      }
+      if (remaining.size === 0) break;
+    }
+    await Promise.all([...remaining].map(id => workspaceService.deleteBinaryAsset('image', id)));
+  } catch { /* non-fatal orphan sweep */ }
+}
+
 /** Permanently removes a single Trash root and everything owned by it. */
 async function permanentlyDeleteWorkspaceEntity(workspaceId: string, id: string, kind: PermanentTrashKind): Promise<boolean> {
   const workspaceDir = workspaceService.getWorkspaceDirById(workspaceId);
@@ -401,6 +455,13 @@ async function permanentlyDeleteWorkspaceEntity(workspaceId: string, id: string,
           : pages.some(item => item.id === id);
   if (!targetExists) return false;
 
+  const candidateImageIds = new Set<string>();
+  for (const page of pages) {
+    if (!pageIds.has(page.id)) continue;
+    const raw = await fsPromises.readFile(path.join(workspaceDir, 'Notebooks', page.notebookId, 'pages', `${page.id}.drawing.json`), 'utf8').catch(() => '');
+    if (raw) collectImageFileIds(raw, candidateImageIds);
+  }
+
   // Remove page payload files (content/drawing JSON) using ownerNotebookIds
   // for the disk path, since pages live under Notebooks/<notebookId>/pages/.
   for (const page of pages) if (pageIds.has(page.id)) await removeNotebookPagePayloads(workspaceDir, page.notebookId, page.id);
@@ -417,6 +478,7 @@ async function permanentlyDeleteWorkspaceEntity(workspaceId: string, id: string,
   ws.notebookPages = pages.filter(item => !pageIds.has(item.id));
   ws.canvasFiles = canvases.filter(item => !canvasIds.has(item.id));
   await workspaceService.writeWorkspaceJson(workspaceDir, ws);
+  await pruneUnreferencedImages(candidateImageIds);
   return true;
 }
 
@@ -471,9 +533,9 @@ export function registerDomainHandlers() {
     const workspaceId = generateId('ws');
     const workspaceDir = workspaceService.getWorkspaceDirByName(name);
     const panvasDir = path.join(workspaceDir, '.panvas');
-    
+
     await fsPromises.mkdir(panvasDir, { recursive: true });
-    
+
     const now = Date.now();
     const workspaceObj = {
       id: workspaceId,
@@ -496,22 +558,22 @@ export function registerDomainHandlers() {
     await fsPromises.writeFile(path.join(panvasDir, 'system.json'), JSON.stringify({ version: 1, migration_complete: true }, null, 2));
     await fsPromises.writeFile(path.join(panvasDir, 'workspace.json'), JSON.stringify(workspaceObj, null, 2));
     await fsPromises.writeFile(path.join(panvasDir, 'settings.json'), JSON.stringify({ version: 1 }, null, 2));
-    
+
     await fsPromises.mkdir(path.join(panvasDir, 'journal'), { recursive: true });
     await fsPromises.mkdir(path.join(panvasDir, 'recovery'), { recursive: true });
     await fsPromises.mkdir(path.join(panvasDir, 'temp'), { recursive: true });
     await fsPromises.mkdir(path.join(panvasDir, 'Plugins'), { recursive: true });
-    
+
     await fsPromises.mkdir(path.join(workspaceDir, 'Assets', 'images'), { recursive: true });
     await fsPromises.mkdir(path.join(workspaceDir, 'Assets', 'pdfs'), { recursive: true });
     await fsPromises.mkdir(path.join(workspaceDir, 'Assets', 'videos'), { recursive: true });
     await fsPromises.mkdir(path.join(workspaceDir, 'Assets', 'audio'), { recursive: true });
     await fsPromises.mkdir(path.join(workspaceDir, 'Assets', 'attachments'), { recursive: true });
-    
+
     await fsPromises.mkdir(path.join(workspaceDir, 'Notebooks'), { recursive: true });
     await fsPromises.mkdir(path.join(workspaceDir, 'Canvas'), { recursive: true });
     await fsPromises.mkdir(path.join(workspaceDir, 'PDF'), { recursive: true });
-    
+
     workspaceService.registerWorkspace(workspaceId, workspaceDir);
     await workspaceService.rememberWorkspaceLocation(workspaceId, workspaceDir);
     return workspaceObj;
@@ -519,17 +581,17 @@ export function registerDomainHandlers() {
 
   registerHandler('workspace:openDialog', async (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
-    const result = win 
+    const result = win
       ? await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] })
       : await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] });
-    
+
     if (result.canceled || result.filePaths.length === 0) {
       return null;
     }
-    
+
     const workspaceDir = result.filePaths[0];
     const panvasDir = path.join(workspaceDir, '.panvas');
-    
+
     // Check if it's already a workspace
     if (fs.existsSync(panvasDir)) {
       try {
@@ -544,9 +606,9 @@ export function registerDomainHandlers() {
       // Initialize new workspace
       const name = path.basename(workspaceDir);
       const workspaceId = generateId('ws');
-      
+
       await fsPromises.mkdir(panvasDir, { recursive: true });
-      
+
       const now = Date.now();
       const workspaceObj = {
         id: workspaceId,
@@ -569,22 +631,22 @@ export function registerDomainHandlers() {
       await fsPromises.writeFile(path.join(panvasDir, 'system.json'), JSON.stringify({ version: 1, migration_complete: true }, null, 2));
       await fsPromises.writeFile(path.join(panvasDir, 'workspace.json'), JSON.stringify(workspaceObj, null, 2));
       await fsPromises.writeFile(path.join(panvasDir, 'settings.json'), JSON.stringify({ version: 1 }, null, 2));
-      
+
       await fsPromises.mkdir(path.join(panvasDir, 'journal'), { recursive: true });
       await fsPromises.mkdir(path.join(panvasDir, 'recovery'), { recursive: true });
       await fsPromises.mkdir(path.join(panvasDir, 'temp'), { recursive: true });
       await fsPromises.mkdir(path.join(panvasDir, 'Plugins'), { recursive: true });
-      
+
       await fsPromises.mkdir(path.join(workspaceDir, 'Assets', 'images'), { recursive: true });
       await fsPromises.mkdir(path.join(workspaceDir, 'Assets', 'pdfs'), { recursive: true });
       await fsPromises.mkdir(path.join(workspaceDir, 'Assets', 'videos'), { recursive: true });
       await fsPromises.mkdir(path.join(workspaceDir, 'Assets', 'audio'), { recursive: true });
       await fsPromises.mkdir(path.join(workspaceDir, 'Assets', 'attachments'), { recursive: true });
-      
+
       await fsPromises.mkdir(path.join(workspaceDir, 'Notebooks'), { recursive: true });
       await fsPromises.mkdir(path.join(workspaceDir, 'Canvas'), { recursive: true });
       await fsPromises.mkdir(path.join(workspaceDir, 'PDF'), { recursive: true });
-      
+
       workspaceService.registerWorkspace(workspaceId, workspaceDir);
       await workspaceService.rememberWorkspaceLocation(workspaceId, workspaceDir);
       return workspaceObj;
@@ -651,7 +713,7 @@ export function registerDomainHandlers() {
   registerHandler('workspace:reorder', async (event, workspaceId: string, type: 'folder' | 'notebook' | 'canvas' | 'section' | 'page', itemIds: string[]) => {
     const dir = workspaceService.getWorkspaceDirById(workspaceId);
     const ws = await workspaceService.readWorkspaceJson(dir);
-    
+
     let array: any[];
     if (type === 'folder') array = ws.folders;
     else if (type === 'notebook') array = ws.notebooks;
@@ -661,7 +723,7 @@ export function registerDomainHandlers() {
     else return false;
 
     const idToIndex = new Map(itemIds.map((id, index) => [id, index]));
-    
+
     array.sort((a, b) => {
       const idxA = idToIndex.has(a.id) ? idToIndex.get(a.id)! : 999999;
       const idxB = idToIndex.has(b.id) ? idToIndex.get(b.id)! : 999999;
@@ -677,7 +739,7 @@ export function registerDomainHandlers() {
   });
 
   // ---- FOLDERS ----
-  
+
   registerHandler('folder:create', async (event, workspaceId: string, name: string, parentId: string | null) => {
     const dir = workspaceService.getWorkspaceDirById(workspaceId);
     const ws = await workspaceService.readWorkspaceJson(dir);
@@ -729,7 +791,7 @@ export function registerDomainHandlers() {
   });
 
   // ---- CANVAS FILES (Metadata) ----
-  
+
   registerHandler('canvasFile:create', async (event, workspaceId: string, name: string, folderId: string | null, notebookId: string | null, sectionId: string | null) => {
     const dir = workspaceService.getWorkspaceDirById(workspaceId);
     const ws = await workspaceService.readWorkspaceJson(dir);
@@ -749,12 +811,12 @@ export function registerDomainHandlers() {
     };
     ws.canvasFiles.push(canvasFile);
     await workspaceService.writeWorkspaceJson(dir, ws);
-    
+
     // Create the empty canvas content file
     const canvasData = { canvasFileId: canvasFile.id, elements: [], appState: {}, files: {}, version: 1 };
     const contentPath = path.join(dir, 'Canvas', `${canvasFile.id}.json`);
     await writeQueue.enqueue(contentPath, JSON.stringify(canvasData, null, 2));
-    
+
     return canvasFile;
   });
 
@@ -858,12 +920,12 @@ export function registerDomainHandlers() {
     await fsPromises.rm(path.join(libraryDir, fileName), { force: true });
     return true;
   });
-  
+
   // ---- NOTEBOOKS ----
 
   registerHandler('notebook:create', async (event, workspaceId: string, name: string, folderId: string | null) => {
     const dir = workspaceService.getWorkspaceDirById(workspaceId);
-    
+
     // Create notebook dir
     const notebook = {
       id: generateId('nb'),
@@ -878,17 +940,17 @@ export function registerDomainHandlers() {
       defaultPageProperties: { ...DEFAULT_PAGE_PROPERTY_SET },
       deletedAt: null
     };
-    
+
     const nbDir = path.join(dir, 'Notebooks', notebook.id);
     await fsPromises.mkdir(path.join(nbDir, 'pages'), { recursive: true });
-    
+
     await writeQueue.enqueue(path.join(nbDir, 'notebook.json'), JSON.stringify(notebook, null, 2));
-    
+
     // We also need to update workspace.json temporarily until we refactor loadWorkspaceContents
     const ws = await workspaceService.readWorkspaceJson(dir);
     ws.notebooks.push(notebook);
     await workspaceService.writeWorkspaceJson(dir, ws);
-    
+
     return notebook;
   });
 
@@ -995,7 +1057,7 @@ export function registerDomainHandlers() {
       order: 0,
       deletedAt: null
     };
-    
+
     // For now, continue saving sections in workspace.json to avoid rewriting the entire read path for sections immediately
     const ws = await workspaceService.readWorkspaceJson(dir);
     section.order = ws.notebookSections.length;
@@ -1137,7 +1199,7 @@ export function registerDomainHandlers() {
     requireWorkspacePage(await workspaceService.readWorkspaceJson(dir), notebookId, pageId);
     const pagesDir = path.join(dir, 'Notebooks', notebookId, 'pages');
     await fsPromises.mkdir(pagesDir, { recursive: true });
-    
+
     const contentPath = path.join(pagesDir, `${pageId}.content.json`);
     await writeQueue.enqueue(contentPath, JSON.stringify(data, null, 2));
   });
@@ -1325,6 +1387,11 @@ export function registerDomainHandlers() {
     }
   });
 
+  registerHandler('binary:deleteImage', async (_event, id: string) => {
+    await workspaceService.deleteBinaryAsset('image', id);
+    return true;
+  });
+
   registerHandler('binary:storeAudio', async (event, id: string, fileName: string, mimeType: string, data: ArrayBuffer) => {
     await workspaceService.ensureBaseDir();
     await workspaceService.assertStorageRootAvailable();
@@ -1349,12 +1416,8 @@ export function registerDomainHandlers() {
     }
   });
 
-  registerHandler('binary:deleteAudio', async (event, id: string) => {
-    await workspaceService.ensureBaseDir();
-    await Promise.all((await workspaceService.getBinaryReadDirectories('audio')).flatMap(dir => [
-      fsPromises.rm(path.join(dir, `${id}.bin`), { force: true }),
-      fsPromises.rm(path.join(dir, `${id}.meta.json`), { force: true }),
-    ]));
+  registerHandler('binary:deleteAudio', async (_event, id: string) => {
+    await workspaceService.deleteBinaryAsset('audio', id);
     return true;
   });
 
@@ -1410,4 +1473,6 @@ export function registerDomainHandlers() {
     }
   });
   registerHandler('cloudsync:listPageDrawingRecords', async (_event, workspaceId: string) => workspaceService.listPageDrawingRecords(workspaceId));
+  registerHandler('cloudsync:getWorkspaceEntityStats', async (_event, workspaceId: string) => workspaceService.getWorkspaceEntityStats(workspaceId));
+  registerHandler('cloudsync:statBinaryAssets', async (_event, refs: Array<{ kind: 'pdf' | 'image' | 'audio'; id: string }>) => workspaceService.statBinaryAssets(refs));
 }

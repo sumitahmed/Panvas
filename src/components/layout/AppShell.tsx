@@ -13,6 +13,7 @@ import { StatusBar } from './StatusBar';
 import { useUIStore } from '@/stores/uiStore';
 import { useLayoutStore } from '@/stores/layoutStore';
 import { useWorkspaceStore } from '@/stores/workspaceStore';
+import { useShallow } from 'zustand/react/shallow';
 import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
 import { useIsCompactTouchViewport } from '@/hooks/useIsCompactTouchViewport';
 import { useMobileVisualViewport } from '@/hooks/useMobileVisualViewport';
@@ -23,10 +24,16 @@ interface AppShellProps {
 }
 
 export function AppShell({ children }: AppShellProps) {
-  const { isSidebarOpen, sidebarWidth, isFullDarkViewChoiceOpen, setFullDarkView } = useUIStore();
-  const { notebookModeLevel, isNotebookPaneVisible, workspaceViewMode } = useLayoutStore();
-  const activePageId = useWorkspaceStore(state => state.activePageId);
-  const activeCanvasId = useWorkspaceStore(state => state.activeCanvasId);
+  const { isSidebarOpen, sidebarWidth, isFullDarkViewChoiceOpen, setFullDarkView } = useUIStore(useShallow(state => ({
+    isSidebarOpen: state.isSidebarOpen,
+    sidebarWidth: state.sidebarWidth,
+    isFullDarkViewChoiceOpen: state.isFullDarkViewChoiceOpen,
+    setFullDarkView: state.setFullDarkView,
+  })));
+  const { notebookModeLevel, workspaceViewMode } = useLayoutStore(useShallow(state => ({
+    notebookModeLevel: state.notebookModeLevel,
+    workspaceViewMode: state.workspaceViewMode,
+  })));
   const isMobileViewport = useIsMobileViewport();
   const hasTouchInput = useHasTouchInput();
   const useLibraryDrawer = useIsMobileViewport(819);
@@ -59,7 +66,9 @@ export function AppShell({ children }: AppShellProps) {
   // Picking a destination (route navigation or opening a document) dismisses
   // it, Escape closes it, and the scrim tap closes it. Desktop and tablet
   // keep the inline sidebar untouched.
-  const lastDismissSignalRef = useRef(`${location}|${activePageId ?? ''}|${activeCanvasId ?? ''}`);
+  const getDismissSignal = (pathname: string, state = useWorkspaceStore.getState()) =>
+    `${pathname}|${state.activePageId ?? ''}|${state.activeCanvasId ?? ''}`;
+  const lastDismissSignalRef = useRef(getDismissSignal(location));
   const enteredMobileViewportRef = useRef(false);
 
   // A persistent desktop sidebar should not obscure a newly opened phone
@@ -77,13 +86,23 @@ export function AppShell({ children }: AppShellProps) {
   }, [useLibraryDrawer]);
 
   useEffect(() => {
-    const signal = `${location}|${activePageId ?? ''}|${activeCanvasId ?? ''}`;
-    if (lastDismissSignalRef.current === signal) return;
-    lastDismissSignalRef.current = signal;
-    if (!useLibraryDrawer) return;
-    const { isSidebarOpen: open, toggleSidebar } = useUIStore.getState();
-    if (open) toggleSidebar();
-  }, [location, activePageId, activeCanvasId, useLibraryDrawer]);
+    if (!useLibraryDrawer) {
+      lastDismissSignalRef.current = getDismissSignal(location);
+      return undefined;
+    }
+    const dismissIfChanged = () => {
+      const signal = getDismissSignal(location);
+      if (lastDismissSignalRef.current === signal) return;
+      lastDismissSignalRef.current = signal;
+      const { isSidebarOpen: open, toggleSidebar } = useUIStore.getState();
+      if (open) toggleSidebar();
+    };
+    dismissIfChanged();
+    return useWorkspaceStore.subscribe((state, prevState) => {
+      if (state.activePageId === prevState.activePageId && state.activeCanvasId === prevState.activeCanvasId) return;
+      dismissIfChanged();
+    });
+  }, [location, useLibraryDrawer]);
 
   useEffect(() => {
     if (!useLibraryDrawer || !isSidebarOpen) return undefined;

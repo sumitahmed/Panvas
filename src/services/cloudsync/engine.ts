@@ -24,6 +24,8 @@ export interface ScannedSyncEntity {
   workspaceId: string;
   parentId: string | null;
   bytes: Uint8Array | null;
+  precomputedHash?: string;
+  loadBytes?: () => Promise<Uint8Array | null>;
   tombstone: boolean;
   deletedAt: number | null;
   /** Stale ownership rows may be considered only during verified recovery. */

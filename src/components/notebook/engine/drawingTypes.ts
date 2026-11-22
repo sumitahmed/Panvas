@@ -81,7 +81,12 @@ export interface Stroke extends BasePageObject {
 }
 
 /** Shape types supported by the shape tool. */
-export type ShapeType = 'rectangle' | 'rounded-rectangle' | 'ellipse' | 'triangle' | 'diamond' | 'arrow' | 'line';
+export type ShapeType = 'rectangle' | 'rounded-rectangle' | 'ellipse' | 'triangle' | 'diamond' | 'star' | 'pentagon' | 'hexagon' | 'arrow' | 'double-arrow' | 'line';
+
+/** Returns true for 1D linear/connector shape types positioned via (x, y) + (width, height) delta. */
+export function isLinearShapeType(shapeType: ShapeType): boolean {
+  return shapeType === 'line' || shapeType === 'arrow' || shapeType === 'double-arrow';
+}
 
 /** A vector shape placed on the drawing layer. */
 export interface Shape extends BasePageObject {
@@ -256,10 +261,10 @@ export const DEFAULT_TOOL_STATE: ToolState = {
   strokePattern: 'solid',
   scribbleToErase: false,
   circleToSelect: false,
-  straightLineRecognition: false,
+  straightLineRecognition: true,
   snapRecognizedLines: true,
-  roughShapeRecognition: false,
-  snapRecognizedShapes: false,
+  roughShapeRecognition: true,
+  snapRecognizedShapes: true,
   rulerEnabled: false,
   stabilization: 50,
   shapeFillEnabled: false,

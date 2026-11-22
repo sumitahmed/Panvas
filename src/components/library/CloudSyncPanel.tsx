@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { Cloud, ShieldCheck, RefreshCw, AlertCircle, CheckCircle2, ArrowRight } from 'lucide-react';
 import { useCloudSyncStore } from '@/stores/cloudSyncStore';
 import { useUIStore } from '@/stores/uiStore';
@@ -62,7 +63,28 @@ export function CloudSyncPanel() {
     resolveReviewChanges,
     resetThisDevice,
     isResetting,
-  } = useCloudSyncStore();
+  } = useCloudSyncStore(useShallow(state => ({
+    statusByProvider: state.statusByProvider,
+    connectionByProvider: state.connectionByProvider,
+    lastSyncedByProvider: state.lastSyncedByProvider,
+    autoSync: state.autoSync,
+    setAutoSync: state.setAutoSync,
+    requestConnect: state.requestConnect,
+    requestDisconnect: state.requestDisconnect,
+    triggerSync: state.triggerSync,
+    isSyncing: state.isSyncing,
+    initialize: state.initialize,
+    progress: state.progress,
+    lastError: state.lastError,
+    migrationWorkspaceIds: state.migrationWorkspaceIds,
+    moveSyncToCurrentGoogleAccount: state.moveSyncToCurrentGoogleAccount,
+    reviewItems: state.reviewItems,
+    workspaceRecoveryIssues: state.workspaceRecoveryIssues,
+    loadReviewChanges: state.loadReviewChanges,
+    resolveReviewChanges: state.resolveReviewChanges,
+    resetThisDevice: state.resetThisDevice,
+    isResetting: state.isResetting,
+  })));
 
   const showToast = useUIStore(state => state.showToast);
   const clearToast = useUIStore(state => state.clearToast);

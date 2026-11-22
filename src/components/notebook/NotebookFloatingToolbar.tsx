@@ -11,7 +11,8 @@ import {
   PenTool, Pencil, Highlighter, Eraser, MousePointer2, Square, Circle, ArrowRight, Minus, Slash, Type, Hand,
   Undo2, Redo2, X, MoreHorizontal, PenTool as PenToolIcon, ChevronLeft, ChevronRight, ChevronUp, Maximize2, Minimize2, PanelLeft, PanelRight,
   Strikethrough, AlignLeft, AlignCenter, AlignRight, AlignJustify, ListOrdered, Palette, PaintBucket, Image as ImageIcon, Ruler, StickyNote, Languages,
-  CircleDot, Crosshair, LassoSelect, ScanLine, Shapes, Spline, Check, Link2
+  CircleDot, Crosshair, LassoSelect, ScanLine, Shapes, Spline, Check, Link2,
+  Triangle, Diamond, Star, Pentagon, Hexagon, ArrowLeftRight, Sigma
 } from 'lucide-react';
 import { FloatingImageControls } from './FloatingImageControls';
 import { DocumentationControls, DocumentationTabs, type DocumentationSection } from './DocumentationControls';
@@ -24,7 +25,7 @@ import { NotebookWorkspaceControls } from './NotebookWorkspaceControls';
 import { applyNotebookTextFont } from './textTypography';
 import type { Editor } from '@tiptap/react';
 import type { NotebookEngine } from './engine/NotebookEngine';
-import type { DrawingToolId, EraserMode, ShapeType, StrokePattern } from './engine/drawingTypes';
+import { isLinearShapeType, type DrawingToolId, type EraserMode, type ShapeType, type StrokePattern } from './engine/drawingTypes';
 import { useUIStore } from '@/stores/uiStore';
 import { useAuthStore } from '@/stores/authStore';
 import { useLayoutStore } from '@/stores/layoutStore';
@@ -75,8 +76,15 @@ const ACTIVE_TOOL_LABELS: Record<string, string> = {
   select: 'Select',
   hand: 'Hand',
   rectangle: 'Rectangle',
+  'rounded-rectangle': 'Rounded Rectangle',
   ellipse: 'Ellipse',
+  triangle: 'Triangle',
+  diamond: 'Diamond',
+  star: 'Star',
+  pentagon: 'Pentagon',
+  hexagon: 'Hexagon',
   arrow: 'Arrow',
+  'double-arrow': 'Double Arrow',
   line: 'Line',
   laser: 'Laser Pointer',
   'handwriting-to-text': 'Handwriting to Text',
@@ -139,9 +147,16 @@ function ToolGlyph({ tool, color, size = 16 }: { tool: string; color?: string; s
     case 'text': return <Type {...props} />;
     case 'select': return <MousePointer2 {...props} />;
     case 'hand': return <Hand {...props} />;
-    case 'rectangle': return <Square {...props} />;
+    case 'rectangle':
+    case 'rounded-rectangle': return <Square {...props} />;
     case 'ellipse': return <Circle {...props} />;
+    case 'triangle': return <Triangle {...props} />;
+    case 'diamond': return <Diamond {...props} />;
+    case 'star': return <Star {...props} />;
+    case 'pentagon': return <Pentagon {...props} />;
+    case 'hexagon': return <Hexagon {...props} />;
     case 'arrow': return <ArrowRight {...props} />;
+    case 'double-arrow': return <ArrowLeftRight {...props} />;
     case 'line': return <Minus {...props} />;
     case 'laser': return <Crosshair {...props} />;
     case 'handwriting-to-text': return <Languages {...props} />;
@@ -176,6 +191,7 @@ interface NotebookFloatingToolbarProps {
   saveKey?: string; // Optional custom key for persistence (e.g. PDF composite key)
   workspaceId?: string;
   onConvertHandwriting?: () => void;
+  onConvertHandwritingToMath?: () => void;
   embedded?: boolean;
   hideCollapseButton?: boolean;
   fullscreenToolOnly?: boolean;
@@ -187,7 +203,7 @@ interface NotebookFloatingToolbarProps {
   holdDockVisible?: boolean;
 }
 
-export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = ({ editor, engine, saveKey, workspaceId, onConvertHandwriting, embedded = false, hideCollapseButton = false, fullscreenToolOnly = false, availableWidth, pageUtilities, overflowActions, holdDockVisible = false }) => {
+export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = ({ editor, engine, saveKey, workspaceId, onConvertHandwriting, onConvertHandwritingToMath, embedded = false, hideCollapseButton = false, fullscreenToolOnly = false, availableWidth, pageUtilities, overflowActions, holdDockVisible = false }) => {
   const isPhone = useIsMobileViewport();
   const compactTools = useIsMobileViewport(1023);
   // Derive the displayed tool from the same ToolManager snapshot used by input routing.
@@ -253,12 +269,12 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
     if (dock) dock.dataset.dockHidden = dockHidden ? 'true' : 'false';
   }, [dockHidden, inMobileDock]);
 
-  const { 
+  const {
     notebookModeLevel, setNotebookModeLevel,
     isToolbarCollapsed, setToolbarCollapsed,
     toggleNotebookPane
   } = useLayoutStore();
-  
+
   const [toolSettings, setToolSettings] = useState<Record<DrawingTool, ToolSettings>>(() => ({ ...DEFAULT_TOOL_SETTINGS }));
   const [recentToolColors, setRecentToolColors] = useState<Record<DrawingTool, string[]>>(() => ({
     pen: [...QUICK_COLOR_PRESETS.pen],
@@ -271,18 +287,18 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
   const [handwritingSettings, setHandwritingSettings] = useState<HandwritingToolPreferences>(() => ({ ...DEFAULT_HANDWRITING_TOOL_PREFERENCES }));
   const [scribbleToErase, setScribbleToErase] = useState(false);
   const [circleToSelect, setCircleToSelect] = useState(false);
-  const [straightLineRecognition, setStraightLineRecognition] = useState(false);
+  const [straightLineRecognition, setStraightLineRecognition] = useState(true);
   const [snapRecognizedLines, setSnapRecognizedLines] = useState(true);
-  const [roughShapeRecognition, setRoughShapeRecognition] = useState(false);
-  const [snapRecognizedShapes, setSnapRecognizedShapes] = useState(false);
+  const [roughShapeRecognition, setRoughShapeRecognition] = useState(true);
+  const [snapRecognizedShapes, setSnapRecognizedShapes] = useState(true);
   const [, setSelectionRevision] = useState(0);
   const preferencesLoadedRef = useRef(false);
-  
+
   const containerRef = useRef<HTMLDivElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
   const overflowAnchorRef = useRef<HTMLButtonElement>(null);
   const gestureAnchorRef = useRef<HTMLButtonElement>(null);
-  
+
   const [containerWidth, setContainerWidth] = useState<number | null>(null);
 
   // Sheets share the actual dock boundary, including safe-area padding and
@@ -390,12 +406,19 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
       const savedHandwritingSettings = sanitizeHandwritingToolPreferences(raw?.handwritingSettings);
       setHandwritingSettings(savedHandwritingSettings);
       engine.handwriting.setPreferences(savedHandwritingSettings);
+      const hasHoldSnapDefaultsV2 = Number(raw?.version ?? 1) >= 2;
       const savedScribbleToErase = raw?.gestureSettings?.scribbleToErase === true;
       const savedCircleToSelect = raw?.gestureSettings?.circleToSelect === true;
-      const savedStraightLineRecognition = raw?.gestureSettings?.straightLineRecognition === true;
+      const savedStraightLineRecognition = hasHoldSnapDefaultsV2
+        ? raw?.gestureSettings?.straightLineRecognition !== false
+        : true;
       const savedSnapRecognizedLines = raw?.gestureSettings?.snapRecognizedLines !== false;
-      const savedRoughShapeRecognition = raw?.gestureSettings?.roughShapeRecognition === true;
-      const savedSnapRecognizedShapes = raw?.gestureSettings?.snapRecognizedShapes === true;
+      const savedRoughShapeRecognition = hasHoldSnapDefaultsV2
+        ? raw?.gestureSettings?.roughShapeRecognition !== false
+        : true;
+      const savedSnapRecognizedShapes = hasHoldSnapDefaultsV2
+        ? raw?.gestureSettings?.snapRecognizedShapes !== false
+        : true;
       const savedRulerEnabled = raw?.gestureSettings?.rulerEnabled === true;
       setScribbleToErase(savedScribbleToErase);
       setCircleToSelect(savedCircleToSelect);
@@ -420,7 +443,7 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
     if (!workspaceId || !preferencesLoadedRef.current) return;
     const timeout = setTimeout(() => {
       const value = {
-        version: 1,
+        version: 2,
         toolSettings,
         recentToolColors,
         eraserSettings,
@@ -488,7 +511,7 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
 
   const isConfigurableDrawingTool = (tool: string): tool is DrawingTool => DRAWING_TOOLS.includes(tool as DrawingTool);
   const isDrawingTool = (tool: string): tool is DrawingToolId => tool === 'laser' || isConfigurableDrawingTool(tool);
-  const isShapeTool = (tool: string): tool is ShapeType => ['rectangle', 'rounded-rectangle', 'ellipse', 'triangle', 'diamond', 'arrow', 'line'].includes(tool);
+  const isShapeTool = (tool: string): tool is ShapeType => ['rectangle', 'rounded-rectangle', 'ellipse', 'triangle', 'diamond', 'star', 'pentagon', 'hexagon', 'arrow', 'double-arrow', 'line'].includes(tool);
 
   const handleToolClick = (toolId: string) => {
     if (toolId !== 'text' && editor && !editor.isDestroyed && editor.isFocused) {
@@ -667,12 +690,12 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
         try {
           const { canvasRepository } = await import('@/repositories/CanvasRepository');
           const userId = useAuthStore.getState().user?.id || null;
-          
+
           const mimeType = file.type || 'image/png';
           const effectivePageId = saveKey || activePageId;
           if (!effectivePageId) return;
-          const imgData = await canvasRepository.storeImage(userId, effectivePageId, file.name, mimeType, buffer);
-          
+          const imgData = await canvasRepository.storeImage(userId, effectivePageId, file.name, mimeType, buffer, workspaceId ?? activeWorkspaceId ?? undefined);
+
           const imgUrl = URL.createObjectURL(new Blob([buffer], { type: mimeType }));
           const img = new Image();
           img.onload = () => {
@@ -702,9 +725,12 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
             };
 
             engine.images.cacheImage(imgData.id, img);
+            // Decoding owns the temporary URL; the image element keeps its
+            // decoded pixels and rendering now goes through the canvas layer.
+            URL.revokeObjectURL(imgUrl);
             engine.images.addImage(newImg);
             engine.drawing.redraw();
-            
+
             // Switch to select tool and highlight the inserted image
             engine.tools.setMode('select');
             engine.selection.clearSelection();
@@ -734,10 +760,9 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
                 notebookRepository.saveDrawingData(targetWorkspaceId, targetNotebookId, effectivePageId, engine.getDrawingData());
               }
             }
-
-            URL.revokeObjectURL(imgUrl);
           };
           img.onerror = (err) => {
+            URL.revokeObjectURL(imgUrl);
             console.error('Failed to decode inserted image:', err);
           };
           img.src = imgUrl;
@@ -902,7 +927,7 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
   const selectedImage = activeTool === 'select' && selectedElements.length === 1 && selectedElements[0].type === 'image'
     ? engine.images.getImages().find(image => image.id === selectedElements[0].id)
     : undefined;
-  const selectedLine = activeTool === 'select' && selectedElements.length === 1 && selectedElements[0].type === 'shape' ? engine.shapes.getShapes().find(shape => shape.id === selectedElements[0].id && (shape.shapeType === 'line' || shape.shapeType === 'arrow')) : undefined;
+  const selectedLine = activeTool === 'select' && selectedElements.length === 1 && selectedElements[0].type === 'shape' ? engine.shapes.getShapes().find(shape => shape.id === selectedElements[0].id && isLinearShapeType(shape.shapeType)) : undefined;
   const showSelectionGuide = !isPhone && activeTool === 'select' && !selectedImage && !selectedLine;
 
   return (
@@ -1042,16 +1067,16 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
           {mobileQuickTools.includes('eraser') && <ToolButton icon={<Eraser size={18} />} active={activeTool === 'eraser'} onClick={() => handleToolClick('eraser')} tooltip="Eraser (E)" />}
           {mobileQuickTools.includes('text') && <ToolButton icon={<Type size={18} />} active={activeTool === 'text'} onClick={() => handleToolClick('text')} tooltip="Text (T)" />}
         </>}
-        
+
         {layout.visible.map((groupId, index) => (
           <React.Fragment key={groupId}>
             {groupId === 'active-tool' ? (
               <ToolButton
                 icon={<ToolGlyph tool={activeTool} color={getActiveToolColor(activeTool, toolSettings)} />}
                 active
-                hasPopup={isConfigurableDrawingTool(activeTool) || activeTool === 'eraser' || activeTool === 'laser'}
+                hasPopup={isConfigurableDrawingTool(activeTool) || activeTool === 'eraser' || activeTool === 'laser' || isShapeTool(activeTool)}
                 onClick={() => {
-                  if (isConfigurableDrawingTool(activeTool) || activeTool === 'eraser' || activeTool === 'laser') {
+                  if (isConfigurableDrawingTool(activeTool) || activeTool === 'eraser' || activeTool === 'laser' || isShapeTool(activeTool)) {
                     handleToolClick(activeTool);
                   } else {
                     setShowOverflow(true);
@@ -1234,16 +1259,36 @@ export const NotebookFloatingToolbar: React.FC<NotebookFloatingToolbarProps> = (
           yield to the active pen/pencil presets instead of stacking over them. */}
       <TextFormattingStrip editor={editor} engine={engine} enabled={activeTool === 'text'} />
 
-      {hasSelectedStrokes && onConvertHandwriting && (
-        <button
-          type="button"
-          onClick={onConvertHandwriting}
-          className={`panvas-floating-surface pointer-events-auto absolute left-1/2 top-full flex -translate-x-1/2 items-center gap-1.5 whitespace-nowrap px-3 py-2 text-xs font-medium text-panvas-text-primary hover:bg-panvas-bg-hover focus-ring max-[599px]:py-1.5 max-[599px]:text-2xs ${showInlineWritingPresets || showHandwritingSettings || showSelectionGuide ? 'mt-14 max-[599px]:mt-12' : 'mt-2'}`}
-          title="Convert selected handwriting to text"
+      {hasSelectedStrokes && (onConvertHandwriting || onConvertHandwritingToMath) && (
+        <div
+          className={`panvas-floating-surface pointer-events-auto absolute left-1/2 top-full flex -translate-x-1/2 items-center gap-1 whitespace-nowrap p-1 ${showInlineWritingPresets || showHandwritingSettings || showSelectionGuide ? 'mt-14 max-[599px]:mt-12' : 'mt-2'}`}
         >
-          <Languages size={14} className="text-panvas-accent-blue" aria-hidden="true" />
-          Convert to Text
-        </button>
+          {onConvertHandwriting && (
+            <button
+              type="button"
+              onClick={onConvertHandwriting}
+              className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-panvas-text-primary hover:bg-panvas-bg-hover focus-ring max-[599px]:py-1 max-[599px]:text-2xs"
+              title="Convert selected handwriting to text"
+            >
+              <Languages size={14} className="text-panvas-accent-blue" aria-hidden="true" />
+              Convert to Text
+            </button>
+          )}
+          {onConvertHandwriting && onConvertHandwritingToMath && (
+            <div className="h-4 w-px bg-panvas-border-subtle" aria-hidden="true" />
+          )}
+          {onConvertHandwritingToMath && (
+            <button
+              type="button"
+              onClick={onConvertHandwritingToMath}
+              className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-panvas-text-primary hover:bg-panvas-bg-hover focus-ring max-[599px]:py-1 max-[599px]:text-2xs"
+              title="Convert selected handwriting to math equation"
+            >
+              <Sigma size={14} className="text-panvas-accent-purple" aria-hidden="true" />
+              Convert to Math
+            </button>
+          )}
+        </div>
       )}
 
       {inMobileDock && dockHidden && createPortal(
@@ -2090,7 +2135,7 @@ function EraserPopup({ settings, onUpdate, onClose }: {
           />
         </div>
         <div className="rounded-lg bg-panvas-bg-secondary border border-panvas-border-subtle p-3 flex items-center justify-center">
-          <div 
+          <div
             className="rounded-full border-2 border-panvas-border-strong bg-panvas-bg-primary"
             style={{ width: Math.min(settings.thickness * 3, 80), height: Math.min(settings.thickness * 3, 80) }}
           />
@@ -2119,19 +2164,22 @@ function ShapePopup({ lineStyle, onLineStyle, activeShape, color, thickness, opa
   const shapes: Array<{ id: ShapeType; label: string }> = [
     { id: 'rectangle', label: 'Rectangle' }, { id: 'rounded-rectangle', label: 'Rounded' },
     { id: 'ellipse', label: 'Ellipse' }, { id: 'triangle', label: 'Triangle' },
-    { id: 'diamond', label: 'Diamond' }, { id: 'line', label: 'Line' }, { id: 'arrow', label: 'Arrow' },
+    { id: 'diamond', label: 'Diamond' }, { id: 'star', label: 'Star' },
+    { id: 'pentagon', label: 'Pentagon' }, { id: 'hexagon', label: 'Hexagon' },
+    { id: 'line', label: 'Line' }, { id: 'arrow', label: 'Arrow' },
+    { id: 'double-arrow', label: '2x Arrow' },
   ];
   return (
-    <div className="w-[300px] rounded-2xl border border-panvas-border-strong bg-panvas-bg-primary text-panvas-text-primary shadow-2xl">
+    <div className="w-[310px] rounded-2xl border border-panvas-border-strong bg-panvas-bg-primary text-panvas-text-primary shadow-2xl">
       <div className="flex items-center justify-between border-b border-panvas-border-subtle px-4 py-3">
         <span className="text-sm font-semibold">Shape settings</span>
         <button type="button" onClick={onClose} className="text-panvas-text-secondary hover:text-panvas-text-primary" aria-label="Close shape settings" title="Close shape settings"><X size={14} /></button>
       </div>
       <div className="space-y-4 p-4">
-        <div className="grid grid-cols-4 gap-1">
-          {shapes.map(shape => <button key={shape.id} type="button" onClick={() => onShape(shape.id)} className={`rounded-md px-2 py-1.5 text-2xs focus-ring ${activeShape === shape.id ? 'bg-panvas-accent-blue/15 text-panvas-accent-blue ring-1 ring-panvas-accent-blue/40' : 'bg-panvas-bg-secondary text-panvas-text-secondary hover:bg-panvas-bg-hover'}`}>{shape.label}</button>)}
+        <div className="grid grid-cols-3 gap-1">
+          {shapes.map(shape => <button key={shape.id} type="button" onClick={() => onShape(shape.id)} className={`flex items-center justify-center gap-1 rounded-md px-2 py-1.5 text-2xs focus-ring ${activeShape === shape.id ? 'bg-panvas-accent-blue/15 text-panvas-accent-blue ring-1 ring-panvas-accent-blue/40' : 'bg-panvas-bg-secondary text-panvas-text-secondary hover:bg-panvas-bg-hover'}`}><ToolGlyph tool={shape.id} size={12} /><span>{shape.label}</span></button>)}
         </div>
-        {(activeShape === 'line' || activeShape === 'arrow') && <div className="grid grid-cols-3 gap-1" role="group" aria-label="Line style">
+        {isLinearShapeType(activeShape) && <div className="grid grid-cols-3 gap-1" role="group" aria-label="Line style">
           {LINE_STYLES.map(style => <button key={style} type="button" aria-pressed={lineStyle === style} onClick={() => onLineStyle(style)} className={`rounded-md border p-1.5 text-2xs capitalize focus-ring ${lineStyle === style ? 'border-panvas-accent-blue bg-panvas-bg-active' : 'border-panvas-border-subtle hover:bg-panvas-bg-hover'}`}>
             <svg viewBox="0 0 80 24" className="h-6 w-full" aria-hidden="true">{(() => { const g = buildLineStyleGeometry({ id: 'preview', type: 'shape', createdAt: 0, shapeType: 'line', x: 5, y: 12, width: 70, height: 0, rotation: 0, strokeWidth: 1.5, color, fill: null, lineStyle: style }); return <g stroke="currentColor" strokeWidth="1.5" fill="none">{g.paths.map((path, i) => <polyline key={i} points={path.map(p => `${p.x},${p.y}`).join(' ')} />)}{g.dots.map((p, i) => <circle key={i} cx={p.x} cy={p.y} r={g.radius} fill="currentColor" />)}</g>; })()}</svg>{style}
           </button>)}
@@ -2363,7 +2411,7 @@ function ToolButton({ icon, active, onClick, tooltip, hasPopup, disabled }: { ic
       aria-label={tooltip}
       aria-pressed={active}
       className={`panvas-tool-control relative flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl p-2 transition-all duration-150 focus-ring max-[599px]:h-9 max-[599px]:w-9 max-[599px]:rounded-lg max-[599px]:p-1.5 ${
-        active 
+        active
           ? 'bg-panvas-accent-blue/10 text-panvas-accent-blue font-bold shadow-sm ring-1 ring-panvas-accent-blue/50'
           : 'text-panvas-text-secondary hover:bg-panvas-bg-hover hover:text-panvas-text-primary active:scale-95'
       }`}

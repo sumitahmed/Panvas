@@ -26,8 +26,12 @@ export function buildLineStyleGeometry(shape: Shape) {
     const amplitude = Math.min(length / 8, Math.max(3, width * 1.5));
     paths.push(Array.from({ length: steps + 1 }, (_, i) => map(length * i / steps, amplitude * (style === 'wavy' ? Math.sin(i / steps * cycles * Math.PI * 2) : [0, 1, 0, -1][i % 4]))));
   } else paths.push([map(0), map(length)]);
-  if (shape.shapeType === 'arrow') {
-    for (const sign of [-1, 1]) paths.push([map(length), map(length - 15 * Math.cos(Math.PI / 6), sign * 15 * Math.sin(Math.PI / 6))]);
+  const barb = Math.min(15, Math.max(6, length * 0.35));
+  if (shape.shapeType === 'arrow' || shape.shapeType === 'double-arrow') {
+    for (const sign of [-1, 1]) paths.push([map(length), map(length - barb * Math.cos(Math.PI / 6), sign * barb * Math.sin(Math.PI / 6))]);
+  }
+  if (shape.shapeType === 'double-arrow') {
+    for (const sign of [-1, 1]) paths.push([map(0), map(barb * Math.cos(Math.PI / 6), sign * barb * Math.sin(Math.PI / 6))]);
   }
   const all = [...paths.flat(), ...dots];
   if (!all.length) all.push(map(0));

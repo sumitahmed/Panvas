@@ -21,12 +21,12 @@ import {
 import { useWorkspaceStore } from '@/stores/workspaceStore';
 import { useUIStore } from '@/stores/uiStore';
 import { useAuthStore } from '@/stores/authStore';
+import { useShallow } from 'zustand/react/shallow';
 import { WorkspaceTree } from '@/components/workspace/WorkspaceTree';
 import { TrashSection } from './TrashSection';
 import { canvasRepository } from '@/repositories/CanvasRepository';
 import { notebookRepository } from '@/repositories/NotebookRepository';
 import { useLocation } from 'wouter';
-import { validatePdfImport } from '@/services/pdf/validatePdfImport';
 import { useDismissibleLayer } from '@/components/ui/useDismissibleLayer';
 import { navigateToLibraryView } from '@/services/library/libraryRouteState';
 import { focusWorkspaceTree, navigateWorkspaceTree } from '@/components/workspace/workspaceTreeKeyboard';
@@ -38,38 +38,95 @@ export function Sidebar() {
     workspaces,
     activeWorkspaceId,
     expandedWorkspaceIds,
-    loadRecentFiles,
-    loadTrash,
-    setActiveWorkspace,
-    toggleWorkspaceExpanded,
-    activeCanvasId,
-    setActiveCanvas,
     activeNotebookId,
-    setActiveNotebook,
     activeNotebookSectionId,
-    activePageId,
-    setActivePage,
-    setActiveNotebookSection,
-    loadWorkspaceContents,
     notebooks,
     canvasFiles,
     deletedWorkspaces,
     deletedFolders,
     deletedCanvases,
-    notebookSections
-  } = useWorkspaceStore();
+    notebookSections,
+    hasNoActiveDocument,
+  } = useWorkspaceStore(useShallow(state => ({
+    workspaces: state.workspaces,
+    activeWorkspaceId: state.activeWorkspaceId,
+    expandedWorkspaceIds: state.expandedWorkspaceIds,
+    activeNotebookId: state.activeNotebookId,
+    activeNotebookSectionId: state.activeNotebookSectionId,
+    notebooks: state.notebooks,
+    canvasFiles: state.canvasFiles,
+    deletedWorkspaces: state.deletedWorkspaces,
+    deletedFolders: state.deletedFolders,
+    deletedCanvases: state.deletedCanvases,
+    notebookSections: state.notebookSections,
+    hasNoActiveDocument: !state.activeCanvasId && !state.activePageId,
+  })));
+  const {
+    loadRecentFiles,
+    loadTrash,
+    setActiveWorkspace,
+    toggleWorkspaceExpanded,
+    setActiveCanvas,
+    setActiveNotebook,
+    setActivePage,
+    setActiveNotebookSection,
+    loadWorkspaceContents,
+  } = useWorkspaceStore.getState();
 
-  const { openCreateDialog, openContextMenu, showToast } = useUIStore();
-  const { user } = useAuthStore();
+  const { openCreateDialog, openContextMenu, showToast } = useUIStore(useShallow(state => ({
+    openCreateDialog: state.openCreateDialog,
+    openContextMenu: state.openContextMenu,
+    showToast: state.showToast,
+  })));
+  const user = useAuthStore(state => state.user);
   const [isNewMenuOpen, setIsNewMenuOpen] = useState(false);
   const newMenuRef = useRef<HTMLDivElement>(null);
   const treeRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const rows = [...treeRef.current?.querySelectorAll<HTMLElement>('[role="treeitem"]') ?? []];
+
+  const syncTreeTabIndex = React.useCallback(() => {
+    const container = treeRef.current;
+    if (!container) return;
     const focused = document.activeElement?.closest<HTMLElement>('[role="treeitem"]');
-    const entry = focused && treeRef.current?.contains(focused) ? focused : rows.find(row => row.getAttribute('aria-current') === 'page') ?? rows[0];
-    for (const row of rows) row.tabIndex = row === entry ? 0 : -1;
-  }, [workspaces, activePageId, activeCanvasId, expandedWorkspaceIds]);
+    let nextTarget: HTMLElement | null = focused && container.contains(focused) ? focused : null;
+    if (!nextTarget) {
+      const { activePageId: pageId, activeCanvasId: canvasId } = useWorkspaceStore.getState();
+      const targetId = pageId ?? canvasId;
+      if (targetId) {
+        nextTarget = container.querySelector<HTMLElement>(`[data-tree-id="${targetId}"][role="treeitem"]`);
+      }
+      if (!nextTarget) {
+        nextTarget = container.querySelector<HTMLElement>('[role="treeitem"][aria-current="page"]')
+          ?? container.querySelector<HTMLElement>('[role="treeitem"]');
+      }
+    }
+    const prevZero = container.querySelectorAll<HTMLElement>('[role="treeitem"][tabindex="0"]');
+    for (const el of prevZero) {
+      if (el !== nextTarget) el.tabIndex = -1;
+    }
+    if (nextTarget && nextTarget.tabIndex !== 0) {
+      nextTarget.tabIndex = 0;
+    }
+  }, []);
+
+  useEffect(() => {
+    syncTreeTabIndex();
+  }, [workspaces, expandedWorkspaceIds, syncTreeTabIndex]);
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const unsubscribe = useWorkspaceStore.subscribe((state, prevState) => {
+      if (state.activePageId === prevState.activePageId && state.activeCanvasId === prevState.activeCanvasId) return;
+      if (timer !== null) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        syncTreeTabIndex();
+      }, 80);
+    });
+    return () => {
+      unsubscribe();
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [syncTreeTabIndex]);
 
   useDismissibleLayer(isNewMenuOpen, newMenuRef, () => setIsNewMenuOpen(false));
   const fileInputRef = React.useRef<HTMLInputElement>(null);
@@ -78,13 +135,14 @@ export function Sidebar() {
   const handlePdfImport = async (file: File, sectionId: string) => {
     const section = notebookSections.find(s => s.id === sectionId);
     if (!section) return;
-    
+
     const notebook = notebooks.find(n => n.id === section.notebookId);
     if (!notebook) return;
 
     try {
       showToast('Importing PDF...', 'info');
       const buffer = await file.arrayBuffer();
+      const { validatePdfImport } = await import('@/services/pdf/validatePdfImport');
       await validatePdfImport(buffer);
       const pdfData = await canvasRepository.storePdf(user?.id || null, 'temp', file.name, buffer);
 
@@ -138,7 +196,7 @@ export function Sidebar() {
         }
       }
     };
-    
+
     window.addEventListener('panvas:import-pdf', handleImportEvent);
     window.addEventListener('panvas:import-pdf-file', handleImportEvent);
     return () => {
@@ -154,14 +212,14 @@ export function Sidebar() {
 
   return (
     <aside className="panvas-sidebar h-full w-full flex-shrink-0 flex flex-col bg-panvas-bg-primary border-r border-panvas-border-subtle text-xs">
-      <input 
-        type="file" 
-        accept="application/pdf" 
-        ref={fileInputRef} 
+      <input
+        type="file"
+        accept="application/pdf"
+        ref={fileInputRef}
         onChange={handleFileInputChange}
-        className="hidden" 
+        className="hidden"
       />
-      
+
       <div className="px-3 pt-3 pb-2.5 flex-shrink-0">
         <div className="flex items-center justify-between px-1 mb-2.5">
           <span className="text-[10px] font-semibold tracking-[0.13em] text-panvas-text-tertiary uppercase">Library</span>
@@ -200,25 +258,25 @@ export function Sidebar() {
 
       <div className="flex-1 overflow-y-auto px-2.5 pb-3 space-y-4">
         <nav aria-label="Library navigation" className="space-y-0.5">
-          <SidebarNavItem 
-            icon={<Home size={16} />} 
-            label="Library" 
-            isActive={!activeCanvasId && !activePageId} 
+          <SidebarNavItem
+            icon={<Home size={16} />}
+            label="Library"
+            isActive={hasNoActiveDocument}
             onClick={() => {
               setActiveCanvas(null);
               setActivePage(null);
               setActiveNotebook(null);
               navigateToLibraryView('library');
               navigate('/app/library');
-            }} 
+            }}
           />
         </nav>
 
         <section aria-labelledby="workspaces-heading">
           <div className="flex items-center justify-between px-2 pb-1.5 group">
             <span id="workspaces-heading" className="text-[10px] font-semibold tracking-[0.12em] text-panvas-text-tertiary uppercase">Workspaces</span>
-            <button 
-              onClick={() => openCreateDialog('workspace')} 
+            <button
+              onClick={() => openCreateDialog('workspace')}
               className="p-1 -mr-1 rounded text-panvas-text-tertiary hover:bg-panvas-bg-hover hover:text-panvas-text-primary transition-colors duration-150 focus-ring"
               aria-label="Create workspace"
             >
@@ -281,7 +339,7 @@ function NewItemAction({ icon, label, description, onClick, close }: { icon: Rea
 
 function SidebarNavItem({ icon, label, isActive, onClick, badge, placeholder = false }: { icon: React.ReactNode, label: string, isActive?: boolean, onClick?: () => void, badge?: number, placeholder?: boolean }) {
   return (
-    <button 
+    <button
       onClick={onClick}
       disabled={placeholder}
       title={placeholder ? `${label} view will be available in a future phase` : label}
@@ -348,7 +406,7 @@ function SidebarSection({
   };
   const [localIsExpanded, setLocalIsExpanded] = React.useState(defaultExpanded);
   const isExpanded = controlledIsExpanded !== undefined ? controlledIsExpanded : localIsExpanded;
-  
+
   const handleToggle = () => {
     if (onToggleExpanded) {
       onToggleExpanded();
@@ -358,7 +416,7 @@ function SidebarSection({
   };
 
   const [isDragOver, setIsDragOver] = React.useState(false);
-  const { moveFolder, moveCanvas } = useWorkspaceStore();
+  const { moveFolder, moveCanvas } = useWorkspaceStore.getState();
 
   const handleDragOver = (e: React.DragEvent) => {
     if (!workspaceId) return;
@@ -384,7 +442,7 @@ function SidebarSection({
       const dataStr = e.dataTransfer.getData('application/json');
       if (!dataStr) return;
       const data = JSON.parse(dataStr);
-      
+
       if (data.type === 'folder') {
         await moveFolder(data.id, workspaceId);
       } else if (data.type === 'canvas') {

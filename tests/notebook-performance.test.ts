@@ -4,7 +4,13 @@ import { residentPageIds, reuseResidentPageIds } from '../src/components/noteboo
 import { InputManager } from '../src/components/notebook/engine/InputManager.ts';
 import { ToolManager } from '../src/components/notebook/engine/ToolManager.ts';
 import { WetInkSurface } from '../src/components/notebook/engine/WetInkSurface.ts';
-import { getBrowserCanvasVisualScale, resolveCanvasBackingScale, ViewportManager } from '../src/components/notebook/engine/ViewportManager.ts';
+import {
+  getBrowserCanvasVisualScale,
+  MAX_ACTIVE_CANVAS_PIXELS,
+  resolveCanvasBackingScale,
+  resolveViewportRenderWindow,
+  ViewportManager,
+} from '../src/components/notebook/engine/ViewportManager.ts';
 
 test('120 scroll positions within the same resident rows retain React state identity', () => {
   const positions = Array.from({ length: 24 }, (_, i) => ({ id: `${i}`, x: 0, y: i * 1140, width: 794, height: 1123 }));
@@ -207,3 +213,137 @@ test('wet ink keeps one connected spare across a handwriting burst and avoids re
   surface.dispose();
   assert.equal(surface.canvas.isConnected, false);
 }));
+
+test('ViewportManager 2D render window round-trips coordinates with Research Space offsets and ignores PDF rotation', () => {
+  const viewport = new ViewportManager();
+  viewport.setPageCoordinateTransform(0, 794, 1123, 240, 180);
+  viewport.setRenderWindowRect({ left: 150, top: 210, width: 420, height: 320 });
+
+  const pt = { x: 125.5, y: 190.25 };
+  const canvasPt = viewport.pageToCanvas(pt.x, pt.y);
+  assert.deepEqual(canvasPt, { x: 125.5 + 240 - 150, y: 190.25 + 180 - 210 });
+  assert.deepEqual(viewport.canvasToPage(canvasPt.x, canvasPt.y), pt);
+
+  const bounds = viewport.getRenderWindowBounds();
+  assert.deepEqual(bounds, {
+    left: 150 - 240,
+    top: 210 - 180,
+    right: 150 + 420 - 240,
+    bottom: 210 + 320 - 180,
+  });
+
+  for (const rotation of [90, 180, 270] as const) {
+    viewport.setPageCoordinateTransform(rotation, 794, 1123, 0, 0);
+    viewport.setRenderWindowRect({ left: 150, top: 210, width: 420, height: 320 });
+    assert.deepEqual(viewport.getRenderWindowOrigin(), { x: 0, y: 0 });
+    assert.equal(viewport.getRenderWindowBounds(), null);
+  }
+});
+
+test('multi-layer A4 at 100% keeps native DPR backing scale across L = 1, 2, 4 layers', () => {
+  for (const dpr of [1, 1.25, 2] as const) {
+    for (const layerCount of [1, 2, 4] as const) {
+      const budget = Math.floor(MAX_ACTIVE_CANVAS_PIXELS / layerCount);
+      const scale = resolveCanvasBackingScale(dpr, 1, 794, 1123, 1, budget);
+      assert.equal(scale, dpr, `DPR=${dpr}, L=${layerCount} must keep full native DPR at 100% zoom`);
+    }
+  }
+});
+
+test('resolveViewportRenderWindow uses full page at 100%, 2D windowing at 800%, and hysteresis on small pans', () => {
+  const full = resolveViewportRenderWindow({
+    pageWidth: 794,
+    pageHeight: 1123,
+    zoom: 1,
+    dpr: 1.25,
+    viewportLocal: { left: 0, top: 0, width: 794, height: 700 },
+  });
+  assert.equal(full.windowed, false);
+  assert.deepEqual({ left: full.left, top: full.top, width: full.width, height: full.height }, {
+    left: 0,
+    top: 0,
+    width: 794,
+    height: 1123,
+  });
+
+  for (const dpr of [1.25, 2.0] as const) {
+    const win = resolveViewportRenderWindow({
+      pageWidth: 794,
+      pageHeight: 1123,
+      zoom: 8,
+      dpr,
+      viewportLocal: { left: 250, top: 350, width: 140, height: 90 },
+    });
+    assert.equal(win.windowed, true);
+    assert.ok(win.left <= 250 && win.left + win.width >= 390, `DPR=${dpr} horizontal coverage`);
+    assert.ok(win.top <= 350 && win.top + win.height >= 440, `DPR=${dpr} vertical coverage`);
+    const scale = resolveCanvasBackingScale(dpr, 8, win.width, win.height, 1);
+    assert.ok(scale >= dpr * 8 * 0.99, `DPR=${dpr} at 800% keeps native backing scale (${scale} vs ${dpr * 8})`);
+  }
+
+  const initial = resolveViewportRenderWindow({
+    pageWidth: 794,
+    pageHeight: 1123,
+    zoom: 8,
+    dpr: 1.25,
+    viewportLocal: { left: 300, top: 400, width: 140, height: 90 },
+  });
+  const smallPan = resolveViewportRenderWindow({
+    pageWidth: 794,
+    pageHeight: 1123,
+    zoom: 8,
+    dpr: 1.25,
+    viewportLocal: { left: 305, top: 404, width: 140, height: 90 },
+    previous: initial,
+  });
+  assert.equal(smallPan, initial, 'small pan inside overscan margin reuses previous window identity');
+
+  const largePan = resolveViewportRenderWindow({
+    pageWidth: 794,
+    pageHeight: 1123,
+    zoom: 8,
+    dpr: 1.25,
+    viewportLocal: { left: 520, top: 760, width: 140, height: 90 },
+    previous: initial,
+  });
+  assert.notEqual(largePan, initial, 'large pan outside overscan rebases render window');
+  assert.ok(largePan.left <= 520 && largePan.left + largePan.width >= 660);
+  assert.ok(largePan.top <= 760 && largePan.top + largePan.height >= 850);
+});
+
+test('ViewportManager.configureCanvas avoids width/height reallocation and uses setTransform when dims match', () => withDom(() => {
+  const viewport = new ViewportManager();
+  let widthWrites = 0;
+  let heightWrites = 0;
+  let _width = 0;
+  let _height = 0;
+  const ctxOps: string[] = [];
+  const ctx = {
+    scale: (x: number, y: number) => ctxOps.push(`scale:${x}:${y}`),
+    setTransform: (a: number, b: number, c: number, d: number, e: number, f: number) =>
+      ctxOps.push(`setTransform:${a}:${b}:${c}:${d}:${e}:${f}`),
+  };
+  const canvas: any = {
+    style: {},
+    get width() { return _width; },
+    set width(v: number) { _width = v; widthWrites++; },
+    get height() { return _height; },
+    set height(v: number) { _height = v; heightWrites++; },
+    getContext: () => ctx,
+  };
+
+  assert.equal(viewport.isCanvasBackingUnchanged(canvas, 200, 150, 2), false);
+  viewport.configureCanvas(canvas, 200, 150, 2);
+  assert.equal(widthWrites, 1);
+  assert.equal(heightWrites, 1);
+  assert.equal(ctxOps[0], 'scale:6:6'); // DPR=3 from withDom * zoom=2
+  assert.equal(viewport.isCanvasBackingUnchanged(canvas, 200, 150, 2), true);
+
+  viewport.configureCanvas(canvas, 200, 150, 2);
+  assert.equal(widthWrites, 1, 'second configureCanvas with same dims must not reallocate width');
+  assert.equal(heightWrites, 1, 'second configureCanvas with same dims must not reallocate height');
+  assert.equal(ctxOps[1], 'setTransform:6:0:0:6:0:0');
+
+  viewport.setRenderWindowRect({ left: 10, top: 20, width: 200, height: 150 });
+  assert.equal(viewport.isCanvasBackingUnchanged(canvas, 200, 150, 2), false, 'origin change invalidates signature');
+}, false));

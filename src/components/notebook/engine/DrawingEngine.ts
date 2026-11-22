@@ -6,7 +6,7 @@ import type { InkFamily } from './drawingTypes.ts';
 // Renders strokes onto an HTML5 Canvas.
 // No React dependency — pure TypeScript class.
 
-import type { Stroke, StrokePoint, DrawingToolId, StrokePattern, DrawingData } from './drawingTypes.ts';
+import type { Stroke, StrokePoint, Shape, ImageObject, DrawingToolId, StrokePattern, DrawingData } from './drawingTypes.ts';
 import { DEFAULT_PAGE_LAYER_ID } from './drawingTypes.ts';
 
 /**
@@ -15,7 +15,7 @@ import { DEFAULT_PAGE_LAYER_ID } from './drawingTypes.ts';
  * thread for 40-100 ms. Bound each preview slice by stroke count as well.
  */
 const MAX_PREVIEW_STROKES_PER_SLICE = 32;
-import { ViewportManager } from './ViewportManager.ts';
+import { MAX_ACTIVE_CANVAS_PIXELS, ViewportManager } from './ViewportManager.ts';
 import { ShapeManager } from './ShapeManager.ts';
 import type { ImageManager } from './ImageManager.ts';
 import { SelectionEngine } from './SelectionEngine.ts';
@@ -27,7 +27,8 @@ import { LaserManager } from './LaserManager.ts';
 import { buildStrokePatternGeometry } from './strokePatternGeometry.ts';
 import { gate0Profiler } from '../../../dev/gate0Profiler.ts';
 import { boundsOverlap, eraseBounds, eraseBoundsWithHalfWidth, type EraseBounds } from './capsuleErase.ts';
-import { PenGeometry } from './penGeometry.ts';
+import { StrokeSpatialIndex, intersectBounds, isEmptyBounds, objectIntersectsBounds } from './strokeSpatialIndex.ts';
+import { PenGeometry, type InkBounds } from './penGeometry.ts';
 import { WetInkSurface } from './WetInkSurface.ts';
 import { invalidateStrokeSnapshot as invalidateCachedStrokeSnapshot, primeStrokeSnapshot as primeCachedStrokeSnapshot } from './cloneStrokeSnapshot.ts';
 import type { HandwritingTrace } from '../../../dev/handwritingTrace.ts';
@@ -86,6 +87,13 @@ export class DrawingEngine {
   private _scaleMultiplier = 1;
   private canvasCssWidth = 0;
   private canvasCssHeight = 0;
+  private useLayerPresentationOnly = false;
+  private pendingLayerRedraw = false;
+  private layerRedrawMicrotask = false;
+  private configuredWidth = 0;
+  private configuredHeight = 0;
+  private configuredOriginX = 0;
+  private configuredOriginY = 0;
   private layerCanvases = new Map<string, CanvasRenderingContext2D>();
   /** Identity of the scene payload whose pixels currently live on this surface. */
   private renderedSurfaceKey: unknown = null;
@@ -122,37 +130,217 @@ export class DrawingEngine {
   private liveFrame: number | null = null;
   private pendingInk: Stroke | null = null;
   private pendingLiveRevisionFrom = Infinity;
+  private pendingPredictedPoints: readonly StrokePoint[] | undefined = undefined;
   private lastLiveInk: Stroke | null = null;
+  private readonly liveStrokeScratch: Stroke = {
+    id: '__live__',
+    type: 'stroke',
+    points: [],
+    tool: 'pen',
+    color: '#000000',
+    thickness: 2,
+    opacity: 1,
+    pattern: 'solid',
+    centerline: 'polyline',
+    createdAt: 0,
+  };
+  private readonly displayStrokeScratch: Stroke = {
+    id: '__live__',
+    type: 'stroke',
+    points: [],
+    tool: 'pen',
+    color: '#000000',
+    thickness: 2,
+    opacity: 1,
+    pattern: 'solid',
+    centerline: 'polyline',
+    createdAt: 0,
+  };
+  private livePreviewShape: Shape | null = null;
   private liveTrace: HandwritingTrace | null = null;
   private frameQueuedAt = 0;
   private lastFrameAt = 0;
   private fullDarkView = false;
-  private selectionBackingCanvas: HTMLCanvasElement | null = null;
+  private selectionBackingCanvases = new Map<HTMLCanvasElement, HTMLCanvasElement>();
   private isSelectionDragging = false;
   private selectionBackingReady = false;
   private selectionExcludeIds = new Set<string>();
   private lassoBackingCanvas: HTMLCanvasElement | null = null;
   private isLassoActive = false;
+  private spatialIndex = new StrokeSpatialIndex(stroke => this.getCachedEraseBounds(stroke));
+  private retainedOffscreen = false;
+  private canvasWasConnected = false;
+  private overviewCanvas: HTMLCanvasElement | null = null;
+  private overviewPageWidth = 0;
+  private overviewPageHeight = 0;
+  private overviewSyncFrame: number | null = null;
+
+  private isSurfaceDetached(): boolean {
+    return this.retainedOffscreen || (this.canvasWasConnected && !this.canvas?.isConnected);
+  }
 
   /**
-   * Allocate and prime the selection snapshot surface outside the pointerdown
-   * task. The first 1,100x1,560 backing canvas allocation plus GPU copy can
-   * delay the first drag frame by tens of milliseconds; later drags reuse it.
+   * Mark this engine as retained only off-screen for pixel adoption.
+   * Stops any queued/progressive paints and prevents detached layer-canvas
+   * cleanup from triggering stray redraws on unmounted DOM surfaces.
+   */
+  setRetainedOffscreen(retained: boolean): void {
+    this.retainedOffscreen = retained;
+    if (retained) {
+      this.cancelPaint();
+      this.pendingLayerRedraw = false;
+    }
+  }
+
+  releaseSelectionBackings(): void {
+    for (const backing of this.selectionBackingCanvases.values()) {
+      backing.width = 0;
+      backing.height = 0;
+    }
+    this.selectionBackingCanvases.clear();
+    this.selectionBackingReady = false;
+  }
+
+  releaseLassoBacking(): void {
+    if (this.lassoBackingCanvas) {
+      this.lassoBackingCanvas.width = 0;
+      this.lassoBackingCanvas.height = 0;
+      this.lassoBackingCanvas = null;
+    }
+    this.isLassoActive = false;
+  }
+
+  releasePencilSurface(): void {
+    if (this.pencilSurface) {
+      this.pencilSurface.width = 0;
+      this.pencilSurface.height = 0;
+      this.pencilSurface = undefined;
+    }
+  }
+
+  releaseSelectionSurfaces(): void {
+    this.releaseSelectionBackings();
+    this.releaseLassoBacking();
+  }
+
+  queryStrokesInBounds(bounds: EraseBounds): readonly Stroke[] {
+    return this.spatialIndex.query(bounds, this.strokes).strokes;
+  }
+
+  destroy(): void {
+    this.setOverviewCanvas(null, 0, 0);
+    this.detachCanvas(true);
+    this.spatialIndex.reset();
+    this.surfaceChangeListeners.clear();
+    this.retainedInkPaths.clear();
+    this.retainedStrokeMetrics.clear();
+  }
+
+  setOverviewCanvas(canvas: HTMLCanvasElement | null, pageWidth: number, pageHeight: number): void {
+    if (this.overviewSyncFrame !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(this.overviewSyncFrame);
+      this.overviewSyncFrame = null;
+    }
+    if (!canvas) {
+      if (this.overviewCanvas) {
+        this.overviewCanvas.width = 0;
+        this.overviewCanvas.height = 0;
+      }
+      this.overviewCanvas = null;
+      this.overviewPageWidth = 0;
+      this.overviewPageHeight = 0;
+      return;
+    }
+    this.overviewCanvas = canvas;
+    this.overviewPageWidth = pageWidth;
+    this.overviewPageHeight = pageHeight;
+    this.paintOverviewCanvas(canvas, pageWidth, pageHeight);
+  }
+
+  paintOverviewCanvas(canvas: HTMLCanvasElement, pageWidth: number, pageHeight: number): void {
+    if (!canvas || pageWidth <= 0 || pageHeight <= 0) return;
+    const MAX_OVERVIEW_PIXELS = 2_000_000;
+    const area = Math.max(1, pageWidth * pageHeight);
+    const scale = Math.min(1, Math.sqrt(MAX_OVERVIEW_PIXELS / area));
+    const targetW = Math.max(1, Math.round(pageWidth * scale));
+    const targetH = Math.max(1, Math.round(pageHeight * scale));
+    if (canvas.width !== targetW) canvas.width = targetW;
+    if (canvas.height !== targetH) canvas.height = targetH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, targetW, targetH);
+    ctx.setTransform(scale, 0, 0, scale, 0, 0);
+    this.viewport.applyFullPageTransform(ctx);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'medium';
+    for (const layer of this.layerManager.getLayers()) {
+      if (!layer.visible) continue;
+      this.imageManager.renderImages(ctx, layer.id);
+      for (const stroke of this.strokes) {
+        if ((stroke.layerId ?? DEFAULT_PAGE_LAYER_ID) !== layer.id) continue;
+        this.renderStroke(ctx, stroke);
+      }
+      this.shapeManager.renderShapes(ctx, layer.id);
+    }
+    ctx.restore();
+  }
+
+  scheduleOverviewSync(): void {
+    if (!this.overviewCanvas || this.isSelectionDragging) return;
+    if (typeof requestAnimationFrame !== 'function') {
+      this.paintOverviewCanvas(this.overviewCanvas, this.overviewPageWidth, this.overviewPageHeight);
+      return;
+    }
+    if (this.overviewSyncFrame !== null) return;
+    this.overviewSyncFrame = requestAnimationFrame(() => {
+      this.overviewSyncFrame = null;
+      if (!this.overviewCanvas || this.isSelectionDragging) return;
+      this.paintOverviewCanvas(this.overviewCanvas, this.overviewPageWidth, this.overviewPageHeight);
+    });
+  }
+
+  private selectionSurfaces(): Array<{ layerId: string; ctx: CanvasRenderingContext2D; canvas: HTMLCanvasElement }> {
+    const surfaces: Array<{ layerId: string; ctx: CanvasRenderingContext2D; canvas: HTMLCanvasElement }> = [];
+    for (const layer of this.layerManager.getLayers()) {
+      const ctx = this.layerCanvases.get(layer.id);
+      if (ctx) surfaces.push({ layerId: layer.id, ctx, canvas: ctx.canvas });
+    }
+    if (surfaces.length === 0 && this.ctx && this.canvas) {
+      surfaces.push({ layerId: this.layerManager.getActiveLayerId(), ctx: this.ctx, canvas: this.canvas });
+    }
+    return surfaces;
+  }
+
+  private selectionBackingFor(canvas: HTMLCanvasElement): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | null {
+    let backing = this.selectionBackingCanvases.get(canvas);
+    if (!backing) {
+      backing = document.createElement('canvas');
+      this.selectionBackingCanvases.set(canvas, backing);
+    }
+    if (backing.width !== canvas.width || backing.height !== canvas.height) {
+      backing.width = canvas.width;
+      backing.height = canvas.height;
+    }
+    const ctx = backing.getContext('2d');
+    return ctx ? { canvas: backing, ctx } : null;
+  }
+
+  /**
+   * Allocate and prime the selection snapshot surfaces outside the pointerdown
+   * task. The first backing-canvas allocation plus GPU copy can delay the first
+   * drag frame by tens of milliseconds; later drags reuse them.
    */
   warmSelectionBacking(): void {
     if (!this.canvas || !this.ctx || typeof document === 'undefined') return;
-    if (!this.selectionBackingCanvas) {
-      this.selectionBackingCanvas = document.createElement('canvas');
+    for (const surface of this.selectionSurfaces()) {
+      const backing = this.selectionBackingFor(surface.canvas);
+      if (!backing) continue;
+      backing.ctx.resetTransform();
+      backing.ctx.clearRect(0, 0, backing.canvas.width, backing.canvas.height);
+      backing.ctx.drawImage(surface.canvas, 0, 0);
     }
-    if (this.selectionBackingCanvas.width !== this.canvas.width || this.selectionBackingCanvas.height !== this.canvas.height) {
-      this.selectionBackingCanvas.width = this.canvas.width;
-      this.selectionBackingCanvas.height = this.canvas.height;
-    }
-    const snapCtx = this.selectionBackingCanvas.getContext('2d');
-    if (!snapCtx) return;
-    snapCtx.resetTransform();
-    snapCtx.clearRect(0, 0, this.selectionBackingCanvas.width, this.selectionBackingCanvas.height);
-    snapCtx.drawImage(this.canvas, 0, 0);
   }
 
   beginSelectionDrag(selectedElements: { id: string; type: string }[]): void {
@@ -171,63 +359,90 @@ export class DrawingEngine {
     }
   }
 
+  private rotatedBoxBounds(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    rotationDeg = 0,
+    pad = 0,
+  ): EraseBounds {
+    const x1 = Math.min(x, x + width);
+    const x2 = Math.max(x, x + width);
+    const y1 = Math.min(y, y + height);
+    const y2 = Math.max(y, y + height);
+    if (!rotationDeg) {
+      return { left: x1 - pad, top: y1 - pad, right: x2 + pad, bottom: y2 + pad };
+    }
+    const cx = (x1 + x2) / 2;
+    const cy = (y1 + y2) / 2;
+    const angle = (rotationDeg * Math.PI) / 180;
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+    for (const [px, py] of [[x1 - pad, y1 - pad], [x2 + pad, y1 - pad], [x2 + pad, y2 + pad], [x1 - pad, y2 + pad]]) {
+      const dx = px - cx, dy = py - cy;
+      const rx = cx + dx * cos - dy * sin;
+      const ry = cy + dx * sin + dy * cos;
+      if (rx < left) left = rx;
+      if (rx > right) right = rx;
+      if (ry < top) top = ry;
+      if (ry > bottom) bottom = ry;
+    }
+    return { left, top, right, bottom };
+  }
+
   /**
-   * Build the drag snapshot on the first paint frame. Doing this in the
+   * Build the drag snapshots on the first paint frame. Doing this in the
    * pointerdown task made a 1,200-stroke page block the event handler for a
    * full frame; the gesture state is already usable before the first move.
    */
   private prepareSelectionBacking(): void {
     if (!this.canvas || !this.ctx || typeof document === 'undefined') return;
-    if (!this.selectionBackingCanvas) {
-      this.selectionBackingCanvas = document.createElement('canvas');
-    }
-    if (this.selectionBackingCanvas.width !== this.canvas.width || this.selectionBackingCanvas.height !== this.canvas.height) {
-      this.selectionBackingCanvas.width = this.canvas.width;
-      this.selectionBackingCanvas.height = this.canvas.height;
-    }
-    const snapCtx = this.selectionBackingCanvas.getContext('2d');
-    if (!snapCtx) return;
-    const backingScale = this.canvasCssWidth > 0 ? this.canvas.width / this.canvasCssWidth : 1;
-
-    snapCtx.resetTransform();
-    snapCtx.clearRect(0, 0, this.selectionBackingCanvas.width, this.selectionBackingCanvas.height);
-    snapCtx.drawImage(this.canvas, 0, 0);
+    const surfaces = this.selectionSurfaces();
+    if (surfaces.length === 0) return;
 
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    const expand = (b: EraseBounds) => {
+      if (b.left < minX) minX = b.left;
+      if (b.right > maxX) maxX = b.right;
+      if (b.top < minY) minY = b.top;
+      if (b.bottom > maxY) maxY = b.bottom;
+    };
+    const selectionDamage = this.selectionEngine?.getSelectionDamage?.();
+    if (selectionDamage) expand(selectionDamage);
+
     for (const id of this.selectionExcludeIds) {
       const s = this.getStrokeById(id);
       if (s) {
-        const b = this.getCachedEraseBounds(s);
-        if (b.left < minX) minX = b.left;
-        if (b.right > maxX) maxX = b.right;
-        if (b.top < minY) minY = b.top;
-        if (b.bottom > maxY) maxY = b.bottom;
+        expand(this.getCachedEraseBounds(s));
         continue;
       }
       const shape = this.shapeManager.getShape(id);
       if (shape) {
-        if (shape.x < minX) minX = shape.x;
-        if (shape.x + shape.width > maxX) maxX = shape.x + shape.width;
-        if (shape.y < minY) minY = shape.y;
-        if (shape.y + shape.height > maxY) maxY = shape.y + shape.height;
+        expand(this.rotatedBoxBounds(shape.x, shape.y, shape.width, shape.height, shape.rotation, (shape.strokeWidth || 2) / 2 + 2));
         continue;
       }
       const img = this.imageManager.getImage(id);
       if (img) {
-        if (img.x < minX) minX = img.x;
-        if (img.x + img.width > maxX) maxX = img.x + img.width;
-        if (img.y < minY) minY = img.y;
-        if (img.y + img.height > maxY) maxY = img.y + img.height;
+        expand(this.rotatedBoxBounds(img.x, img.y, img.width, img.height ?? 0, img.rotation || 0, 2));
       }
     }
 
     this.selectionBackingReady = true;
     if (!Number.isFinite(minX) || !Number.isFinite(minY)) {
+      for (const surface of surfaces) {
+        const backing = this.selectionBackingFor(surface.canvas);
+        if (!backing) continue;
+        backing.ctx.resetTransform();
+        backing.ctx.clearRect(0, 0, backing.canvas.width, backing.canvas.height);
+        backing.ctx.drawImage(surface.canvas, 0, 0);
+      }
       return;
     }
 
     const scale = this.viewport.getState().scale;
-    const padding = 48 / Math.max(0.05, scale);
+    const padding = Math.max(48, 48 / Math.max(0.05, scale));
     const damage: EraseBounds = {
       left: minX - padding,
       top: minY - padding,
@@ -235,56 +450,67 @@ export class DrawingEngine {
       bottom: maxY + padding,
     };
 
-    snapCtx.save();
-    snapCtx.scale(backingScale, backingScale);
-    this.viewport.applyTransform(snapCtx);
-    const transform = snapCtx.getTransform();
+    for (const surface of surfaces) {
+      const backing = this.selectionBackingFor(surface.canvas);
+      if (!backing) continue;
+      const snapCtx = backing.ctx;
+      const baseTransform = surface.ctx.getTransform();
 
-    const corners = [
-      [damage.left, damage.top],
-      [damage.right, damage.top],
-      [damage.right, damage.bottom],
-      [damage.left, damage.bottom],
-    ].map(([x, y]) => ({
-      x: transform.a * x + transform.c * y + transform.e,
-      y: transform.b * x + transform.d * y + transform.f,
-    }));
-    const left = Math.floor(Math.min(...corners.map(p => p.x)));
-    const top = Math.floor(Math.min(...corners.map(p => p.y)));
-    const right = Math.ceil(Math.max(...corners.map(p => p.x)));
-    const bottom = Math.ceil(Math.max(...corners.map(p => p.y)));
+      snapCtx.resetTransform();
+      snapCtx.clearRect(0, 0, backing.canvas.width, backing.canvas.height);
+      snapCtx.drawImage(surface.canvas, 0, 0);
 
-    snapCtx.resetTransform();
-    snapCtx.clearRect(left, top, right - left, bottom - top);
+      snapCtx.save();
+      snapCtx.setTransform(baseTransform);
+      this.viewport.applyTransform(snapCtx);
+      const transform = snapCtx.getTransform();
 
-    snapCtx.scale(backingScale, backingScale);
-    this.viewport.applyTransform(snapCtx);
+      const corners = [
+        [damage.left, damage.top],
+        [damage.right, damage.top],
+        [damage.right, damage.bottom],
+        [damage.left, damage.bottom],
+      ].map(([x, y]) => ({
+        x: transform.a * x + transform.c * y + transform.e,
+        y: transform.b * x + transform.d * y + transform.f,
+      }));
+      const left = Math.max(0, Math.floor(Math.min(...corners.map(p => p.x)) - 2));
+      const top = Math.max(0, Math.floor(Math.min(...corners.map(p => p.y)) - 2));
+      const right = Math.min(backing.canvas.width, Math.ceil(Math.max(...corners.map(p => p.x)) + 2));
+      const bottom = Math.min(backing.canvas.height, Math.ceil(Math.max(...corners.map(p => p.y)) + 2));
 
-    for (const layer of this.layerManager.getLayers()) {
-      if (!layer.visible) continue;
-      for (const img of this.imageManager.getImages()) {
-        const imgLayerId = img.layerId ?? DEFAULT_PAGE_LAYER_ID;
-        if (imgLayerId !== layer.id) continue;
-        if (this.selectionExcludeIds.has(img.id)) continue;
-        if (img.x > damage.right || img.x + img.width < damage.left || img.y > damage.bottom || img.y + img.height < damage.top) continue;
-        this.imageManager.renderImage(snapCtx, img);
+      snapCtx.resetTransform();
+      if (right > left && bottom > top) {
+        snapCtx.clearRect(left, top, right - left, bottom - top);
+        snapCtx.beginPath();
+        snapCtx.rect(left, top, right - left, bottom - top);
+        snapCtx.clip();
+
+        snapCtx.setTransform(baseTransform);
+        this.viewport.applyTransform(snapCtx);
+
+        for (const img of this.imageManager.getImages()) {
+          if (this.selectionExcludeIds.has(img.id)) continue;
+          if ((img.layerId ?? DEFAULT_PAGE_LAYER_ID) !== surface.layerId) continue;
+          if (!boundsOverlap(damage, this.rotatedBoxBounds(img.x, img.y, img.width, img.height ?? 0, img.rotation || 0, 2))) continue;
+          this.imageManager.renderImage(snapCtx, img);
+        }
+        const damageStrokeQuery = this.spatialIndex.query(damage, this.strokes);
+        for (const stroke of damageStrokeQuery.strokes) {
+          if (this.selectionExcludeIds.has(stroke.id)) continue;
+          if ((stroke.layerId ?? DEFAULT_PAGE_LAYER_ID) !== surface.layerId) continue;
+          if (!damageStrokeQuery.exactFilterApplied && !boundsOverlap(damage, this.getCachedEraseBounds(stroke))) continue;
+          this.renderStroke(snapCtx, stroke);
+        }
+        for (const shape of this.shapeManager.getShapes()) {
+          if (this.selectionExcludeIds.has(shape.id)) continue;
+          if ((shape.layerId ?? DEFAULT_PAGE_LAYER_ID) !== surface.layerId) continue;
+          if (!boundsOverlap(damage, this.rotatedBoxBounds(shape.x, shape.y, shape.width, shape.height, shape.rotation, (shape.strokeWidth || 2) / 2 + 2))) continue;
+          this.shapeManager.renderShape(snapCtx, shape);
+        }
       }
-      for (const stroke of this.strokes) {
-        const strokeLayerId = stroke.layerId ?? DEFAULT_PAGE_LAYER_ID;
-        if (strokeLayerId !== layer.id) continue;
-        if (this.selectionExcludeIds.has(stroke.id)) continue;
-        if (!boundsOverlap(damage, this.getCachedEraseBounds(stroke))) continue;
-        this.renderStroke(snapCtx, stroke);
-      }
-      for (const shape of this.shapeManager.getShapes()) {
-        const shapeLayerId = shape.layerId ?? DEFAULT_PAGE_LAYER_ID;
-        if (shapeLayerId !== layer.id) continue;
-        if (this.selectionExcludeIds.has(shape.id)) continue;
-        if (shape.x > damage.right || shape.x + shape.width < damage.left || shape.y > damage.bottom || shape.y + shape.height < damage.top) continue;
-        this.shapeManager.renderShape(snapCtx, shape);
-      }
+      snapCtx.restore();
     }
-    snapCtx.restore();
   }
 
   isSelectionDragActive(): boolean {
@@ -293,26 +519,30 @@ export class DrawingEngine {
 
   endSelectionDrag(): void {
     this.isSelectionDragging = false;
-    this.selectionBackingReady = false;
     this.selectionExcludeIds.clear();
+    this.releaseSelectionBackings();
+    this.scheduleOverviewSync();
   }
 
   private renderSceneToContext(targetCtx: CanvasRenderingContext2D, excludeIds?: Set<string>): void {
+    const windowBounds = this.viewport.getRenderWindowBounds();
+    if (windowBounds && isEmptyBounds(windowBounds)) return;
     targetCtx.save();
     this.viewport.applyTransform(targetCtx);
     targetCtx.imageSmoothingEnabled = true;
     targetCtx.imageSmoothingQuality = 'high';
-    const windowBounds = this.viewport.getRenderWindowBounds();
+    const strokeQuery = this.spatialIndex.query(windowBounds, this.strokes);
     for (const layer of this.layerManager.getLayers()) {
       if (!layer.visible) continue;
-      this.imageManager.renderImages(targetCtx, layer.id, excludeIds);
-      for (const stroke of this.strokes) {
+      this.imageManager.renderImages(targetCtx, layer.id, excludeIds, windowBounds);
+      for (const stroke of strokeQuery.strokes) {
         if (excludeIds && excludeIds.has(stroke.id)) continue;
-        if (windowBounds && !boundsOverlap(windowBounds, this.getCachedEraseBounds(stroke))) continue;
         const strokeLayerId = stroke.layerId ?? DEFAULT_PAGE_LAYER_ID;
-        if (strokeLayerId === layer.id) this.renderStroke(targetCtx, stroke);
+        if (strokeLayerId !== layer.id) continue;
+        if (!strokeQuery.exactFilterApplied && windowBounds && !boundsOverlap(windowBounds, this.getCachedEraseBounds(stroke))) continue;
+        this.renderStroke(targetCtx, stroke);
       }
-      this.shapeManager.renderShapes(targetCtx, layer.id, excludeIds);
+      this.shapeManager.renderShapes(targetCtx, layer.id, excludeIds, windowBounds);
     }
     targetCtx.restore();
   }
@@ -323,26 +553,140 @@ export class DrawingEngine {
     this.invalidateRenderedSurface();
     this.shapeManager.setFullDarkView(enabled);
     this.requestRedraw();
+    this.scheduleOverviewSync();
   }
 
   private displayStroke(stroke: Stroke): Stroke {
-    return this.fullDarkView ? { ...stroke, color: fullDarkInkColor(stroke.color) } : stroke;
+    if (!this.fullDarkView) return stroke;
+    const mappedColor = fullDarkInkColor(stroke.color);
+    if (mappedColor === stroke.color) return stroke;
+    this.displayStrokeScratch.id = stroke.id;
+    this.displayStrokeScratch.points = stroke.points;
+    this.displayStrokeScratch.tool = stroke.tool;
+    this.displayStrokeScratch.color = mappedColor;
+    this.displayStrokeScratch.thickness = stroke.thickness;
+    this.displayStrokeScratch.opacity = stroke.opacity;
+    this.displayStrokeScratch.pattern = stroke.pattern;
+    this.displayStrokeScratch.inkFamily = stroke.inkFamily;
+    this.displayStrokeScratch.centerline = stroke.centerline;
+    this.displayStrokeScratch.createdAt = stroke.createdAt;
+    this.displayStrokeScratch.layerId = stroke.layerId;
+    return this.displayStrokeScratch;
   }
 
-  attachLayerCanvas(id: string, canvas: HTMLCanvasElement, width: number, height: number, scale: number): () => void {
-    const ctx = this.viewport.configureCanvas(canvas, width, height, scale / Math.sqrt(Math.max(1, this.layerManager.getLayers().length)));
+  setUseLayerPresentationOnly(enabled: boolean): void {
+    this.useLayerPresentationOnly = enabled;
+  }
+
+  getActiveLayerCanvasElement(): HTMLCanvasElement | null {
+    return (
+      this.layerCanvases.get(this.layerManager.getActiveLayerId())?.canvas
+      ?? this.layerCanvases.values().next().value?.canvas
+      ?? this.canvas
+    );
+  }
+
+  private configureBaseCanvas(canvas: HTMLCanvasElement, cssWidth: number, cssHeight: number): CanvasRenderingContext2D {
+    if (this.useLayerPresentationOnly) {
+      if (canvas.width !== 1 || canvas.height !== 1) {
+        canvas.width = 1;
+        canvas.height = 1;
+      }
+      const cssWidthStr = `${cssWidth}px`;
+      const cssHeightStr = `${cssHeight}px`;
+      if (canvas.style.width !== cssWidthStr) canvas.style.width = cssWidthStr;
+      if (canvas.style.height !== cssHeightStr) canvas.style.height = cssHeightStr;
+      return canvas.getContext('2d')!;
+    }
+    return this.viewport.configureCanvas(canvas, cssWidth, cssHeight, this._scaleMultiplier);
+  }
+
+  private scheduleDeferredLayerRedraw(): void {
+    if (this.layerRedrawMicrotask || !this.canvas || this.isSurfaceDetached()) return;
+    this.layerRedrawMicrotask = true;
+    queueMicrotask(() => {
+      this.layerRedrawMicrotask = false;
+      if (!this.pendingLayerRedraw || this.isSurfaceDetached() || !this.canvas || !this.canvas.isConnected) {
+        this.pendingLayerRedraw = false;
+        return;
+      }
+      this.pendingLayerRedraw = false;
+      if (this.redrawScheduled || this.progressivePaintFrame !== null) return;
+      if (!this.coalesceRedraws) this.invalidateRenderedSurface();
+      this.requestRedraw();
+    });
+  }
+
+  registerLayerCanvas(id: string, canvas: HTMLCanvasElement): () => void {
+    const ctx = canvas.getContext('2d')!;
+    this.layerCanvases.set(id, ctx);
+    return () => {
+      if (this.layerCanvases.get(id) === ctx) {
+        this.layerCanvases.delete(id);
+        if (this.isSurfaceDetached()) {
+          this.cancelPaint();
+          this.pendingLayerRedraw = false;
+          return;
+        }
+        if (this.canvas) {
+          this.pendingLayerRedraw = true;
+          this.scheduleDeferredLayerRedraw();
+        }
+      }
+    };
+  }
+
+  configureLayerCanvas(
+    id: string,
+    canvas: HTMLCanvasElement,
+    width: number,
+    height: number,
+    scale: number,
+    layerCount?: number,
+  ): void {
+    const count = Math.max(1, layerCount ?? this.layerManager.getLayers().length);
+    const maxPixels = Math.floor(MAX_ACTIVE_CANVAS_PIXELS / count);
+    if (this.layerCanvases.has(id) && this.viewport.isCanvasBackingUnchanged(canvas, width, height, scale, maxPixels)) {
+      return;
+    }
+    const ctx = this.viewport.configureCanvas(canvas, width, height, scale, maxPixels);
     this.layerCanvases.set(id, ctx);
     const source = this.pendingSurfaceSource?.layerCanvases.get(id);
-    if (source && source.canvas.width === canvas.width && source.canvas.height === canvas.height) {
+    const sourceOrigin = this.pendingSurfaceSource?.viewport.getRenderWindowOrigin();
+    const myOrigin = this.viewport.getRenderWindowOrigin();
+    if (
+      source
+      && sourceOrigin
+      && sourceOrigin.x === myOrigin.x
+      && sourceOrigin.y === myOrigin.y
+      && source.canvas.width === canvas.width
+      && source.canvas.height === canvas.height
+    ) {
       ctx.save();
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(source.canvas, 0, 0);
       ctx.restore();
-    } else {
-      this.requestRedraw();
+      return;
     }
-    return () => { if (this.layerCanvases.get(id) === ctx) this.layerCanvases.delete(id); this.requestRedraw(); };
+    if (this.canvas) {
+      this.pendingLayerRedraw = true;
+      this.scheduleDeferredLayerRedraw();
+    }
+  }
+
+  flushPendingLayerRedraw(): boolean {
+    if (!this.pendingLayerRedraw || !this.canvas) return false;
+    this.pendingLayerRedraw = false;
+    this.invalidateRenderedSurface();
+    this.requestRedraw();
+    return true;
+  }
+
+  attachLayerCanvas(id: string, canvas: HTMLCanvasElement, width: number, height: number, scale: number, layerCount?: number): () => void {
+    const unregister = this.registerLayerCanvas(id, canvas);
+    this.configureLayerCanvas(id, canvas, width, height, scale, layerCount);
+    return unregister;
   }
 
   constructor(
@@ -363,7 +707,6 @@ export class DrawingEngine {
   }
 
   setScaleMultiplier(mult: number) {
-    if (mult !== this._scaleMultiplier) this.invalidateRenderedSurface();
     this._scaleMultiplier = mult;
   }
 
@@ -374,7 +717,7 @@ export class DrawingEngine {
   getLaserManager(): LaserManager {
     return this.laserManager;
   }
-  
+
   setSelectionEngine(selectionEngine: SelectionEngine) {
     this.selectionEngine = selectionEngine;
   }
@@ -383,21 +726,33 @@ export class DrawingEngine {
   setCanvas(canvas: HTMLCanvasElement, cssWidth: number, cssHeight: number): void {
     this.releaseLaserSurface();
     this.releaseSpareWetInk();
+    this.releaseSelectionSurfaces();
+    this.releasePencilSurface();
     this.cancelPaint();
+    this.retainedOffscreen = false;
+    this.canvasWasConnected = Boolean(canvas.isConnected);
+    this.pendingLayerRedraw = false;
     this.canvas = canvas;
     this.canvasCssWidth = cssWidth;
     this.canvasCssHeight = cssHeight;
+    const origin = this.viewport.getRenderWindowOrigin();
+    this.configuredWidth = cssWidth;
+    this.configuredHeight = cssHeight;
+    this.configuredOriginX = origin.x;
+    this.configuredOriginY = origin.y;
     this.invalidateRenderedSurface();
-    this.ctx = this.viewport.configureCanvas(canvas, cssWidth, cssHeight, this._scaleMultiplier);
+    this.ctx = this.configureBaseCanvas(canvas, cssWidth, cssHeight);
     // Any deferred mount must not copy pixels into a different backing surface.
     this.notifySurfaceChange(false);
   }
 
   /** Detach from canvas element. */
-  detachCanvas(): void {
+  detachCanvas(zeroSurfaces = false): void {
     this.laserManager.clear();
     this.releaseLaserSurface();
     this.cancelPaint();
+    this.releaseSelectionSurfaces();
+    this.releasePencilSurface();
     // Clear the currently owned surface before releasing it. Page activation
     // can replace the engine scene before React commits the next page shell;
     // leaving these pixels alive would expose the outgoing scene for one
@@ -407,23 +762,38 @@ export class DrawingEngine {
       this.ctx.setTransform(1, 0, 0, 1, 0, 0);
       this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
       this.ctx.restore();
+      if (zeroSurfaces) {
+        this.canvas.width = 0;
+        this.canvas.height = 0;
+      }
     }
     for (const context of this.layerCanvases.values()) {
       context.save();
       context.setTransform(1, 0, 0, 1, 0, 0);
       context.clearRect(0, 0, context.canvas.width, context.canvas.height);
       context.restore();
+      if (zeroSurfaces) {
+        context.canvas.width = 0;
+        context.canvas.height = 0;
+      }
     }
     this.layerCanvases.clear();
     this.canvas = null;
     this.ctx = null;
+    this.retainedOffscreen = false;
+    this.canvasWasConnected = false;
+    this.useLayerPresentationOnly = false;
+    this.pendingLayerRedraw = false;
+    this.configuredWidth = 0;
+    this.configuredHeight = 0;
+    this.configuredOriginX = 0;
+    this.configuredOriginY = 0;
     this.invalidateRenderedSurface();
     this.cancelDeferredSurfaceAdoption();
     this.pendingSurfaceSource = null;
     this.pendingSurfaceKey = null;
     this.canvasCssWidth = 0;
     this.canvasCssHeight = 0;
-    this.pencilSurface = undefined;
     this.endLiveStroke();
     this.releaseSpareWetInk();
     this.notifySurfaceChange(false);
@@ -432,16 +802,50 @@ export class DrawingEngine {
   /** Resize the canvas (e.g., on window resize). */
   resize(cssWidth: number, cssHeight: number): void {
     if (!this.canvas) return;
+    const origin = this.viewport.getRenderWindowOrigin();
+    const layerCount = Math.max(1, this.layerManager.getLayers().length);
+    const layerBudget = Math.floor(MAX_ACTIVE_CANVAS_PIXELS / layerCount);
+    const baseUnchanged = this.useLayerPresentationOnly
+      ? (this.canvasCssWidth === cssWidth && this.canvasCssHeight === cssHeight && this.canvas.width === 1 && this.canvas.height === 1)
+      : this.viewport.isCanvasBackingUnchanged(this.canvas, cssWidth, cssHeight, this._scaleMultiplier, MAX_ACTIVE_CANVAS_PIXELS);
+    let anyLayerChanged = this.pendingLayerRedraw;
+    for (const layerCtx of this.layerCanvases.values()) {
+      if (!this.viewport.isCanvasBackingUnchanged(layerCtx.canvas, cssWidth, cssHeight, this._scaleMultiplier, layerBudget)) {
+        this.viewport.configureCanvas(layerCtx.canvas, cssWidth, cssHeight, this._scaleMultiplier, layerBudget);
+        anyLayerChanged = true;
+      }
+    }
+    const originChanged = this.configuredOriginX !== origin.x || this.configuredOriginY !== origin.y;
+    const sizeChanged = this.configuredWidth !== cssWidth || this.configuredHeight !== cssHeight;
+    if (baseUnchanged && !anyLayerChanged && !originChanged && !sizeChanged) {
+      this.pendingLayerRedraw = false;
+      return;
+    }
+    this.pendingLayerRedraw = false;
+    this.configuredWidth = cssWidth;
+    this.configuredHeight = cssHeight;
+    this.configuredOriginX = origin.x;
+    this.configuredOriginY = origin.y;
     this.releaseLaserSurface();
+    this.releaseSelectionSurfaces();
+    this.releasePencilSurface();
     this.releaseSpareWetInk();
     this.invalidateRenderedSurface();
     this.canvasCssWidth = cssWidth;
     this.canvasCssHeight = cssHeight;
-    this.ctx = this.viewport.configureCanvas(this.canvas, cssWidth, cssHeight, this._scaleMultiplier);
+    this.ctx = this.configureBaseCanvas(this.canvas, cssWidth, cssHeight);
     this.requestRedraw();
   }
 
   getCanvasElement(): HTMLCanvasElement | null { return this.canvas; }
+
+  getEstimatedBackingBytes(): number {
+    let bytes = this.canvas ? this.canvas.width * this.canvas.height * 4 : 0;
+    for (const layerCtx of this.layerCanvases.values()) {
+      bytes += layerCtx.canvas.width * layerCtx.canvas.height * 4;
+    }
+    return bytes;
+  }
 
   /** Record that the attached surfaces currently represent this scene payload. */
   markSurfaceCurrent(key: unknown): void {
@@ -662,7 +1066,8 @@ export class DrawingEngine {
    * identical to redraw().
    */
   private paintStaticPreview(): void {
-    if (!this.ctx || !this.canvas) {
+    if (!this.ctx || !this.canvas || this.isSurfaceDetached()) {
+      this.cancelPaint();
       const complete = this.redrawCompletion;
       this.redrawCompletion = null;
       complete?.();
@@ -681,18 +1086,26 @@ export class DrawingEngine {
       ctx.restore();
     }
     type PaintStep =
-      | { kind: 'images' | 'shapes'; layerId: string; ctx: CanvasRenderingContext2D }
+      | { kind: 'image'; image: ImageObject; layerId: string; ctx: CanvasRenderingContext2D }
+      | { kind: 'shapes'; layerId: string; ctx: CanvasRenderingContext2D }
       | { kind: 'stroke'; stroke: Stroke; ctx: CanvasRenderingContext2D }
       | { kind: 'overlays' };
     const steps: PaintStep[] = [];
     const windowBounds = this.viewport.getRenderWindowBounds();
+    const strokeQuery = this.spatialIndex.query(windowBounds, this.strokes);
+    const allImages = this.imageManager.getImages();
     for (const layer of this.layerManager.getLayers()) {
       if (!layer.visible) continue;
       const ctx = this.layerCanvases.get(layer.id) ?? mainCtx;
-      steps.push({ kind: 'images', layerId: layer.id, ctx });
-      for (const stroke of this.strokes) {
+      for (const image of allImages) {
+        if ((image.layerId ?? DEFAULT_PAGE_LAYER_ID) !== layer.id) continue;
+        if (!this.viewport.intersectsRenderWindow(image)) continue;
+        if (windowBounds && !objectIntersectsBounds(image, windowBounds)) continue;
+        steps.push({ kind: 'image', image, layerId: layer.id, ctx });
+      }
+      for (const stroke of strokeQuery.strokes) {
         if ((stroke.layerId ?? DEFAULT_PAGE_LAYER_ID) !== layer.id) continue;
-        if (windowBounds && !boundsOverlap(windowBounds, this.getCachedEraseBounds(stroke))) continue;
+        if (!strokeQuery.exactFilterApplied && windowBounds && !boundsOverlap(windowBounds, this.getCachedEraseBounds(stroke))) continue;
         steps.push({ kind: 'stroke', stroke, ctx });
       }
       steps.push({ kind: 'shapes', layerId: layer.id, ctx });
@@ -720,7 +1133,8 @@ export class DrawingEngine {
     };
     const paintStep = (step: PaintStep) => {
       if (step.kind === 'overlays') {
-        this.renderTransientOverlays();
+        const surfaces = this.selectionSurfaces();
+        this.renderTransientOverlays(surfaces[surfaces.length - 1]?.ctx ?? this.ctx);
         return;
       }
       const ctx = step.ctx;
@@ -728,13 +1142,20 @@ export class DrawingEngine {
       this.viewport.applyTransform(ctx);
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = 'high';
-      if (step.kind === 'images') this.imageManager.renderImages(ctx, step.layerId);
-      else if (step.kind === 'shapes') this.shapeManager.renderShapes(ctx, step.layerId);
+      if (step.kind === 'image') this.imageManager.renderImage(ctx, step.image);
+      else if (step.kind === 'shapes') this.shapeManager.renderShapes(ctx, step.layerId, undefined, windowBounds);
       else if (step.kind === 'stroke') this.renderStroke(ctx, step.stroke);
       ctx.restore();
     };
     const flush = () => {
       if (token !== this.progressivePaintToken) return;
+      if (!this.ctx || !this.canvas || this.isSurfaceDetached()) {
+        this.cancelPaint();
+        const complete = this.redrawCompletion;
+        this.redrawCompletion = null;
+        complete?.();
+        return;
+      }
       this.progressivePaintFrame = null;
       this.progressivePaintFlush = null;
       while (index < steps.length) paintStep(steps[index++]);
@@ -743,6 +1164,13 @@ export class DrawingEngine {
     this.progressivePaintFlush = flush;
     const run = () => {
       if (token !== this.progressivePaintToken) return;
+      if (!this.ctx || !this.canvas || this.isSurfaceDetached()) {
+        this.cancelPaint();
+        const complete = this.redrawCompletion;
+        this.redrawCompletion = null;
+        complete?.();
+        return;
+      }
       this.progressivePaintFrame = null;
       const started = performance.now();
       let strokesThisSlice = 0;
@@ -750,6 +1178,7 @@ export class DrawingEngine {
         const step = steps[index++];
         if (!step) { finish(); return; }
         if (step.kind === 'stroke') strokesThisSlice++;
+        else if (step.kind === 'image') strokesThisSlice += 4;
         paintStep(step);
       } while (strokesThisSlice < MAX_PREVIEW_STROKES_PER_SLICE
         && performance.now() - started < 3
@@ -757,9 +1186,15 @@ export class DrawingEngine {
       if (index >= steps.length) { finish(); return; }
       this.progressivePaintFrame = requestAnimationFrame(run);
     };
-    // Paint the first slice immediately so a mounted page has ink before its
-    // first composited frame; the remaining slices yield to animation frames.
-    run();
+    // Yield initial slice of coalesced off-focus page previews to the next
+    // animation frame so React page mounts never race raster work in the same frame.
+    if (this.coalesceRedraws && typeof requestAnimationFrame === 'function') {
+      this.progressivePaintFrame = requestAnimationFrame(run);
+    } else {
+      // Paint live fallback synchronously so the first slice has ink before its
+      // first composited frame; the remaining slices yield to animation frames.
+      run();
+    }
   }
 
   private requestRedraw(): void {
@@ -867,18 +1302,31 @@ export class DrawingEngine {
    */
   copySurfacesTo(target: DrawingEngine, key?: unknown): boolean {
     if (!this.canvas || !target.canvas || !target.ctx) return false;
+    if (this.canvasCssWidth !== target.canvasCssWidth || this.canvasCssHeight !== target.canvasCssHeight) {
+      return false;
+    }
+    const sourceOrigin = this.viewport.getRenderWindowOrigin();
+    const targetOrigin = target.viewport.getRenderWindowOrigin();
+    if (sourceOrigin.x !== targetOrigin.x || sourceOrigin.y !== targetOrigin.y) {
+      return false;
+    }
 
-    const pairs: Array<[HTMLCanvasElement, CanvasRenderingContext2D]> = [[this.canvas, target.ctx]];
+    const useLayerOnly = this.useLayerPresentationOnly || target.useLayerPresentationOnly;
+    if (useLayerOnly && (this.layerCanvases.size === 0 || target.layerCanvases.size === 0)) return false;
+    const pairs: Array<[HTMLCanvasElement, CanvasRenderingContext2D]> = useLayerOnly ? [] : [[this.canvas, target.ctx]];
     for (const [id, targetLayer] of target.layerCanvases) {
       const sourceLayer = this.layerCanvases.get(id);
       if (!sourceLayer) return false;
       pairs.push([sourceLayer.canvas, targetLayer]);
     }
+    if (pairs.length === 0) return false;
 
     const compatible = ([source, destination]: [HTMLCanvasElement, CanvasRenderingContext2D]) => {
       const width = source.width, height = source.height;
       const targetWidth = destination.canvas.width, targetHeight = destination.canvas.height;
       if (!width || !height || !targetWidth || !targetHeight) return false;
+      // Avoid blurry upscaling when adopting a lower-res preview into a high-zoom target.
+      if (targetWidth > width * 1.15 || targetHeight > height * 1.15) return false;
       return Math.abs(width / height - targetWidth / targetHeight) <= 0.01;
     };
     if (!pairs.every(compatible)) return false;
@@ -911,6 +1359,33 @@ export class DrawingEngine {
     return this.getCachedEraseBounds(stroke);
   }
 
+  /** Reconcile stroke lookup maps and retained geometry caches after in-place splicing or undo/redo. */
+  syncStrokesIndex(): void {
+    this.strokeMap.clear();
+    for (const stroke of this.strokes) {
+      this.strokeMap.set(stroke.id, stroke);
+      if (!this.strokeBoundsCache.has(stroke)) {
+        this.retainedStrokeMetrics.delete(stroke.id);
+        this.retainedInkPaths.delete(stroke.id);
+        this.spatialIndex.invalidateStroke(stroke.id);
+      }
+    }
+    const deletedIds: string[] = [];
+    for (const id of [...this.retainedStrokeMetrics.keys()]) {
+      if (!this.strokeMap.has(id)) {
+        this.retainedStrokeMetrics.delete(id);
+        deletedIds.push(id);
+      }
+    }
+    for (const id of [...this.retainedInkPaths.keys()]) {
+      if (!this.strokeMap.has(id)) this.retainedInkPaths.delete(id);
+    }
+    if (deletedIds.length > 0) this.spatialIndex.removeStrokeIds(deletedIds);
+    this.spatialIndex.markStructureDirty();
+    this.invalidateRenderedSurface();
+    this.scheduleOverviewSync();
+  }
+
   getStrokePointBounds(stroke: Stroke): { x: number; y: number; width: number; height: number } | null {
     if (!stroke || stroke.points.length === 0) return null;
     return this.getCachedStrokeMetrics(stroke).pointBounds;
@@ -934,7 +1409,9 @@ export class DrawingEngine {
       // every sample of a dense page.
       primeCachedStrokeSnapshot(stroke);
     }
+    this.spatialIndex.reset();
     this.invalidateRenderedSurface();
+    this.scheduleOverviewSync();
     if (repaint) this.requestRedraw();
   }
 
@@ -957,6 +1434,7 @@ export class DrawingEngine {
     this.retainedInkPaths.delete(id);
     this.strokeBoundsCache.delete(stroke);
     this.retainedStrokeMetrics.delete(id);
+    this.spatialIndex.invalidateStroke(id);
     sharedInkPaths.delete(stroke.points);
     sharedStrokeMetrics.delete(stroke.points);
     invalidateCachedStrokeSnapshot(stroke);
@@ -982,10 +1460,12 @@ export class DrawingEngine {
     stroke.layerId ??= this.layerManager.getActiveLayerId();
     this.strokes.push(stroke);
     this.strokeMap.set(stroke.id, stroke);
+    this.spatialIndex.appendStroke(stroke, this.strokes.length);
     // A completed stroke is detached from page-cache/persistence data. Sharing
     // its numeric arrays with the next snapshot avoids re-cloning every sample.
     primeCachedStrokeSnapshot(stroke);
     this.invalidateRenderedSurface();
+    this.scheduleOverviewSync();
     if (startedAt) gate0Profiler.event('add-stroke', performance.now() - startedAt, { points: stroke.points.length });
   }
 
@@ -1011,6 +1491,7 @@ export class DrawingEngine {
     this.strokeMap.delete(id);
     this.retainedInkPaths.delete(id);
     this.retainedStrokeMetrics.delete(id);
+    this.spatialIndex.removeStrokeIds([id]);
     this.invalidateRenderedSurface();
     return removed;
   }
@@ -1028,7 +1509,10 @@ export class DrawingEngine {
       }
       return true;
     });
-    if (removed.length) this.invalidateRenderedSurface();
+    if (removed.length) {
+      this.spatialIndex.removeStrokeIds(ids);
+      this.invalidateRenderedSurface();
+    }
     return removed;
   }
 
@@ -1039,6 +1523,7 @@ export class DrawingEngine {
     this.strokeMap.clear();
     this.retainedInkPaths.clear();
     this.retainedStrokeMetrics.clear();
+    this.spatialIndex.reset();
     this.invalidateRenderedSurface();
     return removed;
   }
@@ -1059,18 +1544,17 @@ export class DrawingEngine {
       return cached;
     }
     const halfWidth = getStrokeRenderHalfWidth(stroke);
-    const bounds = eraseBoundsWithHalfWidth(stroke, halfWidth);
-    const pad = halfWidth + 2;
-    const minX = bounds.left + pad;
-    const maxX = bounds.right - pad;
-    const minY = bounds.top + pad;
-    const maxY = bounds.bottom - pad;
-    const pointBounds = {
-      x: minX,
-      y: minY,
-      width: Math.max(0, maxX - minX),
-      height: Math.max(0, maxY - minY),
-    };
+    const bounds = eraseBounds(stroke);
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const p of stroke.points) {
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+    const pointBounds = first
+      ? { x: minX, y: minY, width: Math.max(0, maxX - minX), height: Math.max(0, maxY - minY) }
+      : { x: 0, y: 0, width: 0, height: 0 };
     const metrics: StrokeMetricsEntry = {
       key,
       firstX: first?.x ?? 0, firstY: first?.y ?? 0,
@@ -1106,7 +1590,7 @@ export class DrawingEngine {
       boundsForStroke = undefined;
     }
     this.cancelProgressivePaint();
-    if (!this.ctx || !this.canvas) {
+    if (!this.ctx || !this.canvas || this.isSurfaceDetached()) {
       deferredReady?.(false);
       completion?.();
       return;
@@ -1114,40 +1598,49 @@ export class DrawingEngine {
 
     if (this.isSelectionDragging && !dirty) {
       if (!this.selectionBackingReady) this.prepareSelectionBacking();
-      if (this.selectionBackingCanvas) {
-      this.ctx.save();
-      this.ctx.resetTransform();
-      this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-      this.ctx.drawImage(this.selectionBackingCanvas, 0, 0);
-      this.ctx.restore();
-      this.ctx.save();
-      this.viewport.applyTransform(this.ctx);
-      const t = this.selectionEngine?.getCurrentDragTransform();
-      for (const id of this.selectionExcludeIds) {
-        const stroke = this.getStrokeById(id);
-        if (stroke) {
-          this.renderTransformingStroke(this.ctx, stroke, t);
-          continue;
+      const surfaces = this.selectionSurfaces();
+      if (surfaces.length > 0) {
+        const t = this.selectionEngine?.getCurrentDragTransform();
+        for (const surface of surfaces) {
+          const backing = this.selectionBackingFor(surface.canvas);
+          if (!backing) continue;
+          surface.ctx.save();
+          surface.ctx.resetTransform();
+          surface.ctx.clearRect(0, 0, surface.canvas.width, surface.canvas.height);
+          surface.ctx.drawImage(backing.canvas, 0, 0);
+          surface.ctx.restore();
+          surface.ctx.save();
+          this.viewport.applyTransform(surface.ctx);
+          const dragImages: ImageObject[] = [];
+          const dragStrokes: Stroke[] = [];
+          const dragShapes: Shape[] = [];
+          for (const id of this.selectionExcludeIds) {
+            const image = this.imageManager.getImage(id);
+            if (image) {
+              if ((image.layerId ?? DEFAULT_PAGE_LAYER_ID) === surface.layerId) dragImages.push(image);
+              continue;
+            }
+            const stroke = this.getStrokeById(id);
+            if (stroke) {
+              if ((stroke.layerId ?? DEFAULT_PAGE_LAYER_ID) === surface.layerId) dragStrokes.push(stroke);
+              continue;
+            }
+            const shape = this.shapeManager.getShape(id);
+            if (shape && (shape.layerId ?? DEFAULT_PAGE_LAYER_ID) === surface.layerId) {
+              dragShapes.push(shape);
+            }
+          }
+          for (const image of dragImages) this.imageManager.renderImage(surface.ctx, image);
+          for (const stroke of dragStrokes) this.renderTransformingStroke(surface.ctx, stroke, t);
+          for (const shape of dragShapes) this.shapeManager.renderShape(surface.ctx, shape);
+          surface.ctx.restore();
         }
-        const shape = this.shapeManager.getShape(id);
-        if (shape) {
-          this.shapeManager.renderShape(this.ctx, shape);
-          continue;
-        }
-        const image = this.imageManager.getImage(id);
-        if (image) {
-          this.imageManager.renderImage(this.ctx, image);
-          continue;
-        }
-      }
-      this.ctx.restore();
-      if (this.selectionEngine) {
-        this.selectionEngine.renderSelection(this.ctx);
-      }
-      this.renderTransientOverlays();
-      deferredReady?.(true);
-      completion?.();
-      return;
+        const top = surfaces[surfaces.length - 1];
+        if (this.selectionEngine) this.selectionEngine.renderSelection(top.ctx);
+        this.renderTransientOverlays(top.ctx);
+        deferredReady?.(true);
+        completion?.();
+        return;
       }
     }
 
@@ -1157,7 +1650,20 @@ export class DrawingEngine {
       : 0;
     // Clip every backing surface in page space, keeping its existing DPR transform.
     // Repaint all contributors inside the damage, preserving transparency and z-order.
-    const surfaces = dirty ? [this.ctx, ...this.layerCanvases.values()] : [];
+    const skipBaseClear = this.useLayerPresentationOnly && this.layerCanvases.size > 0;
+    const surfaces = dirty
+      ? (skipBaseClear ? [...this.layerCanvases.values()] : [this.ctx, ...this.layerCanvases.values()])
+      : [];
+    const clearSurfaceDevice = (surface: CanvasRenderingContext2D) => {
+      if (surface.canvas && surface.canvas.width > 0 && surface.canvas.height > 0 && typeof surface.resetTransform === 'function') {
+        surface.save();
+        surface.resetTransform();
+        surface.clearRect(0, 0, surface.canvas.width, surface.canvas.height);
+        surface.restore();
+      } else {
+        surface.clearRect(0, 0, this.canvasCssWidth, this.canvasCssHeight);
+      }
+    };
     let cullBounds = dirty;
     for (const surface of surfaces) {
       surface.save();
@@ -1166,8 +1672,12 @@ export class DrawingEngine {
       const pageTransform = surface.getTransform();
       const corners = [[dirty!.left,dirty!.top],[dirty!.right,dirty!.top],[dirty!.right,dirty!.bottom],[dirty!.left,dirty!.bottom]]
         .map(([x,y]) => ({x:pageTransform.a*x+pageTransform.c*y+pageTransform.e,y:pageTransform.b*x+pageTransform.d*y+pageTransform.f}));
-      const left = Math.floor(Math.min(...corners.map(p=>p.x))), top = Math.floor(Math.min(...corners.map(p=>p.y)));
-      const right = Math.ceil(Math.max(...corners.map(p=>p.x))), bottom = Math.ceil(Math.max(...corners.map(p=>p.y)));
+      const maxW = surface.canvas?.width || Infinity;
+      const maxH = surface.canvas?.height || Infinity;
+      const left = Math.max(0, Math.floor(Math.min(...corners.map(p=>p.x)) - 2));
+      const top = Math.max(0, Math.floor(Math.min(...corners.map(p=>p.y)) - 2));
+      const right = Math.min(maxW, Math.ceil(Math.max(...corners.map(p=>p.x)) + 2));
+      const bottom = Math.min(maxH, Math.ceil(Math.max(...corners.map(p=>p.y)) + 2));
       const inverse = pageTransform.inverse();
       const pageCorners = [[left,top],[right,top],[right,bottom],[left,bottom]].map(([x,y]) => ({
         x:inverse.a*x+inverse.c*y+inverse.e,y:inverse.b*x+inverse.d*y+inverse.f,
@@ -1175,13 +1685,14 @@ export class DrawingEngine {
       cullBounds = {left:Math.min(cullBounds!.left,...pageCorners.map(p=>p.x)),top:Math.min(cullBounds!.top,...pageCorners.map(p=>p.y)),
         right:Math.max(cullBounds!.right,...pageCorners.map(p=>p.x)),bottom:Math.max(cullBounds!.bottom,...pageCorners.map(p=>p.y))};
       surface.resetTransform();
+      if (right > left && bottom > top) surface.clearRect(left, top, right - left, bottom - top);
       surface.beginPath();
-      surface.rect(left,top,right-left,bottom-top);
+      surface.rect(left,top,Math.max(0, right-left),Math.max(0, bottom-top));
       surface.clip();
       surface.setTransform(transform);
     }
-    this.ctx.clearRect(0, 0, this.canvasCssWidth, this.canvasCssHeight);
-    
+    if (!dirty && !skipBaseClear) clearSurfaceDevice(this.ctx);
+
     // Save context state before applying viewport transform
     // INVARIANT: All stroke points, shape bounds, and image rectangles exist strictly in Page Space.
     // Viewport zoom, pan offsets, and device pixel ratio (DPR) are applied via viewport.applyTransform(ctx).
@@ -1192,36 +1703,45 @@ export class DrawingEngine {
     this.ctx.imageSmoothingQuality = 'high';
 
     const windowBounds = this.viewport.getRenderWindowBounds();
+    const sceneCullBounds = intersectBounds(windowBounds, cullBounds);
     const getBounds = boundsForStroke ?? (s => this.getCachedEraseBounds(s));
+    const strokeQuery = boundsForStroke ? null : this.spatialIndex.query(sceneCullBounds, this.strokes);
+    const candidateStrokes = strokeQuery ? strokeQuery.strokes : this.strokes;
+    const exactStrokeFilter = strokeQuery ? strokeQuery.exactFilterApplied : false;
 
     // INVARIANT: Layer render order determines Z-index. Bottom layer (0) renders first.
     // Within each layer, entities render in deterministic order: Images -> Strokes -> Shapes.
     for (const layer of this.layerManager.getLayers()) {
       const layerCtx = this.layerCanvases.get(layer.id);
-      if (layerCtx) layerCtx.clearRect(0, 0, this.canvasCssWidth, this.canvasCssHeight);
+      if (layerCtx && !dirty) clearSurfaceDevice(layerCtx);
       if (!layer.visible) continue;
       const ctx = layerCtx ?? this.ctx;
       if (layerCtx) { ctx.save(); this.viewport.applyTransform(ctx); }
-      this.imageManager.renderImages(ctx, layer.id, excludeIds);
-      for (const stroke of this.strokes) {
+      this.imageManager.renderImages(ctx, layer.id, excludeIds, sceneCullBounds);
+      for (const stroke of candidateStrokes) {
         if (excludeIds && excludeIds.has(stroke.id)) continue;
-        if (windowBounds && !boundsOverlap(windowBounds, this.getCachedEraseBounds(stroke))) continue;
-        if (cullBounds && !boundsOverlap(cullBounds, getBounds(stroke))) continue;
         const strokeLayerId = stroke.layerId ?? DEFAULT_PAGE_LAYER_ID;
-        if (strokeLayerId === layer.id) this.renderStroke(ctx, stroke);
+        if (strokeLayerId !== layer.id) continue;
+        if (!exactStrokeFilter && sceneCullBounds && !boundsOverlap(sceneCullBounds, getBounds(stroke))) continue;
+        this.renderStroke(ctx, stroke);
       }
-      this.shapeManager.renderShapes(ctx, layer.id, excludeIds);
+      this.shapeManager.renderShapes(ctx, layer.id, excludeIds, sceneCullBounds);
+      if (this.livePreviewShape && (this.livePreviewShape.layerId ?? this.layerManager.getActiveLayerId()) === layer.id) {
+        this.shapeManager.renderShape(ctx, this.livePreviewShape);
+      }
       if (layerCtx) ctx.restore();
     }
 
     // Restore context to undo viewport transform before rendering selection boxes
     // Actually SelectionEngine handles viewport transform internally, so we restore first.
     this.ctx.restore();
-    
+
+    const selectionSurfaces = this.selectionSurfaces();
+    const topSurface = selectionSurfaces[selectionSurfaces.length - 1];
     if (this.selectionEngine) {
-      this.selectionEngine.renderSelection(this.ctx);
+      this.selectionEngine.renderSelection(topSurface?.ctx ?? this.ctx);
     }
-    this.renderTransientOverlays();
+    this.renderTransientOverlays(topSurface?.ctx);
     for (const surface of surfaces) surface.restore();
     if (profileStartedAt) {
       const duration = performance.now() - profileStartedAt;
@@ -1240,9 +1760,10 @@ export class DrawingEngine {
     completion?.();
   }
 
-  private renderTransientOverlays(): void {
-    this.renderRulerOverlay();
-    this.renderLaserOverlay();
+  private renderTransientOverlays(context: CanvasRenderingContext2D | null | undefined = this.ctx): void {
+    if (!context) return;
+    this.renderRulerOverlay(context);
+    this.renderLaserOverlay(context);
   }
 
   private redrawLaserFrame(): void {
@@ -1258,25 +1779,30 @@ export class DrawingEngine {
       this.releaseLaserSurface();
       return;
     }
+    const presentation = this.selectionSurfaces();
+    const anchor = presentation[presentation.length - 1]?.canvas ?? this.canvas;
     if (!this.laserCanvas) {
       const canvas = document.createElement('canvas');
-      canvas.width = this.canvas.width;
-      canvas.height = this.canvas.height;
+      canvas.width = anchor.width;
+      canvas.height = anchor.height;
       canvas.setAttribute('aria-hidden', 'true');
       canvas.dataset.panvasLaserOverlay = '';
-      Object.assign(canvas.style, { position: 'absolute', left: this.canvas.style.left || '0px',
-        top: this.canvas.style.top || '0px', width: this.canvas.style.width || '100%',
-        height: this.canvas.style.height || '100%', pointerEvents: 'none',
-        zIndex: getComputedStyle(this.canvas).zIndex });
+      const anchorZ = Number.parseInt(getComputedStyle(anchor).zIndex, 10);
+      Object.assign(canvas.style, { position: 'absolute', left: anchor.style.left || '0px',
+        top: anchor.style.top || '0px', width: anchor.style.width || '100%',
+        height: anchor.style.height || '100%', pointerEvents: 'none',
+        zIndex: String(Number.isFinite(anchorZ) ? anchorZ + 1 : 100) });
       this.laserContext = canvas.getContext('2d');
       this.laserCanvas = canvas;
-      this.canvas.insertAdjacentElement('afterend', canvas);
+      anchor.insertAdjacentElement('afterend', canvas);
+    } else if (this.laserCanvas.previousElementSibling !== anchor) {
+      anchor.insertAdjacentElement('afterend', this.laserCanvas);
     }
     const context = this.laserContext;
     if (!context) return;
     context.resetTransform();
     context.clearRect(0, 0, this.laserCanvas.width, this.laserCanvas.height);
-    context.setTransform(this.ctx.getTransform());
+    context.setTransform(anchor.width / Math.max(1, anchor.clientWidth), 0, 0, anchor.height / Math.max(1, anchor.clientHeight), 0, 0);
     this.viewport.applyTransform(context);
     this.laserManager.render(context, this.viewport.getState().scale);
   }
@@ -1290,27 +1816,27 @@ export class DrawingEngine {
     this.laserContext = null;
   }
 
-  private renderRulerOverlay(): void {
-    if (!this.ctx || !this.rulerManager.getState().enabled) return;
+  private renderRulerOverlay(context: CanvasRenderingContext2D): void {
+    if (!this.rulerManager.getState().enabled) return;
     const themeMode = typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
       ? 'dark'
       : 'light';
-    this.ctx.save();
-    this.viewport.applyTransform(this.ctx);
-    this.rulerManager.render(this.ctx, this.viewport.getState().scale, themeMode);
-    this.ctx.restore();
+    context.save();
+    this.viewport.applyTransform(context);
+    this.rulerManager.render(context, this.viewport.getState().scale, themeMode);
+    context.restore();
   }
 
-  private renderLaserOverlay(): void {
+  private renderLaserOverlay(context: CanvasRenderingContext2D): void {
     if (this.canvas?.parentElement) {
       this.redrawLaserFrame();
       return;
     }
-    if (!this.ctx || this.laserManager.getActiveTrail().length === 0) return;
-    this.ctx.save();
-    this.viewport.applyTransform(this.ctx);
-    this.laserManager.render(this.ctx, this.viewport.getState().scale);
-    this.ctx.restore();
+    if (this.laserManager.getActiveTrail().length === 0) return;
+    context.save();
+    this.viewport.applyTransform(context);
+    this.laserManager.render(context, this.viewport.getState().scale);
+    context.restore();
   }
 
   /**
@@ -1797,6 +2323,7 @@ export class DrawingEngine {
     this.liveFrame = null;
     this.pendingInk = null;
     this.lastLiveInk = null;
+    this.livePreviewShape = null;
     if (this.wetInk) {
       this.releaseSpareWetInk();
       if (this.wetInk.target.canvas.isConnected) {
@@ -1808,16 +2335,134 @@ export class DrawingEngine {
     this.wetInk = null;
     this.liveTrace = null;
     this.isLiveDrawing = false;
-    this.liveSnapshotCanvas = null;
+    if (this.liveSnapshotCanvas) {
+      this.liveSnapshotCanvas.width = 0;
+      this.liveSnapshotCanvas.height = 0;
+      this.liveSnapshotCanvas = null;
+    }
+  }
+
+  private ensureWetInk(ctx: CanvasRenderingContext2D): WetInkSurface {
+    ctx.save();
+    this.viewport.applyTransform(ctx);
+    const transform = ctx.getTransform();
+    ctx.restore();
+    if (this.wetInk && !this.wetInk.matches(ctx)) {
+      this.wetInk.dispose();
+      this.wetInk = null;
+    }
+    if (!this.wetInk) {
+      if (this.spareWetInk?.matches(ctx)) {
+        if (this.spareWetInkTimer !== null) clearTimeout(this.spareWetInkTimer);
+        this.spareWetInkTimer = null;
+        this.wetInk = this.spareWetInk;
+        this.spareWetInk = null;
+        this.wetInk.resume(transform);
+      } else {
+        this.releaseSpareWetInk();
+        this.wetInk = new WetInkSurface(ctx, transform);
+      }
+    } else {
+      this.wetInk.resume(transform);
+    }
+    return this.wetInk;
+  }
+
+  private shapePreviewBounds(shape: Shape): InkBounds {
+    let minX = Math.min(shape.x, shape.x + shape.width);
+    let maxX = Math.max(shape.x, shape.x + shape.width);
+    let minY = Math.min(shape.y, shape.y + shape.height);
+    let maxY = Math.max(shape.y, shape.y + shape.height);
+    if (shape.rotation) {
+      const cx = (minX + maxX) / 2;
+      const cy = (minY + maxY) / 2;
+      const r = Math.hypot((maxX - minX) / 2, (maxY - minY) / 2);
+      minX = cx - r;
+      maxX = cx + r;
+      minY = cy - r;
+      maxY = cy + r;
+    }
+    const pad = Math.max(8, (shape.strokeWidth ?? 2) * 3 + 24);
+    return { left: minX - pad, top: minY - pad, right: maxX + pad, bottom: maxY + pad };
+  }
+
+  /** Present a transient snapped shape while the pointer is held, before commit. */
+  renderLiveShapePreview(shape: Shape): void {
+    if (!this.ctx || !this.canvas) return;
+    if (this.liveFrame !== null) {
+      cancelAnimationFrame(this.liveFrame);
+      this.liveFrame = null;
+    }
+    this.pendingInk = null;
+    this.livePreviewShape = shape;
+    const ctx = this.layerCanvases.get(this.layerManager.getActiveLayerId()) ?? this.ctx;
+    if (ctx.canvas?.parentElement && !this.liveSnapshotCanvas) {
+      const surface = this.ensureWetInk(ctx);
+      surface.renderPreview(
+        previewCtx => this.shapeManager.renderShape(previewCtx, shape),
+        this.shapePreviewBounds(shape),
+      );
+      return;
+    }
+    if (this.liveSnapshotCanvas) {
+      ctx.save();
+      ctx.resetTransform();
+      ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+      ctx.drawImage(this.liveSnapshotCanvas, 0, 0);
+      ctx.restore();
+      ctx.save();
+      this.viewport.applyTransform(ctx);
+      this.shapeManager.renderShape(ctx, shape);
+      ctx.restore();
+      const surfaces = this.selectionSurfaces();
+      this.renderTransientOverlays(surfaces[surfaces.length - 1]?.ctx ?? this.ctx);
+      return;
+    }
+    this.redraw();
+  }
+
+  clearLiveShapePreview(): void {
+    if (this.liveFrame !== null) {
+      cancelAnimationFrame(this.liveFrame);
+      this.liveFrame = null;
+    }
+    this.pendingInk = null;
+    const hadPreview = this.livePreviewShape !== null;
+    this.livePreviewShape = null;
+    if (this.wetInk) {
+      this.wetInk.pause();
+      return;
+    }
+    if (this.liveSnapshotCanvas && this.ctx) {
+      const ctx = this.layerCanvases.get(this.layerManager.getActiveLayerId()) ?? this.ctx;
+      ctx.save();
+      ctx.resetTransform();
+      ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+      ctx.drawImage(this.liveSnapshotCanvas, 0, 0);
+      ctx.restore();
+      const surfaces = this.selectionSurfaces();
+      this.renderTransientOverlays(surfaces[surfaces.length - 1]?.ctx ?? this.ctx);
+      return;
+    }
+    if (hadPreview) this.redraw();
   }
 
   /** One presentation per frame; all accepted geometry remains in points. */
   renderLiveStroke(points: StrokePoint[], tool: DrawingToolId, color: string, thickness: number,
-    opacity: number, pattern: StrokePattern = 'solid', inkFamily?: InkFamily, _liveTip?: StrokePoint, revisedFrom = Infinity): void {
+    opacity: number, pattern: StrokePattern = 'solid', inkFamily?: InkFamily, _liveTip?: StrokePoint, revisedFrom = Infinity,
+    predictedPoints?: readonly StrokePoint[]): void {
     if (!this.ctx || !this.canvas) return;
-    this.pendingInk = { id: '__live__', type: 'stroke', points, tool, color, thickness, opacity,
-      pattern, inkFamily, centerline: 'polyline', createdAt: 0 };
+    this.livePreviewShape = null;
+    this.liveStrokeScratch.points = points;
+    this.liveStrokeScratch.tool = tool;
+    this.liveStrokeScratch.color = color;
+    this.liveStrokeScratch.thickness = thickness;
+    this.liveStrokeScratch.opacity = opacity;
+    this.liveStrokeScratch.pattern = pattern;
+    this.liveStrokeScratch.inkFamily = inkFamily;
+    this.pendingInk = this.liveStrokeScratch;
     this.pendingLiveRevisionFrom = revisedFrom;
+    this.pendingPredictedPoints = predictedPoints;
     this.lastLiveInk = this.pendingInk;
     const ctx = this.layerCanvases.get(this.layerManager.getActiveLayerId()) ?? this.ctx;
     const isFastWetInk = tool === 'pen' && pattern === 'solid' && Boolean(ctx.canvas.parentElement);
@@ -1838,9 +2483,15 @@ export class DrawingEngine {
     });
   }
   /** Rebuild presentation atomically; logical samples and pointer capture stay owned. */
-  rebaseLiveSurface(): void {
-    const stroke = this.lastLiveInk, trace = this.liveTrace;
-    this.endLiveStroke(); this.releaseSpareWetInk(); this.redraw();
+  rebaseLiveSurface(skipRedraw = false): void {
+    const stroke = this.lastLiveInk, trace = this.liveTrace, previewShape = this.livePreviewShape;
+    this.endLiveStroke(); this.releaseSpareWetInk();
+    if (!skipRedraw) this.redraw();
+    if (previewShape) {
+      this.liveTrace = trace;
+      this.renderLiveShapePreview(previewShape);
+      return;
+    }
     if (!stroke) return;
     this.liveTrace = trace;
     this.renderLiveStroke(stroke.points, stroke.tool, stroke.color, stroke.thickness, stroke.opacity, stroke.pattern, stroke.inkFamily);
@@ -1853,27 +2504,13 @@ export class DrawingEngine {
     this.pendingInk = null;
     const revisedFrom = this.pendingLiveRevisionFrom;
     this.pendingLiveRevisionFrom = Infinity;
+    const predictedPoints = this.pendingPredictedPoints;
+    this.pendingPredictedPoints = undefined;
     const start = performance.now();
     const ctx = this.layerCanvases.get(this.layerManager.getActiveLayerId()) ?? this.ctx;
     const trace = this.liveTrace;
     if (stroke.tool === 'pen' && stroke.pattern === 'solid' && ctx.canvas.parentElement) {
-      if (!this.wetInk) {
-        ctx.save();
-        this.viewport.applyTransform(ctx);
-        const transform = ctx.getTransform();
-        ctx.restore();
-        if (this.spareWetInk?.matches(ctx)) {
-          if (this.spareWetInkTimer !== null) clearTimeout(this.spareWetInkTimer);
-          this.spareWetInkTimer = null;
-          this.wetInk = this.spareWetInk;
-          this.spareWetInk = null;
-          this.wetInk.resume(transform);
-        } else {
-          this.releaseSpareWetInk();
-          this.wetInk = new WetInkSurface(ctx, transform);
-        }
-      }
-      const work = this.wetInk.render(this.displayStroke(stroke), revisedFrom);
+      const work = this.ensureWetInk(ctx).render(this.displayStroke(stroke), revisedFrom, predictedPoints);
       if (trace) {
         trace.counters.wetPrimitives = (trace.counters.wetPrimitives ?? 0) + work.primitives;
         trace.counters.wetDirtyPixels = (trace.counters.wetDirtyPixels ?? 0) + work.dirtyPixels;
@@ -1917,7 +2554,7 @@ export class DrawingEngine {
     // existing clipped redraw path, rather than compositing above those shapes.
     if (this.shapeManager.getShapes().some(shape =>
       (shape.layerId ?? DEFAULT_PAGE_LAYER_ID) === (stroke.layerId ?? DEFAULT_PAGE_LAYER_ID))) {
-      this.redraw(eraseBounds(stroke), eraseBounds);
+      this.redraw(eraseBounds(stroke));
       return;
     }
     this.pendingInk = stroke;
@@ -1929,7 +2566,8 @@ export class DrawingEngine {
       this.renderStroke(ctx, stroke);
       ctx.restore();
     }
-    this.renderTransientOverlays();
+    const surfaces = this.selectionSurfaces();
+    this.renderTransientOverlays(surfaces[surfaces.length - 1]?.ctx ?? this.ctx);
   }
 
   /**
@@ -1993,7 +2631,8 @@ export class DrawingEngine {
     gate0Profiler.increment(active, 'renderStrokeCalls');
     gate0Profiler.increment(active, 'renderStrokePointIterations', strokePoints.length);
     ctx.restore();
-    this.renderTransientOverlays();
+    const surfaces = this.selectionSurfaces();
+    this.renderTransientOverlays(surfaces[surfaces.length - 1]?.ctx ?? this.ctx);
     if (liveStartedAt) {
       gate0Profiler.sample(active, 'liveRenderDurationMs', performance.now() - liveStartedAt);
       gate0Profiler.sample(active, 'liveRenderPointCount', strokePoints.length);
@@ -2002,56 +2641,66 @@ export class DrawingEngine {
 
   startLasso(): void {
     if (!this.canvas || !this.ctx || typeof document === 'undefined') return;
+    const surfaces = this.selectionSurfaces();
+    const target = surfaces[surfaces.length - 1]?.ctx ?? this.ctx;
+    if (!target) return;
     if (!this.lassoBackingCanvas) {
       this.lassoBackingCanvas = document.createElement('canvas');
     }
-    if (this.lassoBackingCanvas.width !== this.canvas.width || this.lassoBackingCanvas.height !== this.canvas.height) {
-      this.lassoBackingCanvas.width = this.canvas.width;
-      this.lassoBackingCanvas.height = this.canvas.height;
+    if (this.lassoBackingCanvas.width !== target.canvas.width || this.lassoBackingCanvas.height !== target.canvas.height) {
+      this.lassoBackingCanvas.width = target.canvas.width;
+      this.lassoBackingCanvas.height = target.canvas.height;
     }
     const snapCtx = this.lassoBackingCanvas.getContext('2d');
     if (!snapCtx) return;
     snapCtx.resetTransform();
     snapCtx.clearRect(0, 0, this.lassoBackingCanvas.width, this.lassoBackingCanvas.height);
-    snapCtx.drawImage(this.canvas, 0, 0);
+    snapCtx.drawImage(target.canvas, 0, 0);
     this.isLassoActive = true;
   }
 
   endLasso(): void {
-    this.isLassoActive = false;
+    this.releaseLassoBacking();
   }
 
   /** Render the transient freehand selection enclosure without persisting page content. */
   renderLasso(points: StrokePoint[]): void {
     if (!this.ctx || !this.canvas) return;
+    const surfaces = this.selectionSurfaces();
+    const target = surfaces[surfaces.length - 1]?.ctx ?? this.ctx;
+    if (!target) return;
 
     if (this.isLassoActive && this.lassoBackingCanvas) {
-      this.ctx.save();
-      this.ctx.resetTransform();
-      this.ctx.drawImage(this.lassoBackingCanvas, 0, 0);
-      this.ctx.restore();
+      target.save();
+      target.resetTransform();
+      target.clearRect(0, 0, target.canvas.width, target.canvas.height);
+      target.drawImage(this.lassoBackingCanvas, 0, 0);
+      target.restore();
     } else {
       this.redraw();
     }
     if (points.length < 2) return;
 
     const scale = this.viewport.getState().scale;
-    this.ctx.save();
-    this.viewport.applyTransform(this.ctx);
-    this.ctx.beginPath();
-    this.ctx.moveTo(points[0].x, points[0].y);
+    target.save();
+    this.viewport.applyTransform(target);
+    const dpr = Math.max(1, this.viewport.getDevicePixelRatio());
+    const m = typeof target.getTransform === 'function' ? target.getTransform() : null;
+    const uiScale = m ? Math.min(scale, Math.max(0.25, Math.hypot(m.a, m.b) / dpr)) : scale;
+    target.beginPath();
+    target.moveTo(points[0].x, points[0].y);
     for (const point of points.slice(1)) {
-      this.ctx.lineTo(point.x, point.y);
+      target.lineTo(point.x, point.y);
     }
-    this.ctx.closePath();
-    this.ctx.fillStyle = 'rgba(59, 130, 246, 0.08)';
-    this.ctx.strokeStyle = '#3b82f6';
-    this.ctx.lineWidth = 1.5 / scale;
-    this.ctx.setLineDash([4 / scale, 4 / scale]);
-    this.ctx.fill();
-    this.ctx.stroke();
-    this.ctx.restore();
-    this.renderTransientOverlays();
+    target.closePath();
+    target.fillStyle = 'rgba(59, 130, 246, 0.08)';
+    target.strokeStyle = '#3b82f6';
+    target.lineWidth = 1.5 / uiScale;
+    target.setLineDash([4 / uiScale, 4 / uiScale]);
+    target.fill();
+    target.stroke();
+    target.restore();
+    this.renderTransientOverlays(target);
   }
 
   // ---- Hit Testing (for eraser and selection) ----
@@ -2060,22 +2709,25 @@ export class DrawingEngine {
    * Find topmost stroke ID near point in reverse z-order, early exiting on first hit.
    */
   findTopmostStrokeNearPoint(x: number, y: number, radius: number, layerId?: string): string | null {
-    const strokes = this.strokes;
-    for (let i = strokes.length - 1; i >= 0; i--) {
-      const stroke = strokes[i];
+    const queryBounds = { left: x - radius, top: y - radius, right: x + radius, bottom: y + radius };
+    const { strokes: candidates, exactFilterApplied } = this.spatialIndex.query(queryBounds, this.strokes);
+    for (let i = candidates.length - 1; i >= 0; i--) {
+      const stroke = candidates[i];
       const strokeLayer = stroke.layerId ?? DEFAULT_PAGE_LAYER_ID;
       if (layerId !== undefined && strokeLayer !== layerId) continue;
       if (!this.layerManager.isEditable(stroke.layerId)) continue;
 
       const effectiveRadius = radius + this.getCachedRenderHalfWidth(stroke);
-      const bounds = this.getCachedEraseBounds(stroke);
-      if (
-        x + effectiveRadius < bounds.left ||
-        x - effectiveRadius > bounds.right ||
-        y + effectiveRadius < bounds.top ||
-        y - effectiveRadius > bounds.bottom
-      ) {
-        continue;
+      if (!exactFilterApplied) {
+        const bounds = this.getCachedEraseBounds(stroke);
+        if (
+          x + effectiveRadius < bounds.left ||
+          x - effectiveRadius > bounds.right ||
+          y + effectiveRadius < bounds.top ||
+          y - effectiveRadius > bounds.bottom
+        ) {
+          continue;
+        }
       }
 
       if (stroke.inkClip && !regionIntersects(strokeRegion(stroke), eraserCapsule({ x, y }, { x, y }, Math.max(radius, 0.01)))) {
@@ -2130,20 +2782,24 @@ export class DrawingEngine {
   findStrokesNearPoint(x: number, y: number, radius: number): string[] {
     const hits: string[] = [];
     const active = gate0Profiler.getActive('eraser-gesture');
+    const queryBounds = { left: x - radius, top: y - radius, right: x + radius, bottom: y + radius };
+    const { strokes: candidates, exactFilterApplied } = this.spatialIndex.query(queryBounds, this.strokes);
 
-    for (const stroke of this.strokes) {
+    for (const stroke of candidates) {
       gate0Profiler.increment(active, 'strokesScanned');
       if (!this.layerManager.isEditable(stroke.layerId)) continue;
       const effectiveRadius = radius + this.getCachedRenderHalfWidth(stroke);
       // Fast AABB rejection using cached stroke bounds
-      const bounds = this.getCachedEraseBounds(stroke);
-      if (
-        x + effectiveRadius < bounds.left ||
-        x - effectiveRadius > bounds.right ||
-        y + effectiveRadius < bounds.top ||
-        y - effectiveRadius > bounds.bottom
-      ) {
-        continue;
+      if (!exactFilterApplied) {
+        const bounds = this.getCachedEraseBounds(stroke);
+        if (
+          x + effectiveRadius < bounds.left ||
+          x - effectiveRadius > bounds.right ||
+          y + effectiveRadius < bounds.top ||
+          y - effectiveRadius > bounds.bottom
+        ) {
+          continue;
+        }
       }
       if (stroke.inkClip && !regionIntersects(strokeRegion(stroke), eraserCapsule({ x, y }, { x, y }, Math.max(radius, 0.01)))) continue;
       const effRadiusSq = effectiveRadius * effectiveRadius;
@@ -2204,8 +2860,10 @@ export class DrawingEngine {
     const x2 = x + width;
     const y2 = y + height;
     const hits: string[] = [];
+    const queryBounds = { left: x, top: y, right: x2, bottom: y2 };
+    const { strokes: candidates } = this.spatialIndex.query(queryBounds, this.strokes);
 
-    for (const stroke of this.strokes) {
+    for (const stroke of candidates) {
       if (!this.layerManager.isEditable(stroke.layerId)) continue;
       for (const point of stroke.points) {
         if (point.x >= x && point.x <= x2 && point.y >= y && point.y <= y2) {

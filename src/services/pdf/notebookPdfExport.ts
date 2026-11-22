@@ -417,24 +417,188 @@ function drawShape(page: PDFPage, shape: Shape, g: NotebookPageGeometry, result:
 type TextRun = { text: string; bold: boolean; italic: boolean; size: number; color: string };
 type TextLine = { runs: TextRun[]; align: 'left' | 'center' | 'right'; prefix?: string };
 
-function textLines(content: any, result: NotebookPdfExportResult, pageId: string, objectId: string): TextLine[] {
+const PDF_UNICODE_FALLBACKS: Record<string, string> = {
+  '\u221a': 'sqrt', '\u221e': 'inf', '\u03c0': 'pi', '\u03b8': 'theta',
+  '\u03b1': 'alpha', '\u03b2': 'beta', '\u03b3': 'gamma', '\u03b4': 'delta',
+  '\u0394': 'Delta', '\u03c3': 'sigma', '\u03a3': 'sum', '\u2211': 'sum',
+  '\u222b': 'int', '\u2264': '<=', '\u2265': '>=', '\u2260': '!=',
+  '\u2248': '~=', '\u2192': '->', '\u2190': '<-', '\u21d2': '=>',
+  '\u2212': '-', '\u22c5': '*', '\u00a0': ' ', '\n': ' ', '\r': '', '\t': '  ',
+};
+
+function safePdfText(font: PDFFont, raw: string): string {
+  const mapped = raw.replace(/[\u221a\u221e\u03c0\u03b8\u03b1\u03b2\u03b3\u03b4\u0394\u03c3\u03a3\u2211\u222b\u2264\u2265\u2260\u2248\u2192\u2190\u21d2\u2212\u22c5\u00a0\n\r\t]/g, ch => PDF_UNICODE_FALLBACKS[ch] ?? '');
+  try {
+    font.encodeText(mapped);
+    return mapped;
+  } catch {
+    let out = '';
+    for (const ch of mapped) {
+      try {
+        font.encodeText(ch);
+        out += ch;
+      } catch {
+        out += '?';
+      }
+    }
+    return out;
+  }
+}
+
+function readBalancedGroup(source: string, openIndex: number, openChar = '{', closeChar = '}'): { value: string; nextIndex: number } | null {
+  if (source[openIndex] !== openChar) return null;
+  let depth = 0;
+  for (let i = openIndex; i < source.length; i += 1) {
+    if (source[i] === openChar) depth += 1;
+    else if (source[i] === closeChar) {
+      depth -= 1;
+      if (depth === 0) return { value: source.slice(openIndex + 1, i), nextIndex: i + 1 };
+    }
+  }
+  return null;
+}
+
+function formatLatexSegment(input: string): string {
+  let out = '';
+  let i = 0;
+  while (i < input.length) {
+    if (input.startsWith('\\frac', i)) {
+      let cursor = i + 5;
+      while (input[cursor] === ' ') cursor += 1;
+      const numGroup = readBalancedGroup(input, cursor);
+      if (numGroup) {
+        let denStart = numGroup.nextIndex;
+        while (input[denStart] === ' ') denStart += 1;
+        const denGroup = readBalancedGroup(input, denStart);
+        if (denGroup) {
+          const num = formatLatexSegment(numGroup.value).trim();
+          const den = formatLatexSegment(denGroup.value).trim();
+          const wrapNum = /[+\-\/\s]/.test(num) && !/^\([^()]*\)$/.test(num) ? `(${num})` : num;
+          const wrapDen = /[+\-\/\s]/.test(den) && !/^\([^()]*\)$/.test(den) ? `(${den})` : den;
+          out += `${wrapNum}/${wrapDen}`;
+          i = denGroup.nextIndex;
+          continue;
+        }
+      }
+    }
+    if (input.startsWith('\\sqrt', i)) {
+      let cursor = i + 5;
+      while (input[cursor] === ' ') cursor += 1;
+      let indexPart = '';
+      if (input[cursor] === '[') {
+        const bracketGroup = readBalancedGroup(input, cursor, '[', ']');
+        if (bracketGroup) {
+          indexPart = `[${formatLatexSegment(bracketGroup.value).trim()}]`;
+          cursor = bracketGroup.nextIndex;
+          while (input[cursor] === ' ') cursor += 1;
+        }
+      }
+      const bodyGroup = readBalancedGroup(input, cursor);
+      if (bodyGroup) {
+        out += `sqrt${indexPart}(${formatLatexSegment(bodyGroup.value).trim()})`;
+        i = bodyGroup.nextIndex;
+        continue;
+      }
+    }
+    if (input[i] === '^' || input[i] === '_') {
+      const scriptOp = input[i];
+      const group = readBalancedGroup(input, i + 1);
+      if (group) {
+        const inner = formatLatexSegment(group.value).trim();
+        out += inner.length <= 1 || /^[a-z0-9]+$/i.test(inner) ? `${scriptOp}${inner}` : `${scriptOp}(${inner})`;
+        i = group.nextIndex;
+        continue;
+      }
+    }
+    if (input[i] === '\\') {
+      const cmdMatch = /^\\([a-zA-Z]+|[{}|()\[\]])/.exec(input.slice(i));
+      if (cmdMatch) {
+        const cmd = cmdMatch[1];
+        const replacements: Record<string, string> = {
+          left: '', right: '', pm: '±', times: '×', div: '÷', cdot: '·',
+          le: '<=', leq: '<=', ge: '>=', geq: '>=', neq: '!=', ne: '!=', approx: '~=',
+          to: '->', rightarrow: '->', leftarrow: '<-', Rightarrow: '=>',
+          infty: 'inf', pi: 'pi', theta: 'theta', alpha: 'alpha', beta: 'beta',
+          gamma: 'gamma', delta: 'delta', Delta: 'Delta', sigma: 'sigma', Sigma: 'sum',
+          sum: 'sum', int: 'int', boxed: '',
+        };
+        if (cmd in replacements) {
+          out += replacements[cmd];
+          i += cmdMatch[0].length;
+          if (input[i] === ' ' && /[a-zA-Z]$/.test(replacements[cmd])) {
+            out += ' ';
+            i += 1;
+          }
+          continue;
+        }
+      }
+    }
+    out += input[i];
+    i += 1;
+  }
+  return out.replace(/[{}]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function formatLatexLines(latex: string): string[] {
+  const cleaned = latex
+    .replace(/\r\n/g, '\n')
+    .replace(/\\begin\{(?:aligned|align\*?|gather\*?|cases)\}/g, '')
+    .replace(/\\end\{(?:aligned|align\*?|gather\*?|cases)\}/g, '')
+    .trim();
+  if (!cleaned) return [];
+  const rawLines = cleaned.split(/\\\\|\n/);
+  const formatted = rawLines.map(line => formatLatexSegment(line)).filter(Boolean);
+  return formatted.length > 0 ? formatted : [cleaned];
+}
+
+function textLines(content: any, result: NotebookPdfExportResult, pageId: string, objectId: string, defaultSize = 14, defaultColor = '#000000'): TextLine[] {
   const lines: TextLine[] = [];
   const walk = (node: any, prefix?: string) => {
     if (!node || typeof node !== 'object') return;
     if (['table', 'tableRow', 'tableCell', 'tableHeader', 'codeBlock', 'taskList', 'taskItem'].includes(node.type)) {
       addWarning(result, { code: 'rich-text-approximated', message: `${node.type} content was flattened for PDF export.`, pageId, objectId });
     }
+    if (node.type === 'blockMath' || node.type === 'math') {
+      const latex = typeof node.attrs?.latex === 'string' ? node.attrs.latex.trim() : '';
+      if (latex) {
+        addWarning(result, { code: 'rich-text-approximated', message: `${node.type} expression was exported as readable math text.`, pageId, objectId });
+        const mathLines = formatLatexLines(latex);
+        for (const mathLine of mathLines) {
+          lines.push({
+            runs: [{ text: mathLine, bold: false, italic: true, size: defaultSize, color: defaultColor }],
+            align: mathLines.length > 1 ? 'left' : 'center',
+            prefix,
+          });
+        }
+      }
+      return;
+    }
     if (['paragraph', 'heading', 'listItem', 'taskItem', 'codeBlock'].includes(node.type)) {
-      const runs: TextRun[] = [];
+      const align: TextLine['align'] = ['center', 'right'].includes(node.attrs?.textAlign) ? node.attrs.textAlign : 'left';
+      const baseSize = node.type === 'heading' ? Math.max(16, 26 - (node.attrs?.level ?? 1) * 3) : defaultSize;
+      let runs: TextRun[] = [];
+      let isFirstLineInBlock = true;
+      const flushLine = () => {
+        lines.push({ runs, align, prefix: isFirstLineInBlock ? prefix : undefined });
+        runs = [];
+        isFirstLineInBlock = false;
+      };
       const collect = (child: any) => {
         if (child?.type === 'text') {
           const marks = child.marks ?? []; const style = marks.find((mark: any) => mark.type === 'textStyle')?.attrs ?? {};
-          runs.push({ text: child.text ?? '', bold: marks.some((mark: any) => mark.type === 'bold'), italic: marks.some((mark: any) => mark.type === 'italic'), size: Number.parseFloat(style.fontSize) || (node.type === 'heading' ? Math.max(16, 26 - (node.attrs?.level ?? 1) * 3) : 14), color: style.color ?? '#000000' });
-        } else if (child?.type === 'hardBreak') runs.push({ text: '\n', bold: false, italic: false, size: 14, color: '#000000' });
-        else child?.content?.forEach(collect);
+          runs.push({ text: child.text ?? '', bold: marks.some((mark: any) => mark.type === 'bold'), italic: marks.some((mark: any) => mark.type === 'italic'), size: Number.parseFloat(style.fontSize) || baseSize, color: style.color ?? defaultColor });
+        } else if (child?.type === 'inlineMath' || child?.type === 'math' || child?.type === 'blockMath') {
+          const latex = typeof child.attrs?.latex === 'string' ? child.attrs.latex.trim() : '';
+          if (latex) {
+            addWarning(result, { code: 'rich-text-approximated', message: `${child.type} expression was exported as readable math text.`, pageId, objectId });
+            runs.push({ text: formatLatexLines(latex).join(' '), bold: false, italic: true, size: baseSize, color: defaultColor });
+          }
+        } else if (child?.type === 'hardBreak') {
+          flushLine();
+        } else child?.content?.forEach(collect);
       };
       node.content?.forEach(collect);
-      lines.push({ runs, align: ['center', 'right'].includes(node.attrs?.textAlign) ? node.attrs.textAlign : 'left', prefix });
+      flushLine();
       return;
     }
     if (node.type === 'bulletList' || node.type === 'orderedList') node.content?.forEach((child: any, index: number) => walk(child, node.type === 'bulletList' ? '• ' : `${index + 1}. `));
@@ -468,16 +632,24 @@ export function drawTextObject(page: PDFPage, object: TextObject, g: NotebookPag
   const inset = sticky ? 14 : 0; const width = Math.max(8, (object.width - inset * 2) * g.scaleX);
   let y = point(g, object.x, object.y + inset).y;
   const warningCount = result.warnings.length;
-  for (const line of textLines(object.content, result, pageId, object.id)) {
-    const runs = line.prefix ? [{ text: line.prefix, bold: false, italic: false, size: 14, color: '#000000' }, ...line.runs] : line.runs;
-    const lineWidth = runs.reduce((sum, run) => sum + fontFor(fonts, run).widthOfTextAtSize(run.text, run.size * g.scaleY), 0);
+  const rawMetaSize = object.metadata?.handwritingFontSize;
+  const metaSize = typeof rawMetaSize === 'number' && Number.isFinite(rawMetaSize) && rawMetaSize > 0 ? rawMetaSize : 14;
+  const metaColor = typeof object.metadata?.color === 'string' ? object.metadata.color : '#000000';
+  for (const line of textLines(object.content, result, pageId, object.id, metaSize, metaColor)) {
+    const rawRuns = line.prefix ? [{ text: line.prefix, bold: false, italic: false, size: 14, color: '#000000' }, ...line.runs] : line.runs;
+    const runs = rawRuns.map(run => {
+      const font = fontFor(fonts, run);
+      return { ...run, font, safeText: safePdfText(font, run.text) };
+    });
+    const lineWidth = runs.reduce((sum, run) => sum + run.font.widthOfTextAtSize(run.safeText, run.size * g.scaleY), 0);
     let x = (object.x + inset) * g.scaleX + (line.align === 'center' ? (width - lineWidth) / 2 : line.align === 'right' ? width - lineWidth : 0);
     const maxSize = Math.max(14, ...runs.map(run => run.size)) * g.scaleY;
     y -= maxSize;
     for (const run of runs) {
-      const size = run.size * g.scaleY; const font = fontFor(fonts, run);
-      page.drawText(run.text, { x, y, size, font, color: color(run.color) });
-      x += font.widthOfTextAtSize(run.text, size);
+      if (!run.safeText) continue;
+      const size = run.size * g.scaleY;
+      page.drawText(run.safeText, { x, y, size, font: run.font, color: color(run.color) });
+      x += run.font.widthOfTextAtSize(run.safeText, size);
     }
     y -= 3 * g.scaleY;
   }

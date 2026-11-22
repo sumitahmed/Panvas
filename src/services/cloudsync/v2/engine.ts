@@ -1,4 +1,5 @@
 import { sha256Bytes } from '../hash.ts';
+import { createSyncTimeSlicer, type SyncTimeSlicer } from '../drawingActivity.ts';
 import { contentIdentity } from './contentIdentity.ts';
 import { copyWorkspaceGraph } from './workspaceCopy.ts';
 import type { ScannedSyncEntity } from '../engine.ts';
@@ -20,12 +21,19 @@ const phase: Record<SyncEntityKind, number> = { workspace: 0, folder: 1, noteboo
  * A repair/upload invalidates the hash; failed/missing reads are never cached.
  * Mutable profile/catalog/manifest reads and ETag guards are never cached here.
  */
-function providerForCycle(provider: SyncV2Provider): SyncV2Provider & { releaseObjects(): void; prepareObjects(hashes: readonly string[]): Promise<void> } {
+function providerForCycle(
+  provider: SyncV2Provider,
+  slicer?: SyncTimeSlicer,
+): SyncV2Provider & { releaseObjects(): void; prepareObjects(hashes: readonly string[]): Promise<void> } {
   const metadata = new Map<string, Promise<{ size: number } | null>>();
   const objects = new Map<string, Promise<Uint8Array>>();
-  const validatedMetadata = (hash: string) => {
+  const gate = async () => {
+    if (slicer) await slicer.checkpoint();
+  };
+  const validatedMetadata = async (hash: string) => {
     let pending = metadata.get(hash);
     if (!pending) {
+      await gate();
       pending = provider.getObjectMetadata(hash).then(value => { if (!value) metadata.delete(hash); return value; }, error => { metadata.delete(hash); throw error; });
       metadata.set(hash, pending);
     }
@@ -34,18 +42,23 @@ function providerForCycle(provider: SyncV2Provider): SyncV2Provider & { releaseO
   return {
     async prepareObjects(hashes) {
       if (!provider.getObjectMetadataBatch || !hashes.length) return;
+      await gate();
       for (const value of await provider.getObjectMetadataBatch([...new Set(hashes)])) {
         metadata.set(value.hash, Promise.resolve({ size: value.size }));
       }
     },
     releaseObjects: () => objects.clear(),
-    readProfile: () => provider.readProfile(), writeProfile: (value, etag) => provider.writeProfile(value, etag),
-    readCatalog: () => provider.readCatalog(), writeCatalog: (value, etag) => provider.writeCatalog(value, etag),
-    readManifest: id => provider.readManifest(id), writeManifest: (id, value, etag) => provider.writeManifest(id, value, etag),
+    readProfile: async () => { await gate(); return provider.readProfile(); },
+    writeProfile: async (value, etag) => { await gate(); return provider.writeProfile(value, etag); },
+    readCatalog: async () => { await gate(); return provider.readCatalog(); },
+    writeCatalog: async (value, etag) => { await gate(); return provider.writeCatalog(value, etag); },
+    readManifest: async id => { await gate(); return provider.readManifest(id); },
+    writeManifest: async (id, value, etag) => { await gate(); return provider.writeManifest(id, value, etag); },
     getObjectMetadata: validatedMetadata,
-    getObject(hash) {
+    async getObject(hash) {
       let pending = objects.get(hash);
       if (!pending) {
+        await gate();
         pending = provider.getObject(hash).then(async bytes => {
           const proof = await validatedMetadata(hash);
           if (!proof || proof.size !== bytes.byteLength) throw v2Failure('object-download', 'object-size-mismatch', 'verify-download');
@@ -57,22 +70,51 @@ function providerForCycle(provider: SyncV2Provider): SyncV2Provider & { releaseO
     },
     async putObjectIfAbsent(hash, bytes) {
       metadata.delete(hash); objects.delete(hash);
+      await gate();
       try { return await provider.putObjectIfAbsent(hash, bytes); }
       finally { metadata.delete(hash); objects.delete(hash); }
     },
   };
 }
 
-async function mapBounded<T>(items: readonly T[], worker: (item: T) => Promise<void>, concurrency = 8): Promise<void> {
+async function mapBounded<T>(
+  items: readonly T[],
+  worker: (item: T) => Promise<void>,
+  concurrency = 4,
+  slicer?: SyncTimeSlicer,
+): Promise<void> {
   let next = 0;
   const settled = await Promise.allSettled(Array.from({ length: Math.min(concurrency, items.length) }, async () => {
     while (next < items.length) {
-      await worker(items[next++]);
-      await new Promise(resolve => setTimeout(resolve, 0));
+      const item = items[next++];
+      if (slicer) await slicer.checkpoint();
+      await worker(item);
+      if (slicer?.shouldYield()) await slicer.checkpoint();
     }
   }));
   const failed = settled.find(item => item.status === 'rejected');
   if (failed?.status === 'rejected') throw failed.reason;
+}
+
+async function mapBoundedValues<T, R>(
+  items: readonly T[],
+  worker: (item: T) => Promise<R>,
+  concurrency = 2,
+  slicer?: SyncTimeSlicer,
+): Promise<R[]> {
+  const result = new Array<R>(items.length);
+  let next = 0;
+  const settled = await Promise.allSettled(Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next++;
+      if (slicer) await slicer.checkpoint();
+      result[index] = await worker(items[index]);
+      if (slicer?.shouldYield()) await slicer.checkpoint();
+    }
+  }));
+  const failed = settled.find(item => item.status === 'rejected');
+  if (failed?.status === 'rejected') throw failed.reason;
+  return result;
 }
 
 export interface SyncV2Result {
@@ -106,12 +148,30 @@ function validManifest(value: SyncV2Manifest | null, workspaceId: string): value
     && new Set(value.records.map(keyOf)).size === value.records.length);
 }
 
-async function localRecord(entity: ScannedSyncEntity, cache: ExactPayloadHashCache): Promise<{ entity: ScannedSyncEntity; hash: string | null; bootstrapIdentityHash: string | null }> {
+async function resolveEntityBytes(entity: ScannedSyncEntity, slicer?: SyncTimeSlicer): Promise<Uint8Array | null> {
+  if (entity.tombstone) return null;
+  if (entity.bytes) return entity.bytes;
+  if (!entity.loadBytes) return null;
+  if (slicer) await slicer.checkpoint();
+  const loaded = await entity.loadBytes();
+  if (loaded) entity.bytes = loaded;
+  return loaded;
+}
+
+async function localRecord(
+  entity: ScannedSyncEntity,
+  cache: ExactPayloadHashCache,
+  slicer?: SyncTimeSlicer,
+): Promise<{ entity: ScannedSyncEntity; hash: string | null; bootstrapIdentityHash: string | null }> {
+  if (slicer?.shouldYield()) await slicer.checkpoint();
+  if (!entity.tombstone && !entity.bytes && entity.precomputedHash) {
+    return { entity, hash: entity.precomputedHash, bootstrapIdentityHash: null };
+  }
   const bootstrapIdentity = !entity.tombstone && entity.bytes
     ? semanticSystemBootstrapBytes(entity.entityType, entity.entityId, entity.bytes)
     : null;
   const [hash, bootstrapIdentityHash] = await Promise.all([
-    entity.tombstone ? null : entity.bytes ? cache.hash(`${entity.workspaceId}:${keyOf(entity)}`, entity.bytes) : null,
+    entity.tombstone ? null : entity.bytes ? cache.hash(`${entity.workspaceId}:${keyOf(entity)}`, entity.bytes, slicer) : null,
     bootstrapIdentity ? sha256Bytes(bootstrapIdentity) : null,
   ]);
   return { entity, hash, bootstrapIdentityHash };
@@ -261,8 +321,19 @@ export async function runCloudSyncV2(input: {
   assertCurrent?: () => void;
   environment?: 'desktop' | 'web';
   legacyMigrator?: () => Promise<LegacyMigrationResult>;
+  manual?: boolean;
+  slicer?: SyncTimeSlicer;
+  dirtyWorkspaceIds?: ReadonlySet<string>;
+  cleanWorkspaceRevisions?: ReadonlyMap<string, number>;
+  onWorkspaceCleanSynced?: (workspaceId: string, manifestRevision: number) => void;
 }): Promise<SyncV2Result> {
-  const cycleProvider = providerForCycle(input.provider);
+  const slicer = input.slicer ?? createSyncTimeSlicer({
+    budgetMs: 3,
+    pauseOnInteraction: input.manual !== true,
+  });
+  const ioConcurrency = input.manual === false ? 1 : 2;
+  const netConcurrency = input.manual === false ? 1 : 4;
+  const cycleProvider = providerForCycle(input.provider, slicer);
   let hashes = payloadHashes.get(input.source);
   if (!hashes || hashes.account !== input.accountIdentifier) {
     hashes = { account: input.accountIdentifier, cache: new ExactPayloadHashCache() };
@@ -339,7 +410,8 @@ export async function runCloudSyncV2(input: {
     if (localProfile && localProfile.profileId !== profile.profileId && !sameAccountProfileReplacement) return endTrace('blocked', { reason: 'profile-id-mismatch' }, blocked(result, 'profile-id-mismatch'));
 
     const catalog: SyncV2Catalog = catalogRead.value ?? { format: 'panvas-sync-v2-catalog', schemaVersion: 2, revision: 0, workspaces: [] };
-    const localIds = (await input.source.listWorkspaceIds()).filter(id => id !== 'default');
+    await slicer.checkpoint();
+    const localIds = (await input.source.listWorkspaceIds({ slicer })).filter(id => id !== 'default');
     if (localIds.some(id => !safeId(id) || !id.startsWith('ws-'))) throw v2Failure('local-scan', 'invalid-workspace-id', 'list-workspaces');
     const remoteIds = catalog.workspaces.map(item => item.workspaceId);
     const workspaceIds = [...new Set([...localIds, ...remoteIds])].sort();
@@ -353,6 +425,7 @@ export async function runCloudSyncV2(input: {
       await Promise.all(localIds.map(workspaceId => input.baselines.saveWorkspace(workspaceId, [])));
     }
     const stagedBaselines = new Map<string, SyncV2BaselineRecord[]>();
+    const pendingCleanSyncs: Array<[string, number]> = [];
     const nextCatalog = new Map(catalog.workspaces.map(item => [item.workspaceId, item]));
     let catalogChanged = !catalogRead.value;
     const copiedWorkspaces = new Map<string, ScannedSyncEntity[]>();
@@ -365,15 +438,43 @@ export async function runCloudSyncV2(input: {
       currentWorkspaceId = workspaceId;
       currentEntity = undefined;
       currentStage = 'workspace-read';
+      const cleanRevision = input.cleanWorkspaceRevisions?.get(workspaceId);
+      const workspaceResolutionsForSkip = input.resolutions?.some(item => item.workspaceId === workspaceId) ?? false;
+      if (
+        input.manual === false
+        && !sameAccountProfileReplacement
+        && localProfile?.profileId === profile.profileId
+        && cleanRevision !== undefined
+        && !input.dirtyWorkspaceIds?.has(workspaceId)
+        && nextCatalog.get(workspaceId)?.manifestRevision === cleanRevision
+        && localIds.includes(workspaceId)
+        && !workspaceResolutionsForSkip
+      ) {
+        recordWorkspaceOutcome(workspaceId, 'healthy', 'synced');
+        traceSyncStage(traceRunId, 'workspace-clean-skip', { workspace: anonymizeWorkspaceId(workspaceId), manifestRevision: cleanRevision });
+        continue;
+      }
       input.onProgress?.(`Syncing workspace ${workspaceIndex + 1} of ${workspaceIds.length}…`);
-      const [manifestRead, snapshot] = await Promise.all([
-        input.provider.readManifest(workspaceId),
+      await slicer.checkpoint();
+      const loadSnapshot = () => (
         copiedWorkspaces.has(workspaceId)
           ? Promise.resolve({ owned: copiedWorkspaces.get(workspaceId)!, all: copiedWorkspaces.get(workspaceId)! })
           : input.source.scanWorkspaceSnapshot
-            ? input.source.scanWorkspaceSnapshot(workspaceId)
-            : input.source.scanWorkspace(workspaceId).then(owned => ({ owned, all: null })),
-      ]);
+            ? input.source.scanWorkspaceSnapshot(workspaceId, { slicer })
+            : input.source.scanWorkspace(workspaceId, { slicer }).then(owned => ({ owned, all: null }))
+      );
+      let manifestRead;
+      let snapshot;
+      if (input.manual === false) {
+        manifestRead = await input.provider.readManifest(workspaceId);
+        await slicer.checkpoint();
+        snapshot = await loadSnapshot();
+      } else {
+        [manifestRead, snapshot] = await Promise.all([
+          input.provider.readManifest(workspaceId),
+          loadSnapshot(),
+        ]);
+      }
       const initialScanned = snapshot.owned;
       // A returning browser may contain rows stamped by an older local auth
       // identity (or no identity at all). Once the Drive profile is verified,
@@ -381,10 +482,11 @@ export async function runCloudSyncV2(input: {
       // stale ownership metadata from a genuine edit. Rows are still guarded
       // at apply time unless this cycle proves the cloud copy is canonical.
       let scanned = !copiedWorkspaces.has(workspaceId) && manifestRead.value && input.source.scanWorkspaceIncludingUnowned
-        ? snapshot.all ?? await input.source.scanWorkspaceIncludingUnowned(workspaceId)
+        ? snapshot.all ?? await input.source.scanWorkspaceIncludingUnowned(workspaceId, { slicer })
         : initialScanned;
       if (manifestRead.value && !validManifest(manifestRead.value, workspaceId)) throw v2Failure('manifest-validation', 'invalid-manifest', 'read-manifest');
       const manifest = manifestRead.value;
+      await slicer.checkpoint();
       const baselineRecords = await input.baselines.loadWorkspace(workspaceId);
       traceSyncStage(traceRunId, 'workspace-read', { workspace: anonymizeWorkspaceId(workspaceId), manifestRevision: manifest?.revision, remoteRecords: manifest?.records.length ?? 0, localEntities: scanned.length, baselineRecords: baselineRecords.length });
       const remoteByKey = new Map((manifest?.records ?? []).map(record => [keyOf(record), record]));
@@ -406,7 +508,7 @@ export async function runCloudSyncV2(input: {
         continue;
       }
       if (!manifest && localIds.includes(workspaceId) && scanned.length === 0) throw v2Failure('local-scan', 'local-workspace-unavailable', 'scan-workspace');
-      const localPairs = await Promise.all(scanned.map(entity => localRecord(entity, hashCache)));
+      const localPairs = await mapBoundedValues(scanned, entity => localRecord(entity, hashCache, slicer), ioConcurrency, slicer);
       const localByKey = new Map(localPairs.map(pair => [keyOf(pair.entity), pair]));
       const currentOwnedKeys = new Set(initialScanned.filter(entity => entity.ownership === 'current').map(keyOf));
       const baselineByKey = new Map(baselineRecords.map(record => [`${record.entityKind}:${record.entityId}`, record]));
@@ -498,15 +600,16 @@ export async function runCloudSyncV2(input: {
           if (await input.provider.getObjectMetadata(remote.hash!)) return;
           currentEntity = remote;
           const local = localByKey.get(keyOf(remote));
+          const localBytes = local && !local.entity.tombstone ? await resolveEntityBytes(local.entity, slicer) : null;
           // Any device may restore an interrupted upload when it has the
           // exact immutable bytes named by the manifest. This is safe even
           // for a browser replica because the hash proves it is not making a
           // stale copy authoritative.
-          if (local && !local.entity.tombstone && local.hash === remote.hash && local.entity.bytes) {
-            const put = await input.provider.putObjectIfAbsent(local.hash!, local.entity.bytes);
+          if (local && !local.entity.tombstone && local.hash === remote.hash && localBytes) {
+            const put = await input.provider.putObjectIfAbsent(local.hash!, localBytes);
             if (put === 'uploaded') result.uploaded += 1;
             const metadata = await input.provider.getObjectMetadata(local.hash!);
-            if (!metadata || metadata.size !== local.entity.bytes.byteLength) {
+            if (!metadata || metadata.size !== localBytes.byteLength) {
               throw new CloudOperationError('sync', {
                 stage: 'object-upload',
                 reason: 'missing-object-repair-failed',
@@ -530,7 +633,7 @@ export async function runCloudSyncV2(input: {
               retryable: false,
             });
           }
-          if (!local || local.entity.tombstone || !local.hash || !local.entity.bytes) {
+          if (!local || local.entity.tombstone || !local.hash || !localBytes) {
             throw new CloudOperationError('sync', {
               stage: 'object-download',
               reason: 'remote-object-missing',
@@ -542,10 +645,10 @@ export async function runCloudSyncV2(input: {
             });
           }
 
-          const put = await input.provider.putObjectIfAbsent(local.hash, local.entity.bytes);
+          const put = await input.provider.putObjectIfAbsent(local.hash, localBytes);
           if (put === 'uploaded') result.uploaded += 1;
           const metadata = await input.provider.getObjectMetadata(local.hash);
-          if (!metadata || metadata.size !== local.entity.bytes.byteLength) {
+          if (!metadata || metadata.size !== localBytes.byteLength) {
             throw new CloudOperationError('sync', {
               stage: 'object-upload',
               reason: 'missing-object-repair-failed',
@@ -572,7 +675,7 @@ export async function runCloudSyncV2(input: {
             ...(remote.kind === 'asset' ? { encoding: 'asset-envelope-v1' as const } : {}),
           });
           repairedMissingRecords += 1;
-        });
+        }, netConcurrency, slicer);
       }
       // A profile may already have been persisted by the explicit account
       // adoption handoff before its first baseline commits. An empty baseline
@@ -607,8 +710,9 @@ export async function runCloudSyncV2(input: {
         if (!local.entity.tombstone && local.hash !== remote.hash) {
           const bytes = await readRemoteObjectWithExactReplica(input.provider, remote.hash!, { workspaceId, entityKind: remote.kind, entityId: remote.id }, local);
           if (await sha256Bytes(bytes) !== remote.hash) throw v2Failure('object-download', 'object-integrity-failed', 'download', remote.kind);
-          const localContent = await contentIdentity(remote.kind, local.entity.bytes!);
-          const remoteContent = await contentIdentity(remote.kind, bytes);
+          const localBytes = await resolveEntityBytes(local.entity, slicer);
+          const localContent = localBytes ? await contentIdentity(remote.kind, localBytes, slicer) : null;
+          const remoteContent = await contentIdentity(remote.kind, bytes, slicer);
           if (localContent === null || remoteContent === null || localContent !== remoteContent) { hasSelectedDivergence = true; break; }
         }
       }
@@ -659,12 +763,13 @@ export async function runCloudSyncV2(input: {
           const remoteBytes = remote && !remote.tombstone
             ? await readRemoteObjectWithExactReplica(input.provider, remote.hash!, { workspaceId, entityKind: remote.kind, entityId: remote.id }, local) : new Uint8Array();
           if (remote && !remote.tombstone && await sha256Bytes(remoteBytes) !== remote.hash) throw v2Failure('object-download', 'object-integrity-failed', 'download', remote.kind);
+          const localChoiceBytes = local && !local.entity.tombstone ? await resolveEntityBytes(local.entity, slicer) : null;
           await input.conflictStore.preserve({
             conflictId: `resolution:${profile.profileId}:${workspaceId}:${key}:${local?.hash ?? 'absent'}:${remote?.hash ?? 'deleted'}`,
             profileId: profile.profileId, workspaceId, entityKind: remote?.kind ?? local!.entity.entityType,
             entityId: remote?.id ?? local!.entity.entityId, parentId: remote?.parentId ?? local?.entity.parentId ?? null,
             localHash: local?.hash ?? 'tombstone', remoteHash: remote?.hash ?? 'tombstone',
-            localBytes: local?.entity.bytes ?? new Uint8Array(), remoteBytes: choice === 'cloud' ? undefined : remoteBytes,
+            localBytes: localChoiceBytes ?? new Uint8Array(), remoteBytes: choice === 'cloud' ? undefined : remoteBytes,
             resolution: choice, createdAt: Date.now(), resolvedAt: Date.now(),
           });
           preservedDuringAdoption.add(key);
@@ -672,10 +777,10 @@ export async function runCloudSyncV2(input: {
             const record: SyncV2Record = local
               ? { kind: local.entity.entityType, id: local.entity.entityId, parentId: local.entity.parentId, hash: local.hash, baseHash: remote?.hash ?? null, tombstone: local.entity.tombstone, ...(local.entity.entityType === 'asset' ? { encoding: 'asset-envelope-v1' as const } : {}) }
               : { ...remote!, hash: null, baseHash: remote!.hash, tombstone: true };
-            uploads.push({ record, bytes: local?.entity.bytes ?? null });
+            uploads.push({ record, bytes: localChoiceBytes });
           } else if (remote && (!remote.tombstone || local)) downloads.push({ record: remote, bytes: remoteBytes });
           else if (local) downloads.push({ record: { kind: local.entity.entityType, id: local.entity.entityId, parentId: local.entity.parentId, hash: null, baseHash: null, tombstone: true }, bytes: new Uint8Array() });
-        }, 6);
+        }, netConcurrency, slicer);
       } else {
 
       await mapBounded(keys, async key => {
@@ -712,7 +817,8 @@ export async function runCloudSyncV2(input: {
           // The upload must carry the record's actual tombstone state: a
           // locally deleted record that was never published is a tombstone
           // upload (null hash), never a live record with a null hash.
-          uploads.push({ record: { kind: local.entity.entityType, id: local.entity.entityId, parentId: local.entity.parentId, hash: local.hash, baseHash: base?.baseHash ?? null, tombstone: local.entity.tombstone, ...(local.entity.entityType === 'asset' && !local.entity.tombstone ? { encoding: 'asset-envelope-v1' as const } : {}) }, bytes: local.entity.bytes });
+          const uploadBytes = local.entity.tombstone ? null : await resolveEntityBytes(local.entity, slicer);
+          uploads.push({ record: { kind: local.entity.entityType, id: local.entity.entityId, parentId: local.entity.parentId, hash: local.hash, baseHash: base?.baseHash ?? null, tombstone: local.entity.tombstone, ...(local.entity.entityType === 'asset' && !local.entity.tombstone ? { encoding: 'asset-envelope-v1' as const } : {}) }, bytes: uploadBytes });
           return;
         }
         if (!local && remote) {
@@ -726,14 +832,15 @@ export async function runCloudSyncV2(input: {
         const localMatchesRemote = local.entity.tombstone === remote.tombstone && (remote.tombstone || local.hash === remote.hash);
         if (localMatchesRemote) { nextBaselines.set(key, baselineFor(remote, local.hash, manifest!.revision)); return; }
 
+        const localBytesForDiff = !local.entity.tombstone ? await resolveEntityBytes(local.entity, slicer) : null;
         // Even with an incomplete baseline, identical document content is
         // proof of convergence. Browser ownership/bookkeeping bytes need not
         // match the desktop wire hash. Do this BEFORE the missing-base branch.
-        if (!base && !local.bootstrapIdentityHash && !local.entity.tombstone && local.entity.bytes && !remote.tombstone) {
+        if (!base && !local.bootstrapIdentityHash && !local.entity.tombstone && localBytesForDiff && !remote.tombstone) {
           const bytes = await readRemoteObjectWithExactReplica(input.provider, remote.hash!, { workspaceId, entityKind: remote.kind, entityId: remote.id }, local);
           if (await sha256Bytes(bytes) !== remote.hash) throw v2Failure('object-download', 'object-integrity-failed', 'download', remote.kind);
-          const localContent = await contentIdentity(remote.kind, local.entity.bytes);
-          if (localContent !== null && localContent === await contentIdentity(remote.kind, bytes)) {
+          const localContent = await contentIdentity(remote.kind, localBytesForDiff, slicer);
+          if (localContent !== null && localContent === await contentIdentity(remote.kind, bytes, slicer)) {
             nextBaselines.set(key, baselineFor(remote, local.hash, manifest!.revision));
             return;
           }
@@ -745,12 +852,12 @@ export async function runCloudSyncV2(input: {
         // treating the missing baseline as a two-sided edit. This is the
         // returning-browser case: local content is unchanged, so the remote
         // device version can be downloaded safely.
-        if (!base && remote.baseHash && !local.entity.tombstone && local.entity.bytes
+        if (!base && remote.baseHash && !local.entity.tombstone && localBytesForDiff
           && await input.provider.getObjectMetadata(remote.baseHash)) {
-          const localContent = await contentIdentity(remote.kind, local.entity.bytes);
+          const localContent = await contentIdentity(remote.kind, localBytesForDiff, slicer);
           const historicalBytes = await readRemoteObjectWithExactReplica(input.provider, remote.baseHash, { workspaceId, entityKind: remote.kind, entityId: remote.id }, local);
           if (await sha256Bytes(historicalBytes) !== remote.baseHash) throw v2Failure('object-download', 'object-integrity-failed', 'download', remote.kind);
-          const historicalContent = await contentIdentity(remote.kind, historicalBytes);
+          const historicalContent = await contentIdentity(remote.kind, historicalBytes, slicer);
           if (localContent !== null && historicalContent !== null && localContent === historicalContent) {
             if (remote.tombstone) downloads.push({ record: remote, bytes: new Uint8Array() });
             else {
@@ -781,13 +888,13 @@ export async function runCloudSyncV2(input: {
         // Existing replicas have exact-byte baselines. Reading the immutable
         // baseline object lets us distinguish a real offline edit from local
         // bookkeeping without discarding those baselines or overwriting edits.
-        if (base && !base.tombstone && base.baseHash && !local.entity.tombstone && local.entity.bytes
+        if (base && !base.tombstone && base.baseHash && !local.entity.tombstone && localBytesForDiff
           && await input.provider.getObjectMetadata(base.baseHash)) {
-          const localContent = await contentIdentity(remote.kind, local.entity.bytes);
+          const localContent = await contentIdentity(remote.kind, localBytesForDiff, slicer);
           const readContent = async (hash: string) => {
             const bytes = await readRemoteObjectWithExactReplica(input.provider, hash, { workspaceId, entityKind: remote.kind, entityId: remote.id }, local);
             if (await sha256Bytes(bytes) !== hash) throw v2Failure('object-download', 'object-integrity-failed', 'download', remote.kind);
-            return contentIdentity(remote.kind, bytes);
+            return contentIdentity(remote.kind, bytes, slicer);
           };
           if (localContent !== null) {
             if (base.localContentHash) localMatchesBase ||= await sha256Bytes(new TextEncoder().encode(localContent)) === base.localContentHash;
@@ -815,7 +922,7 @@ export async function runCloudSyncV2(input: {
         } else if (base && !localMatchesBase && remoteMatchesBase) {
           const tombstoneValid = !local.entity.tombstone || base.baseHash !== null;
           if (!tombstoneValid) result.conflicts.push({ workspaceId, kind: local.entity.entityType, id: local.entity.entityId });
-          else uploads.push({ record: { kind: local.entity.entityType, id: local.entity.entityId, parentId: local.entity.parentId, hash: local.hash, baseHash: base.baseHash, tombstone: local.entity.tombstone, ...(local.entity.entityType === 'asset' && !local.entity.tombstone ? { encoding: 'asset-envelope-v1' as const } : {}) }, bytes: local.entity.bytes });
+          else uploads.push({ record: { kind: local.entity.entityType, id: local.entity.entityId, parentId: local.entity.parentId, hash: local.hash, baseHash: base.baseHash, tombstone: local.entity.tombstone, ...(local.entity.entityType === 'asset' && !local.entity.tombstone ? { encoding: 'asset-envelope-v1' as const } : {}) }, bytes: localBytesForDiff });
         } else {
           result.conflicts.push({ workspaceId, kind: local.entity.entityType, id: local.entity.entityId });
         }
@@ -823,7 +930,7 @@ export async function runCloudSyncV2(input: {
           if (error instanceof CloudOperationError) throw new CloudOperationError(error.code, { ...error.diagnostic, workspaceId, entityKind: remote?.kind ?? local?.entity.entityType, entityId: remote?.id ?? local?.entity.entityId });
           throw error;
         }
-      }, 4);
+      }, netConcurrency, slicer);
       }
 
       if (result.conflicts.some(conflict => conflict.workspaceId === workspaceId)) {
@@ -854,7 +961,7 @@ export async function runCloudSyncV2(input: {
             const metadata = await input.provider.getObjectMetadata(upload.record.hash!);
             if (!metadata || metadata.size !== upload.bytes!.byteLength) throw v2Failure('object-upload', 'uploaded-object-unavailable', 'verify-upload', upload.record.kind);
           }
-        }, 4);
+        }, netConcurrency, slicer);
       }
       for (const upload of uploads) nextRecords.set(keyOf(upload.record), upload.record);
 
@@ -898,17 +1005,19 @@ export async function runCloudSyncV2(input: {
           // remains a hard failure; guessing would overwrite a newer remote
           // version or hide a genuine multi-device conflict.
           const local = localByKey.get(keyOf(record));
-          if (!local || local.entity.tombstone || local.hash !== record.hash || !local.entity.bytes) {
+          const localBytes = local && !local.entity.tombstone ? await resolveEntityBytes(local.entity, slicer) : null;
+          if (!local || local.entity.tombstone || local.hash !== record.hash || !localBytes) {
             throw new CloudOperationError('sync', { stage: 'manifest-validation', reason: 'manifest-object-unavailable', operation: 'verify-object', workspaceId, entityKind: record.kind, entityId: record.id, retryable: false });
           }
           currentStage = 'object-upload';
-          const put = await input.provider.putObjectIfAbsent(record.hash!, local.entity.bytes);
+          const put = await input.provider.putObjectIfAbsent(record.hash!, localBytes);
           if (put === 'uploaded') result.uploaded += 1;
           if (!(await input.provider.getObjectMetadata(record.hash!))) throw new CloudOperationError('sync', { stage: 'manifest-validation', reason: 'manifest-object-repair-failed', operation: 'verify-object', workspaceId, entityKind: record.kind, entityId: record.id, retryable: false });
-        });
+        }, netConcurrency, slicer);
       }
 
       if (manifestChanged && committedManifest) {
+        await slicer.checkpoint();
         currentEntity = undefined;
         currentStage = 'manifest-write';
         assertCurrent();
@@ -974,13 +1083,17 @@ export async function runCloudSyncV2(input: {
         currentStage = 'local-recovery-backup';
         assertCurrent();
         const local = localByKey.get(keyOf(download.record));
-        if (local?.entity.bytes && local.hash && !local.entity.tombstone && !preservedDuringAdoption.has(keyOf(download.record))) {
+        const localRecoveryBytes = local && local.hash && !local.entity.tombstone && !preservedDuringAdoption.has(keyOf(download.record))
+          ? await resolveEntityBytes(local.entity, slicer)
+          : null;
+        if (local && localRecoveryBytes && local.hash && !local.entity.tombstone && !preservedDuringAdoption.has(keyOf(download.record))) {
           // Durable recovery copy BEFORE replacement. Proven unchanged bytes
           // are not a user conflict, so this archive does not block syncing.
-          await input.conflictStore.preserve({ conflictId: `recovery:${profile.profileId}:${workspaceId}:${keyOf(download.record)}:${local.hash}:${download.record.hash ?? 'deleted'}`, profileId: profile.profileId, workspaceId, entityKind: local.entity.entityType, entityId: local.entity.entityId, parentId: local.entity.parentId, localHash: local.hash, remoteHash: download.record.hash ?? 'tombstone', localBytes: local.entity.bytes, createdAt: Date.now(), resolvedAt: Date.now() });
+          await input.conflictStore.preserve({ conflictId: `recovery:${profile.profileId}:${workspaceId}:${keyOf(download.record)}:${local.hash}:${download.record.hash ?? 'deleted'}`, profileId: profile.profileId, workspaceId, entityKind: local.entity.entityType, entityId: local.entity.entityId, parentId: local.entity.parentId, localHash: local.hash, remoteHash: download.record.hash ?? 'tombstone', localBytes: localRecoveryBytes, createdAt: Date.now(), resolvedAt: Date.now() });
         }
       }
       currentStage = 'local-record-apply';
+      await slicer.checkpoint();
       const workspaceHasConflicts = result.conflicts.some(conflict => conflict.workspaceId === workspaceId);
       const hasStaleOwnershipDownload = downloads.some(download => {
         const local = localByKey.get(keyOf(download.record));
@@ -996,7 +1109,7 @@ export async function runCloudSyncV2(input: {
         // must not participate in the optimistic edit check before native
         // reconstruction creates the canonical workspace directory.
         const expected = recoveryRoot ? scanned.filter(entity => entity !== recoveryRoot) : scanned;
-        const applyResult = await input.adapter.applyWorkspace({ workspaceId, expected, expectedHashes: new Map([...localByKey].map(([key, local]) => [key, local.hash])), downloads: downloads.map(item => ({ record: item.record, bytes: item.record.tombstone ? null : item.bytes })), allowStaleOwnershipRepair, assertCurrent });
+        const applyResult = await input.adapter.applyWorkspace({ workspaceId, expected, expectedHashes: new Map([...localByKey].map(([key, local]) => [key, local.hash])), downloads: downloads.map(item => ({ record: item.record, bytes: item.record.tombstone ? null : item.bytes })), allowStaleOwnershipRepair, assertCurrent, slicer });
         const adapterSkipped = applyResult?.skipped ?? [];
         for (const skipped of adapterSkipped) {
           // The adapter could not resolve this record's parent; preserve its
@@ -1021,6 +1134,7 @@ export async function runCloudSyncV2(input: {
         }
         result.downloaded += downloads.length - adapterSkipped.length;
       } else for (const download of downloads) {
+        await slicer.checkpoint();
         currentEntity = download.record;
         assertCurrent();
         await input.adapter.applyRecord({ workspaceId, record: download.record, bytes: download.record.tombstone ? null : download.bytes, allowStaleOwnershipRepair });
@@ -1030,8 +1144,9 @@ export async function runCloudSyncV2(input: {
         currentStage = 'local-baseline-rebuild';
         // Only applied downloads need transformed replica bytes. For no-op and
         // upload-only runs, bless the captured upload hash, never a fresh edit.
-        const applied = downloads.length && input.source.scanFreshWorkspace ? new Map((await input.source.scanFreshWorkspace(workspaceId)).map(entity => [keyOf(entity), entity])) : null;
+        const applied = downloads.length && input.source.scanFreshWorkspace ? new Map((await input.source.scanFreshWorkspace(workspaceId, { slicer })).map(entity => [keyOf(entity), entity])) : null;
         for (const record of committedManifest.records) {
+          if (slicer.shouldYield()) await slicer.checkpoint();
           // Dangling records were preserved, not applied: leave them without a
           // baseline so a later run can retry them once the remote heals.
           if (unappliedKeys.has(keyOf(record))) continue;
@@ -1043,8 +1158,8 @@ export async function runCloudSyncV2(input: {
           // Capture transformed download bytes, never bless an edit made
           // during upload as already synchronized.
           if (downloaded && replica?.bytes && !replica.tombstone) {
-            const identity = await contentIdentity(record.kind, replica.bytes);
-            if (identity !== null && identity === await contentIdentity(record.kind, downloaded.bytes)) {
+            const identity = await contentIdentity(record.kind, replica.bytes, slicer);
+            if (identity !== null && identity === await contentIdentity(record.kind, downloaded.bytes, slicer)) {
               baseline.localHash = await sha256Bytes(replica.bytes);
               baseline.localContentHash = await sha256Bytes(new TextEncoder().encode(identity));
             }
@@ -1063,6 +1178,9 @@ export async function runCloudSyncV2(input: {
         }
       }
       recordWorkspaceOutcome(workspaceId, workspaceClassification, 'synced');
+      if (workspaceClassification === 'healthy' && committedManifest) {
+        pendingCleanSyncs.push([workspaceId, committedManifest.revision]);
+      }
       traceSyncStage(traceRunId, 'workspace-done', { workspace: anonymizeWorkspaceId(workspaceId), classification: workspaceClassification, downloads: downloads.length, uploads: uploads.length });
       } catch (error) {
         // Provider/account failures must still stop the run. Workspace-scoped
@@ -1127,6 +1245,9 @@ export async function runCloudSyncV2(input: {
     assertCurrent();
     await input.baselines.saveProfile({ profileId: profile.profileId, accountIdentifier: input.accountIdentifier });
     for (const [workspaceId, records] of stagedBaselines) { assertCurrent(); await input.baselines.saveWorkspace(workspaceId, records); }
+    for (const [cleanWorkspaceId, cleanRevision] of pendingCleanSyncs) {
+      input.onWorkspaceCleanSynced?.(cleanWorkspaceId, cleanRevision);
+    }
     const reviewRequired = await input.conflictStore.hasUnresolved(profile.profileId);
     const workspaceReviewRequired = result.workspaceOutcomes.some(outcome => outcome.classification === 'orphaned' || outcome.classification === 'ambiguous' || outcome.classification === 'conflict');
     input.onProgress?.(reviewRequired || workspaceReviewRequired ? 'Synced - changes need review' : 'Up to date');

@@ -38,9 +38,11 @@ test('font default does not rewrite unrelated objects and all notebook painters 
   const engine = engineFixture(); engine.texts.addText({ id: 'other', type: 'text', createdAt: 1, x: 0, y: 0, width: 100, content: { type: 'doc' } });
   applyNotebookTextFont(engine as any, "'Kalam', cursive");
   assert.equal(engine.texts.getDefaultFontFamily(), "'Kalam', cursive"); assert.equal(engine.texts.getTexts()[0].fontFamily, undefined);
-  for (const file of ['FloatingTextEditor.tsx', 'StaticTextPreview.tsx', 'InactivePagePreview.tsx']) {
+  for (const file of ['FloatingTextEditor.tsx', 'StaticTextPreview.tsx']) {
     const source = await readFile(`src/components/notebook/${file}`, 'utf8'); assert.match(source, /\.\.\.textObjectStyle\(object\)/);
   }
+  const inactivePreviewSource = await readFile('src/components/notebook/InactivePagePreview.tsx', 'utf8');
+  assert.match(inactivePreviewSource, /<StaticTextPreview/);
   assert.match(await readFile('src/components/notebook/engine/InputManager.ts', 'utf8'), /fontFamily: this.textManager.getDefaultFontFamily\(\)/);
   assert.equal(textObjectStyle(engine.texts.getTexts()[0]).fontFamily, 'Inter, sans-serif');
 });

@@ -10,6 +10,7 @@ export interface CanvasGestureRecognition {
   y: number;
   width: number;
   height: number;
+  rotation?: number;
   points: StrokePoint[];
   snapped: boolean;
 }
@@ -295,13 +296,14 @@ export function recognizeCanvasGesture(
   if (diamond) return diamond;
 
   const rough = recognizeRoughShape(points, snapEqualSides);
-  if (rough.isShape && rough.shapeType) {
+  if (rough.isShape && (rough.shapeType === 'rectangle' || rough.shapeType === 'ellipse')) {
     return {
       type: rough.shapeType,
       x: rough.x,
       y: rough.y,
       width: rough.width,
       height: rough.height,
+      rotation: rough.rotation,
       points,
       snapped: rough.snapped,
     };
@@ -353,6 +355,7 @@ export function createExcalidrawShapeSkeleton(
     y: recognition.y,
     width: recognition.width,
     height: recognition.height,
+    ...(recognition.rotation ? { angle: (recognition.rotation * Math.PI) / 180 } : {}),
     ...common,
   };
 }
