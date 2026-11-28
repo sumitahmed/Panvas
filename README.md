@@ -209,3 +209,18 @@ Please report security vulnerabilities privately via [GitHub Security Advisories
 
 Panvas is licensed under the [MIT License](LICENSE).  
 Third-party notices and licenses are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+---
+
+## Support the project
+
+If this project is useful to you, consider supporting its continued development.
+
+<p>
+  <a href="https://github.com/sponsors/sumitahmed">
+    <img src="https://img.shields.io/badge/GitHub_Sponsors-Sponsor_this_project-DB61A2?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="GitHub Sponsors" />
+  </a>
+  <a href="https://buymeacoffee.com/sumitahmed">
+    <img src="https://img.shields.io/badge/Buy_Me_a_Coffee-Support_development-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black" alt="Buy Me a Coffee" />
+  </a>
+</p>
